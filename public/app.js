@@ -414,7 +414,8 @@ function focusNext(r, dir) {
   // glide to the next space (rather than jumping) so you can see everything you pass on the way
   const host = $("#pages"), hb = host.getBoundingClientRect(), tb = ta.getBoundingClientRect();
   const target = clamp(host.scrollTop + tb.top - hb.top - host.clientHeight * 0.35, 0, host.scrollHeight - host.clientHeight);
-  glideTo(host, target);
+  if (dir > 0) glideTo(host, target);                 // Tab glides forward
+  else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }   // Shift+Tab jumps straight back
 }
 let glideRaf = 0;
 function glideTo(host, target) {
