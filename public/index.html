@@ -18,15 +18,19 @@
       <div><h1>TypePDF</h1><p>Answer any PDF paper: type on the answer lines, write with a pen, export a filled-in PDF.</p></div>
     </header>
     <div class="acct" id="acct"></div>
+    <label class="drop" id="drop" for="file">
+      <input type="file" id="file" accept="application/pdf,.pdf,.typepdf,.paperwork,.json" hidden>
+      <strong>Open a PDF</strong>
+      <span>Drop a file here or click to choose. Backups (<em>.typepdf</em>) open here too.</span>
+    </label>
     <div class="openrow">
-      <label class="bigbtn primary" for="file"><input type="file" id="file" accept="application/pdf,.pdf,.typepdf,.paperwork,.json" hidden>Open a PDF</label>
       <button class="bigbtn" id="pasteBtn" type="button">Paste PDF</button>
       <form class="linkrow" id="linkForm">
         <input id="linkIn" type="url" placeholder="…or paste a link to a PDF" aria-label="Link to a PDF">
         <button type="submit">Open link</button>
       </form>
     </div>
-    <p class="privacy">You can also drop a PDF anywhere on this page. Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers are kept in your account and sync live between your devices.</p>
+    <p class="privacy">Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers are kept in your account and sync live between your devices.</p>
     <div class="storage" id="storage" hidden><div class="sbar" id="storageBar"><i></i></div><span id="storageTxt"></span></div>
     <section id="recentWrap" class="lib">
       <div class="libbar">

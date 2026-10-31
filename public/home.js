@@ -6,7 +6,8 @@ const ago = t => { if (!t) return ""; const s = (Date.now() - t) / 1000; if (s <
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const hexId = () => [...crypto.getRandomValues(new Uint8Array(12))].map(b => b.toString(16).padStart(2, "0")).join("");
 const signedIn = () => !!(window.Sync && Sync.user);
-let prefs = { sort: "opened", filter: "all" }; try { prefs = { ...prefs, ...JSON.parse(localStorage.getItem("homePrefs") || "{}") }; } catch (e) {}
+let prefs = { sort: "opened", filter: "all", open: {} }; try { prefs = { ...prefs, ...JSON.parse(localStorage.getItem("homePrefs") || "{}") }; } catch (e) {}
+prefs.open ||= {};
 function savePrefs() { try { localStorage.setItem("homePrefs", JSON.stringify(prefs)); } catch (e) {} }
 
 // ---------------- data ----------------
@@ -73,15 +74,14 @@ async function renderHomeList() {
   $("#sortSel").value = prefs.sort; $("#filterSel").value = prefs.filter;
   const bin = prefs.filter === "bin";
   const folderPath = id => { const out = []; let f = Home.folders.find(x => x.id === id); let guard = 0; while (f && guard++ < 50) { out.unshift(f); f = Home.folders.find(x => x.id === f.parent); } return out; };
-  // breadcrumbs
+  // heading: drop a paper here to take it out of every folder
   const crumbs = $("#crumbs"); crumbs.innerHTML = "";
-  const addCrumb = (label, id) => { const b = document.createElement("button"); b.textContent = label; b.className = "crumb"; b.onclick = () => { Home.folder = id; renderHomeList(); }; dropTarget(b, id); crumbs.appendChild(b); };
-  addCrumb(bin ? "Bin" : "All papers", null);
-  if (!bin && !q) for (const f of folderPath(Home.folder)) { crumbs.append(" › "); addCrumb(f.name, f.id); }
+  const top = document.createElement("span"); top.className = "crumb"; top.textContent = bin ? "Bin" : "All papers";
+  if (!bin) { top.title = "Drop a paper here to move it out of its folder"; dropTarget(top, null); }
+  crumbs.appendChild(top);
   // which papers to show
   let list = Home.entries.filter(e => bin ? !!e.deleted : !e.deleted);
   if (q) list = list.filter(e => (e.name || "").toLowerCase().includes(q));
-  else if (!bin) list = list.filter(e => (e.folder || null) === Home.folder || (e.folder && !Home.folders.some(f => f.id === e.folder) && Home.folder === null));
   const prog = e => e.total ? (e.filled || 0) / e.total : 0;
   if (prefs.filter === "star") list = list.filter(e => e.star);
   if (prefs.filter === "flag") list = list.filter(e => e.flags > 0);
@@ -90,17 +90,30 @@ async function renderHomeList() {
   if (prefs.filter === "done") list = list.filter(e => e.total && e.filled >= e.total);
   const cmp = { opened: (a, b) => Math.max(b.opened || 0, b.updated || 0) - Math.max(a.opened || 0, a.updated || 0), updated: (a, b) => (b.updated || 0) - (a.updated || 0), name: (a, b) => (a.name || "").localeCompare(b.name || "", undefined, { numeric: true }), size: (a, b) => (b.size || 0) - (a.size || 0), progress: (a, b) => prog(b) - prog(a) }[prefs.sort];
   list.sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0) || cmp(a, b));
-  // folders in this folder
   const fl = $("#folderList"); fl.innerHTML = "";
-  if (!q && !bin && prefs.filter === "all") {
-    const sub = Home.folders.filter(f => (f.parent || null) === Home.folder).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-    for (const f of sub) fl.appendChild(folderRow(f));
-  }
   const ul = $("#recent"); ul.innerHTML = "";
-  for (const e of list) ul.appendChild(paperRow(e, q ? folderPath(e.folder).map(f => f.name).join(" › ") : ""));
+  const tree = !q && !bin && prefs.filter === "all";
+  if (tree) {
+    // one list: folders as an indented tree you can open and close, papers inside their folder
+    const known = new Set(Home.folders.map(f => f.id));
+    const inFolder = id => list.filter(e => (known.has(e.folder) ? e.folder : null) === id);
+    const walk = (parent, depth) => {
+      for (const f of Home.folders.filter(f => (f.parent || null) === parent).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))) {
+        const open = !!prefs.open[f.id];
+        ul.appendChild(folderRow(f, depth, open));
+        if (open) {
+          const before = ul.children.length;
+          walk(f.id, depth + 1);
+          if (ul.children.length === before) { const li = document.createElement("li"); li.className = "emptyfolder"; li.style.marginLeft = (depth + 1) * 22 + "px"; li.textContent = "Empty — drag papers here, or use Move to…"; ul.appendChild(li); }
+        }
+      }
+      for (const e of inFolder(parent)) { const li = paperRow(e, ""); li.style.marginLeft = depth * 22 + "px"; ul.appendChild(li); }
+    };
+    walk(null, 0);
+  } else for (const e of list) ul.appendChild(paperRow(e, q ? folderPath(e.folder).map(f => f.name).join(" › ") : ""));
   const any = Home.entries.length || Home.folders.length;
   $("#recentWrap").hidden = !any && !signedIn();
-  $("#emptyLib").textContent = list.length || fl.children.length ? "" : bin ? "The bin is empty. Papers you delete stay here for 30 days." : q ? "No papers match that search." : prefs.filter !== "all" ? "Nothing matches this filter." : Home.folder ? "This folder is empty. Open a PDF while you're here, or drag papers onto it." : "No papers yet. Open a PDF to start.";
+  $("#emptyLib").textContent = ul.children.length ? "" : bin ? "The bin is empty. Papers you delete stay here for 30 days." : q ? "No papers match that search." : prefs.filter !== "all" ? "Nothing matches this filter." : "No papers yet. Open a PDF to start.";
   $("#emptyBin").hidden = !bin || !list.length;
 }
 function folderStats(id) {
@@ -109,12 +122,13 @@ function folderStats(id) {
   const docs = Home.entries.filter(e => !e.deleted && ids.has(e.folder));
   return { n: docs.length, size: docs.reduce((s, e) => s + (e.size || 0), 0), sub: ids.size - 1 };
 }
-function folderRow(f) {
-  const li = document.createElement("li"); li.className = "folder";
+function folderRow(f, depth = 0, open = false) {
+  const li = document.createElement("li"); li.className = "folder" + (open ? " open" : ""); li.style.marginLeft = depth * 22 + "px";
   const st = folderStats(f.id);
-  li.innerHTML = `<button class="fopen" aria-label="Open folder ${esc(f.name)}"><svg viewBox="0 0 24 24" class="ficon"><path d="M3 6h7l2 2h9v11H3z"/></svg><span class="nm"><b>${esc(f.name)}</b><small>${st.n} paper${st.n === 1 ? "" : "s"}${st.sub ? ` · ${st.sub} folder${st.sub === 1 ? "" : "s"}` : ""}${st.size ? " · " + fmtBytes(st.size) : ""}</small></span></button><button class="more" aria-label="Folder options">⋯</button>`;
-  $(".fopen", li).onclick = () => { Home.folder = f.id; renderHomeList(); };
+  li.innerHTML = `<button class="fopen" aria-expanded="${open}" aria-label="${open ? "Hide" : "Show"} what's in ${esc(f.name)}"><span class="caret">${open ? "▾" : "▸"}</span><svg viewBox="0 0 24 24" class="ficon"><path d="M3 6h7l2 2h9v11H3z"/></svg><span class="nm"><b>${esc(f.name)}</b><small>${st.n} paper${st.n === 1 ? "" : "s"}${st.sub ? ` · ${st.sub} folder${st.sub === 1 ? "" : "s"}` : ""}${st.size ? " · " + fmtBytes(st.size) : ""}</small></span></button><button class="more" aria-label="Folder options">⋯</button>`;
+  $(".fopen", li).onclick = () => { if (prefs.open[f.id]) delete prefs.open[f.id]; else prefs.open[f.id] = 1; savePrefs(); renderHomeList(); };
   $(".more", li).onclick = ev => menu(ev.currentTarget, [
+    ["New folder inside", () => askName(`New folder in "${f.name}"`, "", async n => { const g = { id: "f" + hexId().slice(0, 12), name: n, parent: f.id }; prefs.open[f.id] = 1; savePrefs(); await saveFolders([...Home.folders, g]); renderHomeList(); })],
     ["Rename", () => askName("Rename folder", f.name, async n => { f.name = n; await saveFolders(Home.folders); renderHomeList(); })],
     ["Move to…", () => pickFolder(`Move "${f.name}" to`, f.id, async dest => { f.parent = dest; await saveFolders(Home.folders); renderHomeList(); })],
     ["Delete folder", async () => {
@@ -166,7 +180,7 @@ function dropTarget(el, folderId) {
     const id = ev.dataTransfer.getData("text/x-typepdf"); el.classList.remove("over"); if (!id) return;
     ev.preventDefault(); ev.stopPropagation();
     const e = Home.entries.find(x => x.id === id); if (!e) return;
-    await setMeta(e, { folder: folderId }); toast("Moved."); renderHomeList();
+    await setMeta(e, { folder: folderId }); if (folderId) { prefs.open[folderId] = 1; savePrefs(); } toast("Moved."); renderHomeList();
   });
 }
 async function purge(e) {
@@ -247,7 +261,7 @@ function pickFolder(title, movingFolder, done) {
 $("#moveCancel").onclick = () => $("#moveDlg").close();
 
 // ---------------- toolbar ----------------
-$("#newFolder").onclick = () => askName("New folder", "", async n => { const f = { id: "f" + hexId().slice(0, 12), name: n, parent: prefs.filter === "bin" ? null : Home.folder }; await saveFolders([...Home.folders, f]); renderHomeList(); });
+$("#newFolder").onclick = () => askName("New folder", "", async n => { const f = { id: "f" + hexId().slice(0, 12), name: n, parent: null }; await saveFolders([...Home.folders, f]); renderHomeList(); });
 let searchT; $("#search").addEventListener("input", () => { clearTimeout(searchT); searchT = setTimeout(renderHomeList, 150); });
 $("#sortSel").onchange = e => { prefs.sort = e.target.value; savePrefs(); renderHomeList(); };
 $("#filterSel").onchange = e => { prefs.filter = e.target.value; savePrefs(); renderHomeList(); };
@@ -323,3 +337,6 @@ function renderAdmin(o) {
 
 window.addEventListener("focus", () => { if (!$("#home").hidden) renderHomeList(); });
 renderHomeList();
+// the big "Open a PDF" box lights up while a file is dragged over it
+["dragenter", "dragover"].forEach(ev => $("#drop").addEventListener(ev, e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); $("#drop").classList.add("over"); } }));
+["dragleave", "drop"].forEach(ev => $("#drop").addEventListener(ev, () => $("#drop").classList.remove("over")));

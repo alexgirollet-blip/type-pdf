@@ -125,7 +125,7 @@ async function openFile(f) {
     const existing = await DB.get(id).catch(() => null);
     if (existing) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
     const d = newDoc(id, id, f.name.replace(/\.pdf$/i, "") || "Untitled", buf);
-    await DB.putMeta({ id, name: d.name, pdf: id, folder: (window.Home && Home.folder) || null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
+    await DB.putMeta({ id, name: d.name, pdf: id, folder: null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
     await openDoc(d, true);
   } catch (e) { console.error(e); busy(false); toast("Couldn't open that file: " + (e.message || e)); }
 }

@@ -204,3 +204,11 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 .flagspop small{color:#aab6b1}
 .flagspop p{margin:4px 0 0;font-size:13px;color:#c5d0cc}
 @media (max-width:760px){.fontsel{max-width:120px}}
+
+/* folder tree */
+.recent li.folder .caret{width:14px;display:inline-block;color:var(--muted);font-size:13px}
+.recent li.folder.open{background:var(--soft)}
+.recent li.emptyfolder{color:var(--muted);font-size:13.5px;padding:6px 12px;background:none;border:1px dashed var(--line)}
+.crumbs .crumb{font-weight:700;color:var(--fg);padding:4px 6px;border-radius:6px}
+.crumbs .crumb.over{background:var(--soft);outline:2px solid var(--accent-2)}
+.recent li .fopen{border:0!important;background:none!important;border-radius:10px!important}
