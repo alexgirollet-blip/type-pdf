@@ -1,0 +1,28 @@
+name = "type-pdf"
+main = "src/worker.js"
+compatibility_date = "2025-09-01"
+
+# The site itself (HTML, JS, fonts, pdf.js). Requests to /api/* go to the Worker first.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# Accounts and sessions live in one Durable Object; each user's papers live in their own.
+[[durable_objects.bindings]]
+name = "AUTH"
+class_name = "AuthStore"
+
+[[durable_objects.bindings]]
+name = "USERS"
+class_name = "UserStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AuthStore", "UserStore"]
+
+[observability]
+enabled = true
+
+# No routes or domains are set here on purpose: attach your own domain in the
+# Cloudflare dashboard (Worker → Settings → Domains & Routes).

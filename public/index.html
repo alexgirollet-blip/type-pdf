@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>TypePDF</title>
+<meta name="description" content="Fill in any PDF paper: type on the answer lines, write with a pen, sync live across devices, export a filled-in PDF.">
+<meta name="theme-color" content="#1c2321">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='3' width='22' height='26' rx='2' fill='%23fff' stroke='%231b4d47' stroke-width='2'/%3E%3Cpath d='M9 12h14M9 17h14M9 22h9' stroke='%231b4d47' stroke-width='2' stroke-dasharray='1.5 2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- ============ HOME ============ -->
+<main id="home" class="home">
+  <div class="home-in">
+    <header class="brand">
+      <svg viewBox="0 0 32 32" width="40" height="40" aria-hidden="true"><rect x="5" y="3" width="22" height="26" rx="2" fill="var(--paper)" stroke="var(--accent)" stroke-width="2"/><path d="M9 12h14M9 17h14M9 22h9" stroke="var(--accent)" stroke-width="2" stroke-dasharray="1.5 2"/></svg>
+      <div><h1>TypePDF</h1><p>Answer any PDF paper: type on the answer lines, write with a pen, export a filled-in PDF.</p></div>
+    </header>
+    <div class="acct" id="acct"></div>
+    <label class="drop" id="drop" for="file">
+      <input type="file" id="file" accept="application/pdf,.pdf,.typepdf,.paperwork,.json" hidden>
+      <strong>Open a PDF</strong>
+      <span>Drop a file here, click to choose, or paste one with ⌘/Ctrl+V. Backups (<em>.typepdf</em>) open here too.</span>
+    </label>
+    <form class="linkrow" id="linkForm">
+      <input id="linkIn" type="url" placeholder="…or paste a link to a PDF" aria-label="Link to a PDF">
+      <button type="submit">Open link</button>
+    </form>
+    <p class="privacy">Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers and answers are kept in your account so they sync live between your devices.</p>
+    <section id="recentWrap" hidden>
+      <h2>Your papers</h2>
+      <ul id="recent" class="recent"></ul>
+    </section>
+    <details class="help">
+      <summary>How it works</summary>
+      <ul>
+        <li><b>Type:</b> click any dotted line, ruled line, empty table cell or answer box and type. Text sits on the lines, shrinks if you write a lot, and the page grows if it still doesn't fit.</li>
+        <li><b>Write:</b> drag with the pen tool (mouse, trackpad, Apple Pencil or a mirrored iPad). A short tap on an answer space starts typing instead. Fingers scroll; pinch to zoom.</li>
+        <li><b>Live sync:</b> sign in on two devices (say a laptop and an iPad) and open the same paper. Typing and ink appear on the other one straight away.</li>
+        <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed.</li>
+        <li><b>Export PDF</b> keeps the original paper sharp and adds your writing on top. <b>Export for AI</b> gives typed answers as JSON plus a small PDF of only your handwritten work, which costs far fewer tokens to mark.</li>
+        <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab jumps to the next answer space · Esc leaves a box.</li>
+      </ul>
+    </details>
+  </div>
+</main>
+
+<!-- ============ EDITOR ============ -->
+<div id="editor" hidden>
+  <div class="bar" id="bar">
+    <button class="ib" id="homeBtn" title="All papers" aria-label="All papers"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7M6 10v10h12V10"/></svg></button>
+    <span class="docname" id="docName"></span>
+    <button class="pill" id="syncPill" data-state="local">Saved on this device</button>
+    <span class="sep"></span>
+    <div class="grp" role="group" aria-label="Tools">
+      <button class="tool on" data-tool="pen" title="Pen">Pen</button>
+      <button class="tool" data-tool="hl" title="Highlighter">Highlight</button>
+      <button class="tool" data-tool="eraser" title="Eraser">Eraser</button>
+      <button class="tool" data-tool="boxes" title="Edit answer spaces">Boxes</button>
+    </div>
+    <div class="grp" id="colours" role="group" aria-label="Ink colour">
+      <button class="sw on" data-c="#111418" style="--c:#111418" title="Black" aria-label="Black"></button>
+      <button class="sw" data-c="#1f4fbf" style="--c:#1f4fbf" title="Blue" aria-label="Blue"></button>
+      <button class="sw" data-c="#c62a1f" style="--c:#c62a1f" title="Red" aria-label="Red"></button>
+      <button class="sw" data-c="#1e8a3c" style="--c:#1e8a3c" title="Green" aria-label="Green"></button>
+    </div>
+    <div class="grp" role="group" aria-label="Pen size">
+      <button class="sz" data-w="0.8" title="Fine">S</button>
+      <button class="sz on" data-w="1.3" title="Medium">M</button>
+      <button class="sz" data-w="2.4" title="Thick">L</button>
+    </div>
+    <div class="grp">
+      <button class="ib" id="undo" title="Undo" aria-label="Undo"><svg viewBox="0 0 24 24"><path d="M9 7L4 12l5 5M4 12h10a6 6 0 010 12"/></svg></button>
+      <button class="ib" id="redo" title="Redo" aria-label="Redo"><svg viewBox="0 0 24 24"><path d="M15 7l5 5-5 5M20 12H10a6 6 0 000 12"/></svg></button>
+    </div>
+    <div class="grp">
+      <button class="ib" id="zout" title="Zoom out" aria-label="Zoom out">−</button>
+      <button class="zl" id="zfit" title="Fit width">100%</button>
+      <button class="ib" id="zin" title="Zoom in" aria-label="Zoom in">+</button>
+    </div>
+    <span class="grow"></span>
+    <button class="timer" id="timerBtn" title="Timer">⏱ <span id="timerTxt">Timer</span></button>
+    <span class="count" id="count" title="Answer spaces with something typed in them"></span>
+    <button id="hintBtn" title="Highlight every answer space">Show spaces</button>
+    <button id="aiBtn" title="Typed answers as JSON plus only the handwritten work as a PDF">Export for AI</button>
+    <button class="primary" id="exportBtn">Export PDF</button>
+  </div>
+
+  <div class="subbar" id="boxBar" hidden>
+    <span>Drag on the page to add a space:</span>
+    <div class="grp" role="group" aria-label="New space type">
+      <button class="nk on" data-k="lines">Lines</button>
+      <button class="nk" data-k="box">Box</button>
+      <button class="nk" data-k="cell">Cell</button>
+    </div>
+    <span class="hint">Click a space to select it. Drag to move, drag its corner to resize.</span>
+    <span class="grow"></span>
+    <span id="selTools" hidden class="grp">
+      <button id="kindBtn">Type: Lines</button>
+      <button id="codeBtn">Code: off</button>
+      <button id="delBtn" class="danger">Delete space</button>
+    </span>
+    <button id="redetect">Re-detect this page</button>
+    <button id="doneBoxes" class="primary">Done</button>
+  </div>
+
+  <div class="pop" id="timerPop" hidden>
+    <label>Minutes <input id="tMin" type="number" min="1" max="600" value="90"></label>
+    <div class="row"><button id="tStart" class="primary">Start</button><button id="tPause">Pause</button><button id="tReset">Reset</button></div>
+    <label class="chk"><input type="checkbox" id="tUp"> Count up instead</label>
+  </div>
+
+  <div class="pages" id="pages"></div>
+  <div class="pageind" id="pageInd"></div>
+</div>
+
+<!-- ============ DIALOGS ============ -->
+<dialog id="authDlg" class="dlg">
+  <form id="authForm" method="dialog">
+    <h2 id="auTitle">Sign in</h2>
+    <label>Username <input id="auUser" autocomplete="username" required minlength="3" maxlength="24" autocapitalize="off" spellcheck="false"></label>
+    <label>Password <input id="auPass" type="password" autocomplete="current-password" required minlength="8"></label>
+    <p class="note" id="auHint" hidden>3–24 letters, numbers, dots, dashes or underscores. At least 8 characters for the password. There's no email, so keep your password somewhere safe.</p>
+    <p class="err" id="authErr" role="alert"></p>
+    <div class="row"><button class="primary" id="auGo" type="submit">Sign in</button><button type="button" id="auClose">Cancel</button></div>
+    <button type="button" class="linkbtn" id="auSwitch">New here? Create an account</button>
+  </form>
+</dialog>
+
+<dialog id="acctDlg" class="dlg">
+  <h2>Account</h2>
+  <form id="pwForm">
+    <h3>Change password</h3>
+    <label>Current password <input id="pwOld" type="password" autocomplete="current-password" required></label>
+    <label>New password <input id="pwNew" type="password" autocomplete="new-password" required minlength="8"></label>
+    <div class="row"><button class="primary" type="submit">Change password</button></div>
+  </form>
+  <form id="delForm">
+    <h3>Delete account</h3>
+    <p class="note">Removes your account and every paper stored in it. Papers saved on this device stay here.</p>
+    <label>Password <input id="delPw" type="password" autocomplete="current-password" required></label>
+    <label>Type <b>delete</b> to confirm <input id="delConfirm" autocomplete="off"></label>
+    <div class="row"><button class="danger" type="submit">Delete my account</button></div>
+  </form>
+  <p class="err" id="acctErr" role="alert"></p>
+  <div class="row"><button type="button" id="acClose">Close</button></div>
+</dialog>
+
+<dialog id="aiDlg" class="dlg">
+  <h2>Export for AI marking</h2>
+  <p class="note">Typed answers go in a small JSON file. Only the parts you wrote or drew by hand go in a PDF, cropped to just those areas and in greyscale. Together they cost far fewer tokens than the whole paper.</p>
+  <label class="chk"><input type="checkbox" id="aiQ" checked> Include each question's wording (useful if the AI doesn't have the paper)</label>
+  <p id="aiInfo" class="info"></p>
+  <div class="row wrap">
+    <button class="primary" id="aiBoth">Download both</button>
+    <button id="aiJson">Answers (JSON)</button>
+    <button id="aiWork">Workings (PDF)</button>
+    <button id="aiCopy">Copy JSON</button>
+  </div>
+  <div class="row"><button type="button" id="aiClose">Close</button></div>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div class="busy" id="busy" hidden><div class="busy-in"><div class="spin"></div><div id="busyTxt">Working…</div><div class="bar2"><i id="busyBar"></i></div></div></div>
+
+<script src="lib/pdf.min.js"></script>
+<script src="lib/pdf-lib.min.js"></script>
+<script src="lib/fontkit.umd.min.js"></script>
+<script src="detect.js"></script>
+<script src="app.js"></script>
+<script src="sync.js"></script>
+</body>
+</html>
