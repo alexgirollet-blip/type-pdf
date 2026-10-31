@@ -26,6 +26,9 @@ button{font:inherit;cursor:pointer}
 .drop span{color:var(--muted)}
 .drop.over{background:var(--soft)}
 .privacy{margin:0;color:var(--muted);font-size:14px}
+.tip{margin:-4px 0 0;color:var(--muted);font-size:13px;opacity:.85}
+.tip span{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-right:4px}
+.tip b{font-weight:600;color:inherit}
 .home h2{font-size:16px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .recent{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .recent li{display:flex;gap:12px;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
@@ -72,10 +75,16 @@ button{font:inherit;cursor:pointer}
 
 /* ---- pages ---- */
 .pages{flex:1;overflow:auto;padding:20px 12px 80px;display:flex;flex-direction:column;align-items:center;gap:18px;-webkit-overflow-scrolling:touch}
+.pages.book{display:grid;grid-template-columns:repeat(2,max-content);justify-content:center;align-items:start;gap:18px}
+.page .rh{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;background:#fff;border:2px solid #2f7d74;border-radius:50%;z-index:6;touch-action:none;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.page .rh::after{content:"";position:absolute;inset:-8px}
+.page .rh.nw,.page .rh.se{cursor:nwse-resize}
+.page .rh.ne,.page .rh.sw{cursor:nesw-resize}
 .page{position:relative;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.35);flex:none;color:var(--ink)}
 .page canvas.pg{position:absolute;left:0;top:0}
 .page canvas.ink{position:absolute;left:0;top:0;touch-action:pan-x pan-y pinch-zoom;cursor:crosshair}
 .page.tool-eraser canvas.ink{cursor:cell}
+.page.tool-text canvas.ink{cursor:text}
 .page .ans{position:absolute;margin:0;border:0;padding:0;background:transparent;resize:none;overflow:hidden;color:var(--ink);
   font-family:var(--ans-font,"PaperSans"),sans-serif;white-space:pre-wrap;overflow-wrap:break-word;outline:none;border-radius:2px;caret-color:#1b4d47}
 .page .ans.code{font-family:"PaperMono",monospace;tab-size:4}
@@ -204,3 +213,18 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 .flagspop small{color:#aab6b1}
 .flagspop p{margin:4px 0 0;font-size:13px;color:#c5d0cc}
 @media (max-width:760px){.fontsel{max-width:120px}}
+
+/* folder tree */
+.recent li.folder .caret{width:14px;display:inline-block;color:var(--muted);font-size:13px}
+.recent li.folder.open{background:var(--soft)}
+.recent li.emptyfolder{color:var(--muted);font-size:13.5px;padding:6px 12px;background:none;border:1px dashed var(--line)}
+.crumbs .crumb{font-weight:700;color:var(--fg);padding:4px 6px;border-radius:6px}
+.crumbs .crumb.over{background:var(--soft);outline:2px solid var(--accent-2)}
+.recent li .fopen{border:0!important;background:none!important;border-radius:10px!important}
+.page .hoverdot{position:absolute;display:none;border-radius:50%;pointer-events:none;z-index:7;opacity:.55}
+.page .hoverdot.er{border:1.5px solid #555;opacity:.8}
+.page.tool-select canvas.ink{cursor:crosshair;touch-action:pinch-zoom}
+.page .lasso{position:absolute;border:1.5px dashed #2f7d74;background:rgba(47,125,116,.08);pointer-events:none;z-index:6}
+.page .selbox{position:absolute;border:1.5px dashed #2f7d74;background:rgba(47,125,116,.05);pointer-events:none;z-index:6;border-radius:3px}
+.page .selbox .seldel{position:absolute;right:-2px;top:-30px;pointer-events:auto;font:600 12px var(--ui);padding:4px 10px;border-radius:6px;border:1px solid #b33;background:#fff;color:#b33;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.2);touch-action:manipulation}
+.seloverlay{position:fixed;pointer-events:none;z-index:50;display:none}

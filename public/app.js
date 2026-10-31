@@ -125,7 +125,7 @@ async function openFile(f) {
     const existing = await DB.get(id).catch(() => null);
     if (existing) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
     const d = newDoc(id, id, f.name.replace(/\.pdf$/i, "") || "Untitled", buf);
-    await DB.putMeta({ id, name: d.name, pdf: id, folder: (window.Home && Home.folder) || null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
+    await DB.putMeta({ id, name: d.name, pdf: id, folder: null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
     await openDoc(d, true);
   } catch (e) { console.error(e); busy(false); toast("Couldn't open that file: " + (e.message || e)); }
 }
@@ -181,6 +181,7 @@ async function openDoc(d, fresh = false) {
   setZoom(v && v.zr ? fitWidthZoom() * v.zr : fitWidthZoom());
   updateCount(); timerInit(); renderFlags(); fontMenu();
   if (v) restoreView(v);
+  if (!v || !v.tv || !v.tool || v.tool === "boxes") { setTool(deviceDefaultTool()); toolAuto = true; }
   if (fresh || need.length) scheduleSave();
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
   if (window.Sync) Sync.live();
@@ -237,17 +238,74 @@ async function detectPage(i, prev) {
   return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, gaps: (prev && prev.gaps) || {} };
 }
 
+// ---------------- corner handles on the answer you're typing in: drag to resize on the go ----------------
+let handFor = null;   // {p, r}
+function showHandles(p, r) { handFor = { p, r }; placeHandles(); }
+function hideHandles() { handFor = null; $$(".rh").forEach(h => h.hidden = true); }
+function placeHandles() {
+  if (!handFor) return;
+  const { p, r } = handFor, v = views[p]; if (!v || boxMode) { $$(".rh").forEach(h => h.hidden = true); return; }
+  let hs = $$(".rh");
+  if (!hs.length) {
+    hs = ["nw", "ne", "sw", "se"].map(c => { const h = document.createElement("div"); h.className = "rh " + c; h.dataset.c = c; h.title = "Drag to resize this answer space"; h.addEventListener("pointerdown", handleDrag); return h; });
+  }
+  // sit on the corners of the highlighted box you see
+  const ta = r._el, L = ta.offsetLeft, T = ta.offsetTop, W = ta.offsetWidth, H = ta.offsetHeight;
+  for (const h of hs) {
+    if (h.parentElement !== v.el) v.el.appendChild(h);
+    const c = h.dataset.c; h.hidden = false;
+    h.style.left = (c[1] === "w" ? L : L + W) + "px";
+    h.style.top = (c[0] === "n" ? T : T + H) + "px";
+  }
+}
+function handleDrag(e) {
+  if (!handFor) return;
+  e.preventDefault(); e.stopPropagation();          // keeps the text box focused
+  const { p, r } = handFor, v = views[p], ta = r._el, c = e.currentTarget.dataset.c;
+  e.currentTarget.setPointerCapture(e.pointerId);
+  const b = v.el.getBoundingClientRect(), x0 = e.clientX, y0 = e.clientY;
+  setGap(p, r, 0);
+  const o = { x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1 };
+  const P = doc.pages[p];
+  const mv = ev => {
+    const dx = (ev.clientX - x0) / zoom, dy = (ev.clientY - y0) / zoom;
+    let nx0 = o.x0, nx1 = o.x1, ny0 = o.y0, ny1 = o.y1;
+    if (c[1] === "w") nx0 = clamp(o.x0 + dx, 0, o.x1 - 12); else nx1 = clamp(o.x1 + dx, o.x0 + 12, P.w);
+    if (c[0] === "n") ny0 = clamp(o.y0 + dy, 0, o.y1 - 8); else ny1 = clamp(o.y1 + dy, o.y0 + 8, P.h);
+    setRegionRect(p, r, nx0, ny0, nx1, ny1);
+    applyFieldNoGap(p, r, fitOf(r)); layoutPage(p); placeHandles();
+  };
+  const up = ev => {
+    window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up);
+    delete doc.fit[r.id]; queueFit(p, r); pageChanged(p);
+    if (document.activeElement !== ta) ta.focus({ preventScroll: true });
+    requestAnimationFrame(placeHandles);
+  };
+  window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+}
+// ---------------- book view: two pages side by side ----------------
+let bookView = false;
+try { bookView = localStorage.getItem("bookView") === "1"; } catch (e) {}
+function applyBook() { $("#pages").classList.toggle("book", bookView); $("#bookBtn").classList.toggle("on", bookView); }
+applyBook();
+$("#bookBtn").onclick = () => {
+  if (!doc) return;
+  const keep = currentPage(); bookView = !bookView; applyBook();
+  try { localStorage.setItem("bookView", bookView ? "1" : "0"); } catch (e) {}
+  setZoom(fitWidthZoom());
+  requestAnimationFrame(() => { const v = views[keep]; if (v) $("#pages").scrollTop = v.el.offsetTop - 12; pageIndicator(); saveView(); });
+};
 // ---------------- remembering exactly where you were ----------------
 function saveView() {
   if (!doc || $("#editor").hidden) return;
   const host = $("#pages"); let p = 0; views.forEach((v, i) => { if (v.el.offsetTop <= host.scrollTop + 4) p = i; });
   const off = views[p] ? (host.scrollTop - views[p].el.offsetTop) / zoom : 0;
   const a = document.activeElement; const foc = a && a.classList && a.classList.contains("ans") ? { rid: a.dataset.rid, s: a.selectionStart, e: a.selectionEnd } : null;
-  try { localStorage.setItem("view:" + doc.id, JSON.stringify({ zr: zoom / fitWidthZoom(), p, off, tool, colour, width, foc, hints: $("#pages").classList.contains("hints") })); } catch (e) {}
+  try { localStorage.setItem("view:" + doc.id, JSON.stringify({ zr: zoom / fitWidthZoom(), p, off, tool, tv: 2, toolAuto, colour, width, foc, hints: $("#pages").classList.contains("hints") })); } catch (e) {}
 }
 function loadView() { try { return JSON.parse(localStorage.getItem("view:" + doc.id) || "null"); } catch (e) { return null; } }
 function restoreView(v) {
-  if (v.tool && v.tool !== "boxes") setTool(v.tool);
+  if (v.tv && v.tool && v.tool !== "boxes") { setTool(v.tool); toolAuto = !!v.toolAuto; }   // views saved before the Text/Pen/Smart split fall back to the device default
   if (v.colour) { colour = v.colour; $$(".sw").forEach(x => x.classList.toggle("on", x.dataset.c === colour)); }
   if (v.width) { width = v.width; $$(".sz").forEach(x => x.classList.toggle("on", +x.dataset.w === width)); }
   if (v.hints) { $("#pages").classList.add("hints"); $("#hintBtn").classList.add("on"); }
@@ -298,6 +356,7 @@ function setGap(p, r, h) {
 // ---------------- views ----------------
 let io;
 function buildViews() {
+  clearInkSel(); if (selOp) cancelSelOp();
   const host = $("#pages"); host.innerHTML = ""; views = [];
   io && io.disconnect();
   io = new IntersectionObserver(ents => {
@@ -313,7 +372,7 @@ function buildViews() {
     const v = { el, pg, ink, bm: null, bmZoom: 0, visible: false, gapEls: [] };
     views.push(v);
     P.regions.forEach(r => makeField(p, r));
-    bindInk(p, v);
+    bindInk(p, v); toolClass(v);
     io.observe(el);
   });
   host.onscroll = pageIndicator;
@@ -329,8 +388,8 @@ function makeField(p, r) {
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
   ta.addEventListener("input", () => { if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
-  ta.addEventListener("focus", () => showFlagFloat(p, r));
-  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) hideFlagFloat(); }, 150));
+  ta.addEventListener("focus", () => { showFlagFloat(p, r); showHandles(p, r); });
+  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150));
   v.el.insertBefore(ta, v.ink);
   r._el = ta;
 }
@@ -353,7 +412,23 @@ function fieldKeys(e, p, r, ta) {
 function orderedRegions() { const out = []; doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
 function focusNext(r, dir) {
   const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
-  const ta = n[1]._el; ta.focus({ preventScroll: true }); ta.scrollIntoView({ block: "center", behavior: "smooth" }); const L = ta.value.length; ta.setSelectionRange(L, L);
+  const ta = n[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L);
+  // glide to the next space (rather than jumping) so you can see everything you pass on the way
+  const host = $("#pages"), hb = host.getBoundingClientRect(), tb = ta.getBoundingClientRect();
+  const target = clamp(host.scrollTop + tb.top - hb.top - host.clientHeight * 0.35, 0, host.scrollHeight - host.clientHeight);
+  if (dir > 0) glideTo(host, target);                 // Tab glides forward
+  else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }   // Shift+Tab jumps straight back
+}
+let glideRaf = 0;
+function glideTo(host, target) {
+  cancelAnimationFrame(glideRaf);
+  const from = host.scrollTop, d = target - from; if (Math.abs(d) < 2) return;
+  const dur = clamp(250 + Math.sqrt(Math.abs(d)) * 18, 300, 1100), t0 = performance.now();
+  const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  const stop = () => { cancelAnimationFrame(glideRaf); host.removeEventListener("wheel", stop); host.removeEventListener("touchstart", stop); };
+  host.addEventListener("wheel", stop, { passive: true }); host.addEventListener("touchstart", stop, { passive: true });   // you can take over at any time
+  const step = now => { const t = Math.min(1, (now - t0) / dur); host.scrollTop = from + d * ease(t); if (t < 1) glideRaf = requestAnimationFrame(step); else stop(); };
+  glideRaf = requestAnimationFrame(step);
 }
 
 // ---------------- fitting typed text ----------------
@@ -384,8 +459,8 @@ function applyField(p, r, f) {
   ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
   ta.style.textIndent = (r.kind === "lines" ? r.indent || 0 : 0) * z + "px";
   if (r.kind === "lines") {
-    const top = fieldTop(p, r, f);
-    ta.style.top = top * z + "px"; ta.style.height = (rect.y1 + 1 - top) * z + "px"; ta.style.padding = "0";
+    const top = fieldTop(p, r, f), extra = rect.y1 - disp(p, r.y1);   // extra = page space added under it
+    ta.style.top = top * z + "px"; ta.style.height = Math.max(rect.y1 + 1 - top, availFor(r, f) + extra) * z + "px"; ta.style.padding = "0";
   } else if (r.kind === "box") {
     ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = `${4 * z}px ${4 * z}px`;
   } else {
@@ -394,7 +469,8 @@ function applyField(p, r, f) {
 }
 function contentH(r) { const ta = r._el; const prev = ta.style.height; ta.style.height = "1px"; const h = ta.scrollHeight; ta.style.height = prev; return h / zoom; }
 function availFor(r, f) {
-  if (r.kind === "lines") return (r.ys[r.ys.length - 1] + 1) - (r.ys[0] - 2 - baseInLine(f.fs, f.L));
+  // room for one line of text on every printed line, including the last one
+  if (r.kind === "lines") return (r.ys[r.ys.length - 1] - r.ys[0]) + f.L + 0.5;
   return r.y1 - r.y0;
 }
 function fitRegion(p, r) {
@@ -415,6 +491,8 @@ function fitRegion(p, r) {
   applyField(p, r, f);
   if (r.kind === "cell") centreCell(r);
   if (changed) scheduleSave();
+  if (handFor && handFor.r === r) placeHandles();
+  if (flagFor && flagFor.r === r) placeFlagFloat();
 }
 function applyFieldNoGap(p, r, f) { const P = doc.pages[p]; const g = (P.gaps || {})[r.id]; if (g) { P.gaps[r.id] = 0; applyField(p, r, f); P.gaps[r.id] = g; } else applyField(p, r, f); if (r.kind === "cell") r._el.style.paddingTop = "0"; }
 function centreCell(r) { const ta = r._el; ta.style.paddingTop = "0"; const h = (r.y1 - r.y0); const c = contentH(r); const pad = Math.max(0, (h - c) / 2); ta.style.paddingTop = pad * zoom + "px"; ta.style.height = (h - pad) * zoom + "px"; }
@@ -449,6 +527,8 @@ function layoutPage(p) {
   if (v.visible) composite(p);
   if (boxMode) drawBoxes(p);
   if (flagFor && flagFor.p === p) placeFlagFloat();
+  if (handFor && handFor.p === p) placeHandles();
+  if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
@@ -485,7 +565,11 @@ function composite(p) {
   for (const g of gapList(p)) { const r = P.regions.find(q => q.id === g.rid); for (const y of gapRules(p, r, g)) { ctx.beginPath(); ctx.moveTo(r.x0 * zoom * dpr, y * zoom * dpr); ctx.lineTo(r.x1 * zoom * dpr, y * zoom * dpr); ctx.stroke(); } }
   ctx.restore();
 }
-function fitWidthZoom() { const host = $("#pages"); const maxW = Math.max(...doc.pages.map(P => P.w)); return clamp((host.clientWidth - 28) / maxW, 0.3, 2.2); }
+function fitWidthZoom() {
+  const host = $("#pages"), maxW = Math.max(...doc.pages.map(P => P.w));
+  const two = bookView && doc.pages.length > 1;
+  return clamp((host.clientWidth - 28 - (two ? 18 : 0)) / (maxW * (two ? 2 : 1)), 0.3, 2.2);
+}
 function setZoom(z) {
   zoom = clamp(z, 0.3, 4); fitZoom = fitWidthZoom();
   const host = $("#pages"); const frac = host.scrollTop / Math.max(1, host.scrollHeight);
@@ -503,7 +587,8 @@ $("#pages").addEventListener("wheel", e => { if (e.ctrlKey && doc) { e.preventDe
 function pageIndicator() {
   const host = $("#pages"); const mid = host.scrollTop + host.clientHeight / 3;
   let cur = 0; views.forEach((v, p) => { if (v.el.offsetTop <= mid) cur = p; });
-  $("#pageInd").textContent = `Page ${cur + 1} of ${views.length}`;
+  if (bookView && views.length > 1) { const a = cur - (cur % 2); $("#pageInd").textContent = a + 1 < views.length ? `Pages ${a + 1}–${a + 2} of ${views.length}` : `Page ${a + 1} of ${views.length}`; }
+  else $("#pageInd").textContent = `Page ${cur + 1} of ${views.length}`;
 }
 
 // ---------------- ink ----------------
@@ -521,16 +606,75 @@ function tracePath(ctx, pts, k, ox = 0, oy = 0) {
   for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2; ctx.quadraticCurveTo((pts[i][0] - ox) * k, (pts[i][1] - oy) * k, (mx - ox) * k, (my - oy) * k); }
   if (pts.length > 1) ctx.lineTo((pts[pts.length - 1][0] - ox) * k, (pts[pts.length - 1][1] - oy) * k);
 }
-function drawStroke(ctx, s, pts, k, ox, oy) {
+function drawStroke(ctx, s, pts, k, ox = 0, oy = 0) {
   ctx.save();
   ctx.globalAlpha = s.t === "hl" ? 0.35 : 1; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * k; ctx.lineCap = s.t === "hl" ? "butt" : "round"; ctx.lineJoin = "round";
-  tracePath(ctx, pts, k, ox, oy); ctx.stroke(); ctx.restore();
+  const runs = pressureRuns(s, pts);
+  if (!runs) { tracePath(ctx, pts, k, ox, oy); ctx.stroke(); ctx.restore(); return; }
+  for (const run of runs) {
+    ctx.lineWidth = run.w * k; ctx.beginPath(); ctx.moveTo((run.segs[0].a[0] - ox) * k, (run.segs[0].a[1] - oy) * k);
+    for (const g of run.segs) { if (g.c) ctx.quadraticCurveTo((g.c[0] - ox) * k, (g.c[1] - oy) * k, (g.b[0] - ox) * k, (g.b[1] - oy) * k); else ctx.lineTo((g.b[0] - ox) * k, (g.b[1] - oy) * k); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+// ---- Apple Pencil hover: a dot shows where the pen (or a ring where the eraser) will land ----
+let hoverDot = null;
+function showHover(p, q) {
+  const v = views[p]; if (!v || boxMode) return hideHover();
+  if (!hoverDot) { hoverDot = document.createElement("div"); hoverDot.className = "hoverdot"; }
+  if (hoverDot.parentElement !== v.el) v.el.appendChild(hoverDot);
+  const er = tool === "eraser", hl = tool === "hl", d = Math.max(4, (er ? 10 : hl ? 9 : width + 1.5) * zoom);
+  hoverDot.className = "hoverdot" + (er ? " er" : "");
+  Object.assign(hoverDot.style, { display: "block", width: d + "px", height: d + "px", left: q[0] * zoom - d / 2 + "px", top: q[1] * zoom - d / 2 + "px", background: er ? "transparent" : hl ? "rgba(242,210,27,.45)" : colour });
+}
+function hideHover() { if (hoverDot) hoverDot.style.display = "none"; }
+// ---- two-finger tap undoes, three-finger tap redoes (fingers still scroll and pinch as normal) ----
+const multiTouch = { max: 0, t0: 0, moved: false, start: null, last: 0 };
+$("#pages").addEventListener("touchstart", e => {
+  const fingers = [...e.touches].filter(t => t.touchType !== "stylus");
+  if (fingers.length !== e.touches.length) { multiTouch.max = 0; return; }
+  if (fingers.length === 1 || !multiTouch.max) { multiTouch.max = 0; multiTouch.t0 = performance.now(); multiTouch.moved = false; multiTouch.start = new Map(); }
+  for (const t of fingers) if (!multiTouch.start.has(t.identifier)) multiTouch.start.set(t.identifier, [t.clientX, t.clientY]);
+  multiTouch.max = Math.max(multiTouch.max, fingers.length);
+  if (fingers.length > 1) multiTouch.last = performance.now();
+}, { passive: true });
+$("#pages").addEventListener("touchmove", e => {
+  if (!multiTouch.start) return;
+  for (const t of e.touches) { const s = multiTouch.start.get(t.identifier); if (s && Math.hypot(t.clientX - s[0], t.clientY - s[1]) > 12) multiTouch.moved = true; }
+}, { passive: true });
+$("#pages").addEventListener("touchend", e => {
+  if (multiTouch.max > 1) multiTouch.last = performance.now();
+  if (e.touches.length || !multiTouch.start) return;
+  const quick = performance.now() - multiTouch.t0 < 350, n = multiTouch.max;
+  multiTouch.start = null; multiTouch.max = 0;
+  if (!quick || multiTouch.moved || boxMode || !doc) return;
+  if (n === 2) { undo(); toast("Undo", 900); }
+  else if (n === 3) { redo(); toast("Redo", 900); }
+}, { passive: true });
+// ---- light pressure: the pen's width varies a little (about ±12%) with how hard you press ----
+function strokePressure(s) { return s._live ? s._pr : s.pr; }
+// the same smoothed curve as tracePath, cut into pieces with a width each, merged into runs of equal width
+function pressureRuns(s, pts) {
+  const pr = strokePressure(s);
+  if (s.t !== "pen" || !pr || pr.length !== pts.length || pts.length < 3) return null;
+  const n = pts.length, mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const sm = pr.map((_, i) => { let t = 0, c = 0; for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) { t += pr[j]; c++; } return t / c; });
+  const q = s.w * 0.04, wOf = i => Math.round(s.w * (0.88 + 0.24 * clamp(sm[i], 0, 1)) / q) * q;
+  const segs = [];
+  for (let i = 1; i < n - 1; i++) segs.push({ a: i === 1 ? pts[0] : mid(pts[i - 1], pts[i]), c: pts[i], b: mid(pts[i], pts[i + 1]), w: wOf(i) });
+  segs.push({ a: mid(pts[n - 2], pts[n - 1]), c: null, b: pts[n - 1], w: wOf(n - 1) });
+  const runs = [];
+  for (const g of segs) { const last = runs[runs.length - 1]; if (last && Math.abs(last.w - g.w) < 1e-6) last.segs.push(g); else runs.push({ w: g.w, segs: [g] }); }
+  return runs;
 }
 function drawInk(p) {
   const v = views[p]; if (!v) return; const ctx = v.ink.getContext("2d"); const k = zoom * dpr;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, v.ink.width, v.ink.height);
   const S = doc.strokes[p] || [];
-  for (const pass of ["hl", "pen"]) for (const s of S) if ((s.t === "hl") === (pass === "hl")) drawStroke(ctx, s, s._live || dispPts(p, s), k);
+  const hid = inkSel && inkSel.moving && inkSel.p === p ? inkSel.ids : null;   // being dragged: drawn on the overlay instead
+  for (const pass of ["hl", "pen"]) for (const s of S) if ((s.t === "hl") === (pass === "hl") && !(hid && hid.has(s.id))) drawStroke(ctx, s, s._live || dispPts(p, s), k);
+  if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
 }
 function hitRegion(p, x, y) {
   const P = doc.pages[p];
@@ -542,51 +686,118 @@ function bindInk(p, v) {
   v.ink.addEventListener("pointerdown", e => {
     if (boxMode) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.pointerType === "pen") sawPen();
+    if (tool === "select") { selDown(p, e); return; }
     const p0 = pos(e);
+    // Text and Smart: a click inside the answer you're typing in places the cursor, drag selects text.
+    // Text also goes straight into any answer space you click. Pen, Highlight and Eraser never touch text.
+    const textish = tool === "text" || tool === "smart";
+    let a = document.activeElement;
+    if (!(a && a.classList.contains("ans"))) a = null;
+    if (a && !inRect(a, e.clientX, e.clientY)) a = null;
+    if (!a && tool === "text" && e.pointerType !== "touch") { const r = hitRegion(p, p0[0], p0[1]); if (r && r._el) { r._el.focus({ preventScroll: true }); a = r._el; } }
+    if (tool === "text" && e.pointerType !== "touch" && !a) {    // Text never draws: clicking empty paper just leaves the box
+      e.preventDefault(); const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); st = null; return;
+    }
+    if (textish && a && e.pointerType !== "touch") {
+      e.preventDefault(); v.ink.setPointerCapture(e.pointerId);
+      const off = offsetAt(a, e.clientX, e.clientY);
+      // count quick repeated clicks ourselves (pointer events don't carry a click count)
+      const now = performance.now(), L = clickRun;
+      clickRun = L && now - L.t < 450 && Math.hypot(e.clientX - L.x, e.clientY - L.y) < 6 ? { t: now, x: e.clientX, y: e.clientY, n: L.n + 1 } : { t: now, x: e.clientX, y: e.clientY, n: 1 };
+      const clicks = clickRun.n;
+      if (clicks === 2) { const [s, t] = wordAt(a.value, off); a.setSelectionRange(s, t); st = null; return; }
+      if (clicks >= 3) { const v2 = a.value, s = v2.lastIndexOf("\n", off - 1) + 1, t = v2.indexOf("\n", off); a.setSelectionRange(s, t < 0 ? v2.length : t); st = null; return; }
+      if (e.shiftKey) { const anc = a.selectionDirection === "backward" ? a.selectionEnd : a.selectionStart; setSel(a, anc, off); st = { id: e.pointerId, select: a, anchor: anc }; return; }
+      a.setSelectionRange(off, off);
+      st = { id: e.pointerId, select: a, anchor: off };
+      return;
+    }
     st = { id: e.pointerId, type: e.pointerType, start: p0, t0: performance.now(), moved: false, stroke: null, erased: [] };
     if (e.pointerType !== "touch") { v.ink.setPointerCapture(e.pointerId); e.preventDefault(); }
-    if (e.pointerType === "pen") beginDraw(st, p0);
+    if (tool === "text") return;                                   // a finger in Text: scroll, or tap a space to type
+    if (e.pointerType === "pen" || (tool === "pen" && e.pointerType === "mouse")) { hideHover(); beginDraw(st, p0, e); }
   });
   v.ink.addEventListener("pointermove", e => {
+    if (!st && e.pointerType === "pen" && !e.buttons) { if (tool !== "text" && tool !== "select") showHover(p, pos(e)); return; }   // Pencil hovering above the screen
     if (!st || e.pointerId !== st.id) return;
+    if (st.select) { setSel(st.select, st.anchor, offsetAt(st.select, e.clientX, e.clientY)); return; }
     const q = pos(e);
     if (!st.moved && Math.hypot(q[0] - st.start[0], q[1] - st.start[1]) * zoom > 4) {
       st.moved = true;
       if (st.type === "touch") { st = null; return; }       // a finger scrolls the page
-      if (!st.stroke && !st.erasing) beginDraw(st, st.start);
+      if (!st.stroke && !st.erasing && tool !== "text") beginDraw(st, st.start);
     }
     if (!st.moved && st.type !== "pen") return;
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
     if (st.erasing) { for (const ev of evs) eraseAt(p, pos(ev), st.erased); return; }
     if (!st.stroke) return;
     const live = st.stroke._live;
-    if (e.shiftKey) st.stroke._live = [live[0], q];
-    else for (const ev of evs) live.push(pos(ev));
+    const pr = st.stroke._pr;
+    if (e.shiftKey) { st.stroke._live = [live[0], q]; if (pr) st.stroke._pr = [pr[0], e.pressure]; }
+    else for (const ev of evs) { live.push(pos(ev)); if (pr) pr.push(ev.pressure); }
     drawInk(p);
   });
-  const finish = () => { const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1])); delete s._live; return s; };
+  const finish = () => {
+    const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1]));
+    // keep pressure only if it really varied (a real pen, not a mouse reporting a flat 0.5)
+    if (s._pr && s._pr.length === s.pts.length && Math.max(...s._pr) - Math.min(...s._pr) > 0.03) s.pr = s._pr.map(x => Math.round(x * 100) / 100);
+    delete s._pr; delete s._live; return s;
+  };
   const end = e => {
     if (!st || e.pointerId !== st.id) return;
+    if (st.select) { st = null; return; }
+    if (st.type === "touch" && performance.now() - multiTouch.last < 600) { st = null; return; }   // part of a two/three-finger tap
     const tapped = !st.moved && performance.now() - st.t0 < 500;
-    if (tapped) {
+    const drawOnly = tool === "pen" || tool === "hl" || tool === "eraser";
+    if (tapped && drawOnly && st.stroke && st.stroke.t === "hl") { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
+    if (tapped && drawOnly && !st.stroke && !(st.erased && st.erased.length)) { st = null; return; }   // a finger tap with a drawing tool does nothing
+    if (tapped && !drawOnly) {
       const r = hitRegion(p, st.start[0], st.start[1]);
       if (st.stroke && !r) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); st = null; return; }   // a deliberate dot
       if (st.stroke) { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
-      if (r) { const ta = r._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
+      if (r) {
+        const ta = r._el; ta.focus({ preventScroll: true }); const L = offsetAt(ta, e.clientX, e.clientY); ta.setSelectionRange(L, L);
+        // this click counts towards a double/triple click, so double-clicking a word in an inactive box selects it
+        if (st.type !== "touch") clickRun = { t: performance.now(), x: e.clientX, y: e.clientY, n: 1 };
+      }
       else if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
     } else if (st.stroke) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); drawInk(p); }
     else if (st.erased && st.erased.length) { pushUndo({ t: "erase", p, list: st.erased }); st.erased.forEach(s => emit(`s:${p}:${s.id}`)); scheduleSave(); }
     st = null;
   };
   v.ink.addEventListener("pointerup", end);
+  v.ink.addEventListener("pointerleave", e => { if (e.pointerType === "pen") hideHover(); });
   v.ink.addEventListener("pointercancel", () => { if (st && st.stroke) { const arr = doc.strokes[p]; const i = arr.indexOf(st.stroke); if (i >= 0) { if (st.stroke._live.length < 3) arr.splice(i, 1); else { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); } } drawInk(p); } st = null; });
-  function beginDraw(s, p0) {
+  function beginDraw(s, p0, e) {
     if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
     if (tool === "eraser") { s.erasing = true; eraseAt(p, p0, s.erased); return; }
     doc.strokes[p] = doc.strokes[p] || [];
     s.stroke = tool === "hl" ? { id: rid8(), t: "hl", c: "#f2d21b", w: 9, pts: [], _live: [p0] } : { id: rid8(), t: "pen", c: colour, w: width, pts: [], _live: [p0] };
+    if (tool !== "hl" && s.type === "pen" && e) s.stroke._pr = [e.pressure];
     doc.strokes[p].push(s.stroke);
   }
+}
+// ---- placing the text cursor where you click, even though the ink layer sits on top ----
+let clickRun = null;
+function inRect(el, x, y) { const r = el.getBoundingClientRect(); return x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2; }
+function setSel(ta, anchor, focus) { if (focus < anchor) ta.setSelectionRange(focus, anchor, "backward"); else ta.setSelectionRange(anchor, focus, "forward"); }
+function wordAt(s, i) { let a = i, b = i; while (a > 0 && /\w/.test(s[a - 1])) a--; while (b < s.length && /\w/.test(s[b])) b++; return [a, b]; }
+// character offset in a text box under a screen point: lay an invisible copy of the box's text,
+// styled identically, over it and ask the browser which character is under the point
+function offsetAt(ta, x, y) {
+  const cs = getComputedStyle(ta), r = ta.getBoundingClientRect(), m = document.createElement("div");
+  for (const p of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "wordSpacing", "lineHeight", "textIndent", "textAlign", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "boxSizing", "fontKerning", "fontFeatureSettings"]) m.style[p] = cs[p];
+  Object.assign(m.style, { position: "fixed", left: r.left + "px", top: r.top - ta.scrollTop + "px", width: r.width + "px", minHeight: r.height + "px", margin: "0", border: "0", whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: cs.wordBreak, zIndex: "2147483647", opacity: "0", pointerEvents: "auto", color: "transparent" });
+  m.textContent = ta.value + "\u200b";
+  document.body.appendChild(m);
+  let off = ta.value.length;
+  try {
+    if (document.caretPositionFromPoint) { const pp = document.caretPositionFromPoint(x, y); if (pp && m.contains(pp.offsetNode)) off = pp.offset; }
+    else if (document.caretRangeFromPoint) { const rg = document.caretRangeFromPoint(x, y); if (rg && m.contains(rg.startContainer)) off = rg.startOffset; }
+  } catch (e) {}
+  m.remove();
+  return clamp(off, 0, ta.value.length);
 }
 function eraseAt(p, q, out) {
   const arr = doc.strokes[p] || []; let hit = false;
@@ -598,23 +809,200 @@ function eraseAt(p, q, out) {
 }
 function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1]; const L = dx * dx + dy * dy; let t = L ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L : 0; t = clamp(t, 0, 1); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
 // stop an Apple Pencil from scrolling the page on iPad while fingers still scroll
-for (const ev of ["touchstart", "touchmove"]) $("#pages").addEventListener(ev, e => { if ([...e.touches].some(t => t.touchType === "stylus") && !boxMode && e.target.classList.contains("ink")) e.preventDefault(); }, { passive: false });
+for (const ev of ["touchstart", "touchmove"]) $("#pages").addEventListener(ev, e => {
+  if ([...e.touches].some(t => t.touchType === "stylus") && !boxMode && e.target.classList.contains("ink")) e.preventDefault();
+  else if (selOp && e.touches.length === 1) e.preventDefault();       // one finger is selecting or moving drawings, not scrolling
+}, { passive: false });
 
 function pushUndo(a) { undoS.push(a); redoS.length = 0; }
-function undo() { const a = undoS.pop(); if (!a) return; const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { const i = arr.indexOf(a.s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${a.s.id}`); } else { arr.push(...a.list); a.list.forEach(s => emit(`s:${a.p}:${s.id}`)); } redoS.push(a); drawInk(a.p); scheduleSave(); }
-function redo() { const a = redoS.pop(); if (!a) return; const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { arr.push(a.s); emit(`s:${a.p}:${a.s.id}`); } else a.list.forEach(s => { const i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${s.id}`); }); undoS.push(a); drawInk(a.p); scheduleSave(); }
+function undo() { clearInkSel(); const a = undoS.pop(); if (!a) return; if (a.t === "move") { applyMove(a, "before"); redoS.push(a); return; } const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { const i = arr.indexOf(a.s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${a.s.id}`); } else { arr.push(...a.list); a.list.forEach(s => emit(`s:${a.p}:${s.id}`)); } redoS.push(a); drawInk(a.p); scheduleSave(); }
+function redo() { clearInkSel(); const a = redoS.pop(); if (!a) return; if (a.t === "move") { applyMove(a, "after"); undoS.push(a); return; } const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { arr.push(a.s); emit(`s:${a.p}:${a.s.id}`); } else a.list.forEach(s => { const i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${s.id}`); }); undoS.push(a); drawInk(a.p); scheduleSave(); }
 $("#undo").onclick = undo; $("#redo").onclick = redo;
 
+// ---------------- Select tool: box drawings, then drag them anywhere (even to another page) ----------------
+let inkSel = null;   // { p, ids:Set, box:{x0,y0,x1,y1} (display coords on page p), moving }
+let selOp = null;    // the drag in progress
+const SEL_PAD = 6;
+function selStrokes() { if (!inkSel) return []; return (doc.strokes[inkSel.p] || []).filter(s => inkSel.ids.has(s.id) && s.pts && s.pts.length); }
+function strokesBox(p, list) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of list) { const half = s.w / 2; for (const q of dispPts(p, s)) { x0 = Math.min(x0, q[0] - half); y0 = Math.min(y0, q[1] - half); x1 = Math.max(x1, q[0] + half); y1 = Math.max(y1, q[1] + half); } }
+  return isFinite(x0) ? { x0, y0, x1, y1 } : null;
+}
+function clearInkSel() { inkSel = null; $$(".selbox").forEach(e => e.remove()); }
+// draw the dashed box (and its Delete button) around what's selected; drops strokes that vanished (e.g. deleted on another device)
+function placeInkSel() {
+  if (!inkSel) return;
+  const list = selStrokes();
+  if (!list.length) { clearInkSel(); return; }
+  if (list.length !== inkSel.ids.size) inkSel.ids = new Set(list.map(s => s.id));
+  const b = strokesBox(inkSel.p, list); inkSel.box = b;
+  const v = views[inkSel.p]; if (!v) return;
+  let el = $(".selbox");
+  if (!el) {
+    el = document.createElement("div"); el.className = "selbox";
+    const del = document.createElement("button"); del.type = "button"; del.className = "seldel"; del.textContent = "Delete"; del.title = "Delete the selected drawing (Delete key)";
+    del.addEventListener("pointerdown", e => e.stopPropagation()); del.onclick = e => { e.stopPropagation(); deleteInkSel(); };
+    el.appendChild(del);
+  }
+  if (el.parentElement !== v.el) v.el.appendChild(el);
+  el.style.left = (b.x0 - SEL_PAD) * zoom + "px"; el.style.top = (b.y0 - SEL_PAD) * zoom + "px";
+  el.style.width = (b.x1 - b.x0 + SEL_PAD * 2) * zoom + "px"; el.style.height = (b.y1 - b.y0 + SEL_PAD * 2) * zoom + "px";
+  el.style.display = "";
+}
+function inSelBox(p, q, slack) { const b = inkSel && inkSel.p === p && inkSel.box; return !!b && q[0] >= b.x0 - SEL_PAD - slack && q[0] <= b.x1 + SEL_PAD + slack && q[1] >= b.y0 - SEL_PAD - slack && q[1] <= b.y1 + SEL_PAD + slack; }
+function deleteInkSel() {
+  if (!inkSel) return; const p = inkSel.p, arr = doc.strokes[p] || [], gone = arr.filter(s => inkSel.ids.has(s.id));
+  if (!gone.length) { clearInkSel(); return; }
+  doc.strokes[p] = arr.filter(s => !inkSel.ids.has(s.id));
+  pushUndo({ t: "erase", p, list: gone }); gone.forEach(s => emit(`s:${p}:${s.id}`));
+  clearInkSel(); drawInk(p); scheduleSave(); toast(gone.length === 1 ? "Drawing deleted." : `${gone.length} drawings deleted.`, 1500);
+}
+// the page that a point on screen belongs to (or the nearest one, if it's between pages)
+function pageAtClient(x, y) {
+  let best = 0, bd = Infinity;
+  views.forEach((v, i) => { const r = v.el.getBoundingClientRect(); const dx = Math.max(r.left - x, 0, x - r.right), dy = Math.max(r.top - y, 0, y - r.bottom); const d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+function pageDispH(p) { return doc.pages[p].h + totalGap(p); }
+// move every selected stroke by (dx, dy) page units, from page p to page q, as one undoable step
+function moveStrokes(p, q, ids, dx, dy) {
+  const from = doc.strokes[p] || [], list = from.filter(s => ids.has(s.id)); if (!list.length) return;
+  const items = list.map(s => { const before = s.pts; const after = dispPts(p, s).map(pt => toAnchor(q, pt[0] + dx, pt[1] + dy)); return { id: s.id, before, after }; });
+  const a = { t: "move", from: p, to: q, items };
+  pushUndo(a); applyMove(a, "after");
+}
+function applyMove(a, which) {
+  const [src, dst] = which === "after" ? [a.from, a.to] : [a.to, a.from];
+  const S = doc.strokes[src] ||= [], D = doc.strokes[dst] ||= [];
+  for (const it of a.items) {
+    const i = S.findIndex(s => s.id === it.id); if (i < 0) continue;     // gone (e.g. deleted on another device)
+    const s = S[i]; s.pts = it[which];
+    if (src !== dst) { S.splice(i, 1); D.push(s); emit(`s:${src}:${s.id}`); }
+    emit(`s:${dst}:${s.id}`);
+  }
+  drawInk(src); if (dst !== src) drawInk(dst); scheduleSave();
+}
+function nudgeInkSel(dx, dy) {
+  if (!inkSel || !inkSel.box) return; const p = inkSel.p, b = inkSel.box, P = doc.pages[p];
+  dx = clamp(dx, -b.x0, P.w - b.x1); dy = clamp(dy, -b.y0, pageDispH(p) - b.y1); if (!dx && !dy) return;
+  const ids = new Set(inkSel.ids); moveStrokes(p, p, ids, dx, dy); inkSel = { p, ids }; placeInkSel();
+}
+// overlay canvas over the pages, used while dragging so drawings can cross from one page to another
+let selOverlay = null;
+function overlayCtx() {
+  if (!selOverlay) { selOverlay = document.createElement("canvas"); selOverlay.className = "seloverlay"; document.body.appendChild(selOverlay); }
+  const r = $("#pages").getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  Object.assign(selOverlay.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px", display: "block" });
+  const W = Math.round(r.width * d), H = Math.round(r.height * d);
+  if (selOverlay.width !== W || selOverlay.height !== H) { selOverlay.width = W; selOverlay.height = H; }
+  const ctx = selOverlay.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H); ctx.setTransform(d, 0, 0, d, -r.left * d, -r.top * d);
+  return ctx;
+}
+function hideOverlay() { if (selOverlay) selOverlay.style.display = "none"; }
+function selDown(p, e) {
+  if (selOp) { cancelSelOp(); return; }                    // a second finger/pointer: give way (e.g. to a pinch)
+  if (e.pointerType === "touch" && performance.now() - multiTouch.last < 80) return;
+  e.preventDefault();
+  const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur();
+  const v = views[p], b = v.ink.getBoundingClientRect(), q = [(e.clientX - b.left) / zoom, (e.clientY - b.top) / zoom];
+  try { v.ink.setPointerCapture(e.pointerId); } catch (err) {}
+  const slack = e.pointerType === "touch" ? 10 : e.pointerType === "pen" ? 4 : 2;
+  if (inSelBox(p, q, slack)) {
+    const sb = inkSel.box;
+    selOp = { kind: "move", id: e.pointerId, p, x: e.clientX, y: e.clientY, cx: e.clientX, cy: e.clientY, grab: [q[0] - sb.x0, q[1] - sb.y0], moved: false, list: selStrokes().map(s => ({ s, pts: dispPts(p, s) })) };
+  } else {
+    clearInkSel();
+    const el = document.createElement("div"); el.className = "lasso"; v.el.appendChild(el);
+    selOp = { kind: "box", id: e.pointerId, p, start: q, cx: e.clientX, cy: e.clientY, el };
+  }
+  window.addEventListener("pointermove", selMove); window.addEventListener("pointerup", selUp); window.addEventListener("pointercancel", cancelSelOp);
+  selOp.raf = requestAnimationFrame(selTick);
+}
+function selMove(e) { if (!selOp || e.pointerId !== selOp.id) return; selOp.cx = e.clientX; selOp.cy = e.clientY; if (selOp.kind === "move" && !selOp.moved && Math.hypot(e.clientX - selOp.x, e.clientY - selOp.y) > 3) { selOp.moved = true; inkSel.moving = true; drawInk(selOp.p); const el = $(".selbox"); if (el) el.style.display = "none"; } }
+// every frame: scroll when near the top/bottom edge, then redraw the box or the dragged drawings
+function selTick() {
+  if (!selOp) return;
+  const host = $("#pages"), hr = host.getBoundingClientRect(), edge = 48;
+  let sp = 0; if (selOp.cy < hr.top + edge) sp = -(hr.top + edge - selOp.cy); else if (selOp.cy > hr.bottom - edge) sp = selOp.cy - (hr.bottom - edge);
+  if (sp && (selOp.kind === "box" || selOp.moved)) host.scrollTop += clamp(sp, -edge, edge) * 0.35;
+  if (selOp.kind === "box") {
+    const v = views[selOp.p], b = v.ink.getBoundingClientRect(), P = doc.pages[selOp.p];
+    const q = [clamp((selOp.cx - b.left) / zoom, 0, P.w), clamp((selOp.cy - b.top) / zoom, 0, pageDispH(selOp.p))], s0 = selOp.start;
+    selOp.end = q;
+    Object.assign(selOp.el.style, { left: Math.min(s0[0], q[0]) * zoom + "px", top: Math.min(s0[1], q[1]) * zoom + "px", width: Math.abs(q[0] - s0[0]) * zoom + "px", height: Math.abs(q[1] - s0[1]) * zoom + "px" });
+  } else if (selOp.moved) {
+    const ctx = overlayCtx(), sb = inkSel.box, w = sb.x1 - sb.x0, h = sb.y1 - sb.y0;
+    const left = selOp.cx - selOp.grab[0] * zoom, top = selOp.cy - selOp.grab[1] * zoom;   // where the box's top-left is on screen
+    ctx.save(); ctx.translate(left - sb.x0 * zoom, top - sb.y0 * zoom);
+    for (const pass of ["hl", "pen"]) for (const it of selOp.list) if ((it.s.t === "hl") === (pass === "hl")) drawStroke(ctx, it.s, it.pts, zoom);
+    ctx.restore();
+    ctx.save(); ctx.strokeStyle = "#2f7d74"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.strokeRect(left - SEL_PAD * zoom, top - SEL_PAD * zoom, (w + SEL_PAD * 2) * zoom, (h + SEL_PAD * 2) * zoom); ctx.restore();
+  }
+  selOp.raf = requestAnimationFrame(selTick);
+}
+function endSelOp() {
+  if (!selOp) return; cancelAnimationFrame(selOp.raf);
+  window.removeEventListener("pointermove", selMove); window.removeEventListener("pointerup", selUp); window.removeEventListener("pointercancel", cancelSelOp);
+  if (selOp.el) selOp.el.remove(); hideOverlay();
+  const op = selOp; selOp = null; return op;
+}
+function cancelSelOp() {   // put everything back exactly as it was
+  const op = endSelOp(); if (!op) return;
+  if (inkSel) { inkSel.moving = false; drawInk(inkSel.p); placeInkSel(); }
+}
+function selUp(e) {
+  if (!selOp || e.pointerId !== selOp.id) return;
+  const op = endSelOp();
+  if (op.kind === "box") {
+    const s0 = op.start, q = op.end || s0, x0 = Math.min(s0[0], q[0]), x1 = Math.max(s0[0], q[0]), y0 = Math.min(s0[1], q[1]), y1 = Math.max(s0[1], q[1]);
+    if (x1 - x0 < 3 && y1 - y0 < 3) return;                // just a tap: selection cleared
+    // a stroke is picked when most of it lies inside the box
+    const ids = new Set();
+    for (const s of doc.strokes[op.p] || []) { const pts = dispPts(op.p, s); if (!pts.length) continue; const n = pts.filter(t => t[0] >= x0 && t[0] <= x1 && t[1] >= y0 && t[1] <= y1).length; if (n / pts.length >= 0.5) ids.add(s.id); }
+    if (!ids.size) { toast("No drawings inside that box.", 1500); return; }
+    inkSel = { p: op.p, ids }; placeInkSel();
+    return;
+  }
+  // move
+  if (!inkSel) return;
+  inkSel.moving = false;
+  if (!op.moved) { drawInk(op.p); placeInkSel(); return; }
+  const sb = inkSel.box, w = sb.x1 - sb.x0, h = sb.y1 - sb.y0;
+  const left = op.cx - op.grab[0] * zoom, top = op.cy - op.grab[1] * zoom;
+  const q = pageAtClient(left + w * zoom / 2, top + h * zoom / 2), qr = views[q].el.getBoundingClientRect(), P = doc.pages[q];
+  // keep it on the page it's dropped on
+  const nx0 = clamp((left - qr.left) / zoom, 0, Math.max(0, P.w - w)), ny0 = clamp((top - qr.top) / zoom, 0, Math.max(0, pageDispH(q) - h));
+  const ids = new Set(inkSel.ids);
+  moveStrokes(op.p, q, ids, nx0 - sb.x0, ny0 - sb.y0);
+  inkSel = { p: q, ids }; drawInk(op.p); placeInkSel();
+}
 // ---------------- tools ----------------
 function setTool(t) {
   if (t === "boxes") { setBoxMode(!boxMode); return; }
   if (boxMode) setBoxMode(false);
   tool = t; $$(".tool").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
-  views.forEach(v => v.el.classList.toggle("tool-eraser", t === "eraser"));
+  views.forEach(toolClass);
+  if (t !== "select") clearInkSel();
+  if (t === "select") { const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); hideHover(); }
+  if (t !== "text" && t !== "smart") hideHandles();
+  if (t === "text") hideHover();
   saveView();
 }
-$$(".tool").forEach(b => b.onclick = () => setTool(b.dataset.tool));
-$$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); setTool("pen"); });
+function toolClass(v) { v.el.classList.toggle("tool-eraser", tool === "eraser"); v.el.classList.toggle("tool-text", tool === "text"); v.el.classList.toggle("tool-select", tool === "select"); }
+$$(".tool").forEach(b => b.onclick = () => { toolAuto = false; setTool(b.dataset.tool); });
+$$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); if (tool !== "pen" && tool !== "smart") { toolAuto = false; setTool("pen"); } });
+// ---- which tool to start on: Pen on an iPad or anywhere an Apple Pencil has been used, Text on a laptop ----
+let toolAuto = false;   // true while the tool is the automatic choice (the user hasn't picked one)
+function deviceDefaultTool() {
+  let pen = false; try { pen = localStorage.getItem("hasPen") === "1"; } catch (e) {}
+  const touchFirst = matchMedia("(pointer: coarse)").matches || (navigator.maxTouchPoints > 1 && /Macintosh|iPad/.test(navigator.userAgent));
+  return pen || touchFirst ? "pen" : "text";
+}
+function sawPen() {
+  try { localStorage.setItem("hasPen", "1"); } catch (e) {}
+  if (toolAuto && tool === "text") { setTool("pen"); toast("Apple Pencil found: switched to Pen. Pick Text or Smart in the toolbar any time."); }
+}
 $$(".sz").forEach(b => b.onclick = () => { width = +b.dataset.w; $$(".sz").forEach(x => x.classList.toggle("on", x === b)); setTool("pen"); });
 $("#hintBtn").onclick = e => { const on = $("#pages").classList.toggle("hints"); e.currentTarget.classList.toggle("on", on); saveView(); };
 $("#homeBtn").onclick = () => showHome();
@@ -632,6 +1020,9 @@ document.addEventListener("keydown", e => {
   if (e.key.length === 1 && /[\p{L}\p{N}]/u.test(e.key) && !boxMode) { toast("Click or tap an answer space first, then type."); return; }
   if (k === "tab") { e.preventDefault(); const all = orderedRegions(); const first = all.find(([p, r]) => !doc.text[r.id]) || all[0]; if (first) focusNext(first[1], 0); }
   else if ((k === "delete" || k === "backspace") && boxMode && sel) { e.preventDefault(); deleteSel(); }
+  else if ((k === "delete" || k === "backspace") && inkSel) { e.preventDefault(); deleteInkSel(); }
+  else if (k === "escape" && inkSel) clearInkSel();
+  else if (inkSel && /^arrow/.test(k)) { e.preventDefault(); const d = e.shiftKey ? 10 : 1; nudgeInkSel(k === "arrowleft" ? -d : k === "arrowright" ? d : 0, k === "arrowup" ? -d : k === "arrowdown" ? d : 0); }
   else if (k === "escape" && boxMode) setBoxMode(false);
 });
 
@@ -643,6 +1034,7 @@ function updateCount() { $("#count").textContent = `${filledCount()}/${totalRegi
 // ---------------- box editing ----------------
 let boxMode = false, sel = null; // sel = {p, r}
 function setBoxMode(on) {
+  if (on) { clearInkSel(); if (selOp) cancelSelOp(); }
   boxMode = on; $("#boxBar").hidden = !on; $("#editor").classList.toggle("boxmode", on);
   $$(".tool").forEach(b => b.classList.toggle("on", on ? b.dataset.tool === "boxes" : b.dataset.tool === tool));
   sel = null; updateSelTools();
@@ -881,8 +1273,10 @@ async function exportPDF() {
         for (;;) {
           lines = wrapText(txt, font, fs * fontScale(r), width, r.kind === "lines" ? r.indent || 0 : 0);
           top = fieldTop(p, r, { fs, L });
-          const bottom = r.kind === "lines" ? R.y1 + 1 : R.y1 - pad;
-          if (top + lines.length * L <= bottom + 0.5 || fs <= 5) break;
+          const fitsNow = r.kind === "lines"
+            ? top + (lines.length - 1) * L + baseInLine(fs, L) <= R.y1 - 3.5 + 0.5   // last baseline on or above the last printed line
+            : top + lines.length * L <= R.y1 - pad + 0.5;
+          if (fitsNow || fs <= 5) break;
           L = L * (fs - 0.25) / fs; fs = fs - 0.25;
         }
         if (r.kind === "cell") top = R.y0 + Math.max(0, ((R.y1 - R.y0) - lines.length * L) / 2);
@@ -896,8 +1290,16 @@ async function exportPDF() {
       const S = (doc.strokes[p] || []).slice().sort((a, b) => (a.t === "hl" ? 0 : 1) - (b.t === "hl" ? 0 : 1));
       for (const s of S) {
         let pts = dispPts(p, s); if (!pts.length) continue;
+        const runs = pressureRuns(s, pts), f2 = q => `${q[0].toFixed(2)} ${q[1].toFixed(2)}`;
+        if (runs) {
+          for (const run of runs) {
+            const d = "M" + f2(run.segs[0].a) + run.segs.map(g => g.c ? ` Q${f2(g.c)} ${f2(g.b)}` : ` L${f2(g.b)}`).join("");
+            page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: run.w, borderLineCap: LineCapStyle.Round });
+          }
+          continue;
+        }
         if (pts.length === 1) pts = [pts[0], [pts[0][0] + 0.05, pts[0][1]]];
-        const d = "M" + pts.map(q => `${q[0].toFixed(2)} ${q[1].toFixed(2)}`).join(" L");
+        const d = "M" + pts.map(f2).join(" L");
         page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: s.w, borderOpacity: s.t === "hl" ? 0.35 : 1, borderLineCap: s.t === "hl" ? LineCapStyle.Butt : LineCapStyle.Round });
       }
     }
@@ -1019,8 +1421,10 @@ function placeFlagFloat() {
   b.hidden = false; b.classList.toggle("on", on);
   b.textContent = on ? "⚑ Flagged" : "⚑ Flag";
   b.title = on ? "Remove the flag" : "Flag this to come back to (e.g. to draw it on the iPad, or because it's hard)";
-  b.style.left = Math.max(0, Math.min(doc.pages[p].w - 70, r.x1 - 68)) * zoom + "px";
-  b.style.top = Math.max(0, R.y0 - 20) * zoom + "px";
+  // just outside the box, halfway down its right-hand side
+  const ta = r._el;
+  b.style.left = (ta.offsetLeft + ta.offsetWidth + 8) + "px";
+  b.style.top = (ta.offsetTop + ta.offsetHeight / 2 - b.offsetHeight / 2) + "px";
 }
 function toggleFlag(p, r) {
   doc.flags ||= {};

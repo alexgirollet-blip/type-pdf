@@ -6,7 +6,9 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 
 - **Finds answer spaces automatically** from the page image and the text layer, so it works on most exam papers and on scans. Labelled lines ("Name …", "Description …") become separate spaces. Code answers (SQL, pseudocode, CSS) get a monospace font where Tab indents.
 - **Typed text sits on the printed lines.** Long answers shrink a little, then fit two lines per printed line, and only then extend the page with extra writing lines. The page is never split through printed text.
-- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes while fingers scroll and pinch to zoom. Mirroring a laptop screen to an iPad also works.
+- **Text, Pen and Smart tools**: Text only types, Pen only draws, Smart does both (tap to type, drag to draw). Laptops start on Text; iPads and devices where an Apple Pencil has been used start on Pen.
+- **Select and move drawings**: draw a box round any ink (mouse, finger or Pencil) and drag it anywhere, even to another page; Delete removes it and arrow keys nudge it. Undo works, and moves sync live.
+- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, three-finger tap redoes. Mirroring a laptop screen to an iPad also works.
 - **Live sync with an account.** Sign in on two devices and open the same paper; typing and ink appear on the other device as you go. Offline changes are kept and sent when the connection returns.
 - **Picks up where you left off**: page, zoom, tool, colour and the answer you were typing in.
 - **Open PDFs any way you like**: choose a file, drag and drop, paste a file with ⌘/Ctrl+V, or paste a link.
@@ -34,6 +36,16 @@ Signed out, everything stays in the browser and the PDF is never uploaded.
 
 - The **first account created is the admin**. The admin has no storage limit, sees how much of Cloudflare's free 5 GB everyone is using, sets each user's allowance (100 MB – 2 GB, 250 MB by default), can list and delete any user's papers, and can delete accounts. Users are told the admin can see their papers' names and sizes.
 - Other accounts get the default allowance until the admin changes it. Single PDFs are limited to 40 MB.
+- The free plan's 5 GB of Durable Object storage is per **Cloudflare account**, shared by every Worker in it (Pages static files, KV, D1 and R2 have their own separate allowances). Each PDF is stored in its own small Durable Object, because a single object is capped at 1 GB on the free plan.
+
+### Showing the real storage left (optional)
+
+By default the admin's storage bar counts only what TypePDF stores. To show what your whole Cloudflare account uses:
+
+1. Find your **Account ID**: Cloudflare dashboard → Workers & Pages → it's shown in the right-hand sidebar (or in any dashboard URL, the 32-character code).
+2. Create an **API token**: My Profile → API Tokens → Create Token → Custom token → Permissions: *Account* · *Account Analytics* · *Read* → Account Resources: your account → Create, then copy the token.
+3. Open the Worker → **Settings → Variables and Secrets → Add**, type **Secret**, and add `CF_ACCOUNT_ID` (the ID) and `CF_API_TOKEN` (the token). Use *Secret* for both so GitHub deploys never overwrite them.
+4. Reload the site. The admin storage bar now shows Cloudflare's own figure (updated by Cloudflare about once a day; the site checks every 10 minutes).
 
 ### Updates never lose data
 
