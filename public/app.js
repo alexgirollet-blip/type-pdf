@@ -543,12 +543,29 @@ function bindInk(p, v) {
     if (boxMode) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const p0 = pos(e);
+    // inside the answer you're typing in: click places the cursor, drag selects text, like a normal text box
+    const a = document.activeElement;
+    if (a && a.classList.contains("ans") && e.pointerType !== "touch" && inRect(a, e.clientX, e.clientY)) {
+      e.preventDefault(); v.ink.setPointerCapture(e.pointerId);
+      const off = offsetAt(a, e.clientX, e.clientY);
+      // count quick repeated clicks ourselves (pointer events don't carry a click count)
+      const now = performance.now(), L = clickRun;
+      clickRun = L && now - L.t < 450 && Math.hypot(e.clientX - L.x, e.clientY - L.y) < 6 ? { t: now, x: e.clientX, y: e.clientY, n: L.n + 1 } : { t: now, x: e.clientX, y: e.clientY, n: 1 };
+      const clicks = clickRun.n;
+      if (clicks === 2) { const [s, t] = wordAt(a.value, off); a.setSelectionRange(s, t); st = null; return; }
+      if (clicks >= 3) { const v2 = a.value, s = v2.lastIndexOf("\n", off - 1) + 1, t = v2.indexOf("\n", off); a.setSelectionRange(s, t < 0 ? v2.length : t); st = null; return; }
+      if (e.shiftKey) { const anc = a.selectionDirection === "backward" ? a.selectionEnd : a.selectionStart; setSel(a, anc, off); st = { id: e.pointerId, select: a, anchor: anc }; return; }
+      a.setSelectionRange(off, off);
+      st = { id: e.pointerId, select: a, anchor: off };
+      return;
+    }
     st = { id: e.pointerId, type: e.pointerType, start: p0, t0: performance.now(), moved: false, stroke: null, erased: [] };
     if (e.pointerType !== "touch") { v.ink.setPointerCapture(e.pointerId); e.preventDefault(); }
     if (e.pointerType === "pen") beginDraw(st, p0);
   });
   v.ink.addEventListener("pointermove", e => {
     if (!st || e.pointerId !== st.id) return;
+    if (st.select) { setSel(st.select, st.anchor, offsetAt(st.select, e.clientX, e.clientY)); return; }
     const q = pos(e);
     if (!st.moved && Math.hypot(q[0] - st.start[0], q[1] - st.start[1]) * zoom > 4) {
       st.moved = true;
@@ -567,12 +584,13 @@ function bindInk(p, v) {
   const finish = () => { const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1])); delete s._live; return s; };
   const end = e => {
     if (!st || e.pointerId !== st.id) return;
+    if (st.select) { st = null; return; }
     const tapped = !st.moved && performance.now() - st.t0 < 500;
     if (tapped) {
       const r = hitRegion(p, st.start[0], st.start[1]);
       if (st.stroke && !r) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); st = null; return; }   // a deliberate dot
       if (st.stroke) { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
-      if (r) { const ta = r._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
+      if (r) { const ta = r._el; ta.focus({ preventScroll: true }); const L = offsetAt(ta, e.clientX, e.clientY); ta.setSelectionRange(L, L); }
       else if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
     } else if (st.stroke) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); drawInk(p); }
     else if (st.erased && st.erased.length) { pushUndo({ t: "erase", p, list: st.erased }); st.erased.forEach(s => emit(`s:${p}:${s.id}`)); scheduleSave(); }
@@ -587,6 +605,27 @@ function bindInk(p, v) {
     s.stroke = tool === "hl" ? { id: rid8(), t: "hl", c: "#f2d21b", w: 9, pts: [], _live: [p0] } : { id: rid8(), t: "pen", c: colour, w: width, pts: [], _live: [p0] };
     doc.strokes[p].push(s.stroke);
   }
+}
+// ---- placing the text cursor where you click, even though the ink layer sits on top ----
+let clickRun = null;
+function inRect(el, x, y) { const r = el.getBoundingClientRect(); return x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2; }
+function setSel(ta, anchor, focus) { if (focus < anchor) ta.setSelectionRange(focus, anchor, "backward"); else ta.setSelectionRange(anchor, focus, "forward"); }
+function wordAt(s, i) { let a = i, b = i; while (a > 0 && /\w/.test(s[a - 1])) a--; while (b < s.length && /\w/.test(s[b])) b++; return [a, b]; }
+// character offset in a text box under a screen point: lay an invisible copy of the box's text,
+// styled identically, over it and ask the browser which character is under the point
+function offsetAt(ta, x, y) {
+  const cs = getComputedStyle(ta), r = ta.getBoundingClientRect(), m = document.createElement("div");
+  for (const p of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "wordSpacing", "lineHeight", "textIndent", "textAlign", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "boxSizing", "fontKerning", "fontFeatureSettings"]) m.style[p] = cs[p];
+  Object.assign(m.style, { position: "fixed", left: r.left + "px", top: r.top - ta.scrollTop + "px", width: r.width + "px", minHeight: r.height + "px", margin: "0", border: "0", whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: cs.wordBreak, zIndex: "2147483647", opacity: "0", pointerEvents: "auto", color: "transparent" });
+  m.textContent = ta.value + "\u200b";
+  document.body.appendChild(m);
+  let off = ta.value.length;
+  try {
+    if (document.caretPositionFromPoint) { const pp = document.caretPositionFromPoint(x, y); if (pp && m.contains(pp.offsetNode)) off = pp.offset; }
+    else if (document.caretRangeFromPoint) { const rg = document.caretRangeFromPoint(x, y); if (rg && m.contains(rg.startContainer)) off = rg.startOffset; }
+  } catch (e) {}
+  m.remove();
+  return clamp(off, 0, ta.value.length);
 }
 function eraseAt(p, q, out) {
   const arr = doc.strokes[p] || []; let hit = false;
