@@ -223,3 +223,8 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 .recent li .fopen{border:0!important;background:none!important;border-radius:10px!important}
 .page .hoverdot{position:absolute;display:none;border-radius:50%;pointer-events:none;z-index:7;opacity:.55}
 .page .hoverdot.er{border:1.5px solid #555;opacity:.8}
+.page.tool-select canvas.ink{cursor:crosshair;touch-action:pinch-zoom}
+.page .lasso{position:absolute;border:1.5px dashed #2f7d74;background:rgba(47,125,116,.08);pointer-events:none;z-index:6}
+.page .selbox{position:absolute;border:1.5px dashed #2f7d74;background:rgba(47,125,116,.05);pointer-events:none;z-index:6;border-radius:3px}
+.page .selbox .seldel{position:absolute;right:-2px;top:-30px;pointer-events:auto;font:600 12px var(--ui);padding:4px 10px;border-radius:6px;border:1px solid #b33;background:#fff;color:#b33;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.2);touch-action:manipulation}
+.seloverlay{position:fixed;pointer-events:none;z-index:50;display:none}

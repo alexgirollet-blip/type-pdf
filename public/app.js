@@ -356,6 +356,7 @@ function setGap(p, r, h) {
 // ---------------- views ----------------
 let io;
 function buildViews() {
+  clearInkSel(); if (selOp) cancelSelOp();
   const host = $("#pages"); host.innerHTML = ""; views = [];
   io && io.disconnect();
   io = new IntersectionObserver(ents => {
@@ -527,6 +528,7 @@ function layoutPage(p) {
   if (boxMode) drawBoxes(p);
   if (flagFor && flagFor.p === p) placeFlagFloat();
   if (handFor && handFor.p === p) placeHandles();
+  if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
@@ -670,7 +672,9 @@ function drawInk(p) {
   const v = views[p]; if (!v) return; const ctx = v.ink.getContext("2d"); const k = zoom * dpr;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, v.ink.width, v.ink.height);
   const S = doc.strokes[p] || [];
-  for (const pass of ["hl", "pen"]) for (const s of S) if ((s.t === "hl") === (pass === "hl")) drawStroke(ctx, s, s._live || dispPts(p, s), k);
+  const hid = inkSel && inkSel.moving && inkSel.p === p ? inkSel.ids : null;   // being dragged: drawn on the overlay instead
+  for (const pass of ["hl", "pen"]) for (const s of S) if ((s.t === "hl") === (pass === "hl") && !(hid && hid.has(s.id))) drawStroke(ctx, s, s._live || dispPts(p, s), k);
+  if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
 }
 function hitRegion(p, x, y) {
   const P = doc.pages[p];
@@ -683,6 +687,7 @@ function bindInk(p, v) {
     if (boxMode) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (e.pointerType === "pen") sawPen();
+    if (tool === "select") { selDown(p, e); return; }
     const p0 = pos(e);
     // Text and Smart: a click inside the answer you're typing in places the cursor, drag selects text.
     // Text also goes straight into any answer space you click. Pen, Highlight and Eraser never touch text.
@@ -714,7 +719,7 @@ function bindInk(p, v) {
     if (e.pointerType === "pen" || (tool === "pen" && e.pointerType === "mouse")) { hideHover(); beginDraw(st, p0, e); }
   });
   v.ink.addEventListener("pointermove", e => {
-    if (!st && e.pointerType === "pen" && !e.buttons) { if (tool !== "text") showHover(p, pos(e)); return; }   // Pencil hovering above the screen
+    if (!st && e.pointerType === "pen" && !e.buttons) { if (tool !== "text" && tool !== "select") showHover(p, pos(e)); return; }   // Pencil hovering above the screen
     if (!st || e.pointerId !== st.id) return;
     if (st.select) { setSel(st.select, st.anchor, offsetAt(st.select, e.clientX, e.clientY)); return; }
     const q = pos(e);
@@ -804,24 +809,187 @@ function eraseAt(p, q, out) {
 }
 function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1]; const L = dx * dx + dy * dy; let t = L ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L : 0; t = clamp(t, 0, 1); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
 // stop an Apple Pencil from scrolling the page on iPad while fingers still scroll
-for (const ev of ["touchstart", "touchmove"]) $("#pages").addEventListener(ev, e => { if ([...e.touches].some(t => t.touchType === "stylus") && !boxMode && e.target.classList.contains("ink")) e.preventDefault(); }, { passive: false });
+for (const ev of ["touchstart", "touchmove"]) $("#pages").addEventListener(ev, e => {
+  if ([...e.touches].some(t => t.touchType === "stylus") && !boxMode && e.target.classList.contains("ink")) e.preventDefault();
+  else if (selOp && e.touches.length === 1) e.preventDefault();       // one finger is selecting or moving drawings, not scrolling
+}, { passive: false });
 
 function pushUndo(a) { undoS.push(a); redoS.length = 0; }
-function undo() { const a = undoS.pop(); if (!a) return; const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { const i = arr.indexOf(a.s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${a.s.id}`); } else { arr.push(...a.list); a.list.forEach(s => emit(`s:${a.p}:${s.id}`)); } redoS.push(a); drawInk(a.p); scheduleSave(); }
-function redo() { const a = redoS.pop(); if (!a) return; const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { arr.push(a.s); emit(`s:${a.p}:${a.s.id}`); } else a.list.forEach(s => { const i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${s.id}`); }); undoS.push(a); drawInk(a.p); scheduleSave(); }
+function undo() { clearInkSel(); const a = undoS.pop(); if (!a) return; if (a.t === "move") { applyMove(a, "before"); redoS.push(a); return; } const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { const i = arr.indexOf(a.s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${a.s.id}`); } else { arr.push(...a.list); a.list.forEach(s => emit(`s:${a.p}:${s.id}`)); } redoS.push(a); drawInk(a.p); scheduleSave(); }
+function redo() { clearInkSel(); const a = redoS.pop(); if (!a) return; if (a.t === "move") { applyMove(a, "after"); undoS.push(a); return; } const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { arr.push(a.s); emit(`s:${a.p}:${a.s.id}`); } else a.list.forEach(s => { const i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${s.id}`); }); undoS.push(a); drawInk(a.p); scheduleSave(); }
 $("#undo").onclick = undo; $("#redo").onclick = redo;
 
+// ---------------- Select tool: box drawings, then drag them anywhere (even to another page) ----------------
+let inkSel = null;   // { p, ids:Set, box:{x0,y0,x1,y1} (display coords on page p), moving }
+let selOp = null;    // the drag in progress
+const SEL_PAD = 6;
+function selStrokes() { if (!inkSel) return []; return (doc.strokes[inkSel.p] || []).filter(s => inkSel.ids.has(s.id) && s.pts && s.pts.length); }
+function strokesBox(p, list) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of list) { const half = s.w / 2; for (const q of dispPts(p, s)) { x0 = Math.min(x0, q[0] - half); y0 = Math.min(y0, q[1] - half); x1 = Math.max(x1, q[0] + half); y1 = Math.max(y1, q[1] + half); } }
+  return isFinite(x0) ? { x0, y0, x1, y1 } : null;
+}
+function clearInkSel() { inkSel = null; $$(".selbox").forEach(e => e.remove()); }
+// draw the dashed box (and its Delete button) around what's selected; drops strokes that vanished (e.g. deleted on another device)
+function placeInkSel() {
+  if (!inkSel) return;
+  const list = selStrokes();
+  if (!list.length) { clearInkSel(); return; }
+  if (list.length !== inkSel.ids.size) inkSel.ids = new Set(list.map(s => s.id));
+  const b = strokesBox(inkSel.p, list); inkSel.box = b;
+  const v = views[inkSel.p]; if (!v) return;
+  let el = $(".selbox");
+  if (!el) {
+    el = document.createElement("div"); el.className = "selbox";
+    const del = document.createElement("button"); del.type = "button"; del.className = "seldel"; del.textContent = "Delete"; del.title = "Delete the selected drawing (Delete key)";
+    del.addEventListener("pointerdown", e => e.stopPropagation()); del.onclick = e => { e.stopPropagation(); deleteInkSel(); };
+    el.appendChild(del);
+  }
+  if (el.parentElement !== v.el) v.el.appendChild(el);
+  el.style.left = (b.x0 - SEL_PAD) * zoom + "px"; el.style.top = (b.y0 - SEL_PAD) * zoom + "px";
+  el.style.width = (b.x1 - b.x0 + SEL_PAD * 2) * zoom + "px"; el.style.height = (b.y1 - b.y0 + SEL_PAD * 2) * zoom + "px";
+  el.style.display = "";
+}
+function inSelBox(p, q, slack) { const b = inkSel && inkSel.p === p && inkSel.box; return !!b && q[0] >= b.x0 - SEL_PAD - slack && q[0] <= b.x1 + SEL_PAD + slack && q[1] >= b.y0 - SEL_PAD - slack && q[1] <= b.y1 + SEL_PAD + slack; }
+function deleteInkSel() {
+  if (!inkSel) return; const p = inkSel.p, arr = doc.strokes[p] || [], gone = arr.filter(s => inkSel.ids.has(s.id));
+  if (!gone.length) { clearInkSel(); return; }
+  doc.strokes[p] = arr.filter(s => !inkSel.ids.has(s.id));
+  pushUndo({ t: "erase", p, list: gone }); gone.forEach(s => emit(`s:${p}:${s.id}`));
+  clearInkSel(); drawInk(p); scheduleSave(); toast(gone.length === 1 ? "Drawing deleted." : `${gone.length} drawings deleted.`, 1500);
+}
+// the page that a point on screen belongs to (or the nearest one, if it's between pages)
+function pageAtClient(x, y) {
+  let best = 0, bd = Infinity;
+  views.forEach((v, i) => { const r = v.el.getBoundingClientRect(); const dx = Math.max(r.left - x, 0, x - r.right), dy = Math.max(r.top - y, 0, y - r.bottom); const d = dx * dx + dy * dy; if (d < bd) { bd = d; best = i; } });
+  return best;
+}
+function pageDispH(p) { return doc.pages[p].h + totalGap(p); }
+// move every selected stroke by (dx, dy) page units, from page p to page q, as one undoable step
+function moveStrokes(p, q, ids, dx, dy) {
+  const from = doc.strokes[p] || [], list = from.filter(s => ids.has(s.id)); if (!list.length) return;
+  const items = list.map(s => { const before = s.pts; const after = dispPts(p, s).map(pt => toAnchor(q, pt[0] + dx, pt[1] + dy)); return { id: s.id, before, after }; });
+  const a = { t: "move", from: p, to: q, items };
+  pushUndo(a); applyMove(a, "after");
+}
+function applyMove(a, which) {
+  const [src, dst] = which === "after" ? [a.from, a.to] : [a.to, a.from];
+  const S = doc.strokes[src] ||= [], D = doc.strokes[dst] ||= [];
+  for (const it of a.items) {
+    const i = S.findIndex(s => s.id === it.id); if (i < 0) continue;     // gone (e.g. deleted on another device)
+    const s = S[i]; s.pts = it[which];
+    if (src !== dst) { S.splice(i, 1); D.push(s); emit(`s:${src}:${s.id}`); }
+    emit(`s:${dst}:${s.id}`);
+  }
+  drawInk(src); if (dst !== src) drawInk(dst); scheduleSave();
+}
+function nudgeInkSel(dx, dy) {
+  if (!inkSel || !inkSel.box) return; const p = inkSel.p, b = inkSel.box, P = doc.pages[p];
+  dx = clamp(dx, -b.x0, P.w - b.x1); dy = clamp(dy, -b.y0, pageDispH(p) - b.y1); if (!dx && !dy) return;
+  const ids = new Set(inkSel.ids); moveStrokes(p, p, ids, dx, dy); inkSel = { p, ids }; placeInkSel();
+}
+// overlay canvas over the pages, used while dragging so drawings can cross from one page to another
+let selOverlay = null;
+function overlayCtx() {
+  if (!selOverlay) { selOverlay = document.createElement("canvas"); selOverlay.className = "seloverlay"; document.body.appendChild(selOverlay); }
+  const r = $("#pages").getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  Object.assign(selOverlay.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px", display: "block" });
+  const W = Math.round(r.width * d), H = Math.round(r.height * d);
+  if (selOverlay.width !== W || selOverlay.height !== H) { selOverlay.width = W; selOverlay.height = H; }
+  const ctx = selOverlay.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H); ctx.setTransform(d, 0, 0, d, -r.left * d, -r.top * d);
+  return ctx;
+}
+function hideOverlay() { if (selOverlay) selOverlay.style.display = "none"; }
+function selDown(p, e) {
+  if (selOp) { cancelSelOp(); return; }                    // a second finger/pointer: give way (e.g. to a pinch)
+  if (e.pointerType === "touch" && performance.now() - multiTouch.last < 80) return;
+  e.preventDefault();
+  const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur();
+  const v = views[p], b = v.ink.getBoundingClientRect(), q = [(e.clientX - b.left) / zoom, (e.clientY - b.top) / zoom];
+  try { v.ink.setPointerCapture(e.pointerId); } catch (err) {}
+  const slack = e.pointerType === "touch" ? 10 : e.pointerType === "pen" ? 4 : 2;
+  if (inSelBox(p, q, slack)) {
+    const sb = inkSel.box;
+    selOp = { kind: "move", id: e.pointerId, p, x: e.clientX, y: e.clientY, cx: e.clientX, cy: e.clientY, grab: [q[0] - sb.x0, q[1] - sb.y0], moved: false, list: selStrokes().map(s => ({ s, pts: dispPts(p, s) })) };
+  } else {
+    clearInkSel();
+    const el = document.createElement("div"); el.className = "lasso"; v.el.appendChild(el);
+    selOp = { kind: "box", id: e.pointerId, p, start: q, cx: e.clientX, cy: e.clientY, el };
+  }
+  window.addEventListener("pointermove", selMove); window.addEventListener("pointerup", selUp); window.addEventListener("pointercancel", cancelSelOp);
+  selOp.raf = requestAnimationFrame(selTick);
+}
+function selMove(e) { if (!selOp || e.pointerId !== selOp.id) return; selOp.cx = e.clientX; selOp.cy = e.clientY; if (selOp.kind === "move" && !selOp.moved && Math.hypot(e.clientX - selOp.x, e.clientY - selOp.y) > 3) { selOp.moved = true; inkSel.moving = true; drawInk(selOp.p); const el = $(".selbox"); if (el) el.style.display = "none"; } }
+// every frame: scroll when near the top/bottom edge, then redraw the box or the dragged drawings
+function selTick() {
+  if (!selOp) return;
+  const host = $("#pages"), hr = host.getBoundingClientRect(), edge = 48;
+  let sp = 0; if (selOp.cy < hr.top + edge) sp = -(hr.top + edge - selOp.cy); else if (selOp.cy > hr.bottom - edge) sp = selOp.cy - (hr.bottom - edge);
+  if (sp && (selOp.kind === "box" || selOp.moved)) host.scrollTop += clamp(sp, -edge, edge) * 0.35;
+  if (selOp.kind === "box") {
+    const v = views[selOp.p], b = v.ink.getBoundingClientRect(), P = doc.pages[selOp.p];
+    const q = [clamp((selOp.cx - b.left) / zoom, 0, P.w), clamp((selOp.cy - b.top) / zoom, 0, pageDispH(selOp.p))], s0 = selOp.start;
+    selOp.end = q;
+    Object.assign(selOp.el.style, { left: Math.min(s0[0], q[0]) * zoom + "px", top: Math.min(s0[1], q[1]) * zoom + "px", width: Math.abs(q[0] - s0[0]) * zoom + "px", height: Math.abs(q[1] - s0[1]) * zoom + "px" });
+  } else if (selOp.moved) {
+    const ctx = overlayCtx(), sb = inkSel.box, w = sb.x1 - sb.x0, h = sb.y1 - sb.y0;
+    const left = selOp.cx - selOp.grab[0] * zoom, top = selOp.cy - selOp.grab[1] * zoom;   // where the box's top-left is on screen
+    ctx.save(); ctx.translate(left - sb.x0 * zoom, top - sb.y0 * zoom);
+    for (const pass of ["hl", "pen"]) for (const it of selOp.list) if ((it.s.t === "hl") === (pass === "hl")) drawStroke(ctx, it.s, it.pts, zoom);
+    ctx.restore();
+    ctx.save(); ctx.strokeStyle = "#2f7d74"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]); ctx.strokeRect(left - SEL_PAD * zoom, top - SEL_PAD * zoom, (w + SEL_PAD * 2) * zoom, (h + SEL_PAD * 2) * zoom); ctx.restore();
+  }
+  selOp.raf = requestAnimationFrame(selTick);
+}
+function endSelOp() {
+  if (!selOp) return; cancelAnimationFrame(selOp.raf);
+  window.removeEventListener("pointermove", selMove); window.removeEventListener("pointerup", selUp); window.removeEventListener("pointercancel", cancelSelOp);
+  if (selOp.el) selOp.el.remove(); hideOverlay();
+  const op = selOp; selOp = null; return op;
+}
+function cancelSelOp() {   // put everything back exactly as it was
+  const op = endSelOp(); if (!op) return;
+  if (inkSel) { inkSel.moving = false; drawInk(inkSel.p); placeInkSel(); }
+}
+function selUp(e) {
+  if (!selOp || e.pointerId !== selOp.id) return;
+  const op = endSelOp();
+  if (op.kind === "box") {
+    const s0 = op.start, q = op.end || s0, x0 = Math.min(s0[0], q[0]), x1 = Math.max(s0[0], q[0]), y0 = Math.min(s0[1], q[1]), y1 = Math.max(s0[1], q[1]);
+    if (x1 - x0 < 3 && y1 - y0 < 3) return;                // just a tap: selection cleared
+    // a stroke is picked when most of it lies inside the box
+    const ids = new Set();
+    for (const s of doc.strokes[op.p] || []) { const pts = dispPts(op.p, s); if (!pts.length) continue; const n = pts.filter(t => t[0] >= x0 && t[0] <= x1 && t[1] >= y0 && t[1] <= y1).length; if (n / pts.length >= 0.5) ids.add(s.id); }
+    if (!ids.size) { toast("No drawings inside that box.", 1500); return; }
+    inkSel = { p: op.p, ids }; placeInkSel();
+    return;
+  }
+  // move
+  if (!inkSel) return;
+  inkSel.moving = false;
+  if (!op.moved) { drawInk(op.p); placeInkSel(); return; }
+  const sb = inkSel.box, w = sb.x1 - sb.x0, h = sb.y1 - sb.y0;
+  const left = op.cx - op.grab[0] * zoom, top = op.cy - op.grab[1] * zoom;
+  const q = pageAtClient(left + w * zoom / 2, top + h * zoom / 2), qr = views[q].el.getBoundingClientRect(), P = doc.pages[q];
+  // keep it on the page it's dropped on
+  const nx0 = clamp((left - qr.left) / zoom, 0, Math.max(0, P.w - w)), ny0 = clamp((top - qr.top) / zoom, 0, Math.max(0, pageDispH(q) - h));
+  const ids = new Set(inkSel.ids);
+  moveStrokes(op.p, q, ids, nx0 - sb.x0, ny0 - sb.y0);
+  inkSel = { p: q, ids }; drawInk(op.p); placeInkSel();
+}
 // ---------------- tools ----------------
 function setTool(t) {
   if (t === "boxes") { setBoxMode(!boxMode); return; }
   if (boxMode) setBoxMode(false);
   tool = t; $$(".tool").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
   views.forEach(toolClass);
+  if (t !== "select") clearInkSel();
+  if (t === "select") { const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); hideHover(); }
   if (t !== "text" && t !== "smart") hideHandles();
   if (t === "text") hideHover();
   saveView();
 }
-function toolClass(v) { v.el.classList.toggle("tool-eraser", tool === "eraser"); v.el.classList.toggle("tool-text", tool === "text"); }
+function toolClass(v) { v.el.classList.toggle("tool-eraser", tool === "eraser"); v.el.classList.toggle("tool-text", tool === "text"); v.el.classList.toggle("tool-select", tool === "select"); }
 $$(".tool").forEach(b => b.onclick = () => { toolAuto = false; setTool(b.dataset.tool); });
 $$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); if (tool !== "pen" && tool !== "smart") { toolAuto = false; setTool("pen"); } });
 // ---- which tool to start on: Pen on an iPad or anywhere an Apple Pencil has been used, Text on a laptop ----
@@ -852,6 +1020,9 @@ document.addEventListener("keydown", e => {
   if (e.key.length === 1 && /[\p{L}\p{N}]/u.test(e.key) && !boxMode) { toast("Click or tap an answer space first, then type."); return; }
   if (k === "tab") { e.preventDefault(); const all = orderedRegions(); const first = all.find(([p, r]) => !doc.text[r.id]) || all[0]; if (first) focusNext(first[1], 0); }
   else if ((k === "delete" || k === "backspace") && boxMode && sel) { e.preventDefault(); deleteSel(); }
+  else if ((k === "delete" || k === "backspace") && inkSel) { e.preventDefault(); deleteInkSel(); }
+  else if (k === "escape" && inkSel) clearInkSel();
+  else if (inkSel && /^arrow/.test(k)) { e.preventDefault(); const d = e.shiftKey ? 10 : 1; nudgeInkSel(k === "arrowleft" ? -d : k === "arrowright" ? d : 0, k === "arrowup" ? -d : k === "arrowdown" ? d : 0); }
   else if (k === "escape" && boxMode) setBoxMode(false);
 });
 
@@ -863,6 +1034,7 @@ function updateCount() { $("#count").textContent = `${filledCount()}/${totalRegi
 // ---------------- box editing ----------------
 let boxMode = false, sel = null; // sel = {p, r}
 function setBoxMode(on) {
+  if (on) { clearInkSel(); if (selOp) cancelSelOp(); }
   boxMode = on; $("#boxBar").hidden = !on; $("#editor").classList.toggle("boxmode", on);
   $$(".tool").forEach(b => b.classList.toggle("on", on ? b.dataset.tool === "boxes" : b.dataset.tool === tool));
   sel = null; updateSelTools();
