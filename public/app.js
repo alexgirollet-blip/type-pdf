@@ -5,8 +5,10 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "lib/pdf.worker.min.js";
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-const ASC = 0.928, DESC = 0.236;            // DejaVu Sans metrics (em)
-const baseInLine = (fs, L) => (L - (ASC + DESC) * fs) / 2 + ASC * fs;
+// the typeface answers are typed in (fonts.js); its metrics decide where text sits on a line
+let curFont = FONTS[FONT_DEFAULT];
+const fontScale = r => (r && r.code) ? 1 : (curFont.scale || 1);
+function baseInLine(fs, L) { const f = curFont, e = fs * (f.scale || 1); return (L - (f.asc + f.desc) * e) / 2 + f.asc * e; }
 const MIN_FS = 8.5;                          // smallest size typed answers shrink to (pt)
 const INK = "#111418";
 const rid8 = () => Math.random().toString(36).slice(2, 10);
@@ -30,6 +32,7 @@ const DB = (() => {
   const tx = async (store, mode, fn) => { const d = await open(); return new Promise((res, rej) => { const t = d.transaction(store, mode); const s = t.objectStore(store); const q = fn(s); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); };
   return {
     get: id => tx("docs", "readonly", s => s.get(id)),
+    getMeta: id => tx("meta", "readonly", s => s.get(id)),
     put: d => tx("docs", "readwrite", s => s.put(Object.assign(strip(d), { bytes: d.bytes }))),
     del: async id => { await tx("docs", "readwrite", s => s.delete(id)); await tx("meta", "readwrite", s => s.delete(id)); },
     putMeta: m => tx("meta", "readwrite", s => s.put(m)),
@@ -49,7 +52,9 @@ let views = [];      // per page: {el, pg, ink, bm, bmZoom, visible, gapEls}
 const undoS = [], redoS = [];
 let saveT = null;
 
-function metaOf() { return { name: doc.name, pages: doc.pages.length, filled: filledCount(), total: totalRegions() }; }
+function metaOf() { return { name: doc.name, pages: doc.pages.length, filled: filledCount(), total: totalRegions(), flags: Object.keys(doc.flags || {}).length }; }
+// rough size of a paper on this device: the PDF plus everything typed and drawn
+function docSize(d) { let n = d.bytes ? d.bytes.byteLength : 0; try { n += JSON.stringify({ t: d.text, s: d.strokes }).length; } catch (e) {} return n; }
 function scheduleSave() {
   clearTimeout(saveT);
   saveT = setTimeout(saveNow, 500);
@@ -60,7 +65,8 @@ async function saveNow() {
   doc.updated = Date.now();
   try {
     await DB.put(doc);
-    await DB.putMeta({ id: doc.id, ...metaOf(), updated: doc.updated });
+    const old = await DB.getMeta(doc.id).catch(() => null) || {};
+    await DB.putMeta({ ...old, id: doc.id, ...metaOf(), pdf: doc.pdf, updated: doc.updated, opened: doc.opened, size: docSize(doc), local: true });
   } catch (e) { toast("Couldn't save in this browser (storage full or blocked). Export a backup."); }
   const m = JSON.stringify(metaOf());
   if (m !== doc._lastMeta) { doc._lastMeta = m; emit("meta"); }
@@ -72,50 +78,15 @@ function emit(key) { if (window.Sync && doc) Sync.changed(key); }
 async function showHome() {
   if (doc) { saveView(); await saveNow(); }
   if (window.Sync) Sync.detach();
+  hideFlagFloat();
   $("#editor").hidden = true; $("#home").hidden = false; document.title = "TypePDF";
   if (pdf) { pdf.destroy(); pdf = null; } doc = null; views = []; $("#pages").innerHTML = "";
   undoS.length = redoS.length = 0;
   renderHomeList();
 }
-async function renderHomeList() {
-  let local = [];
-  try { local = await DB.list(); } catch (e) {}
-  let remote = [];
-  if (window.Sync && Sync.user) { try { remote = (await Sync.listDocs()).docs || []; } catch (e) {} }
-  const byId = new Map();
-  for (const m of local) byId.set(m.id, { ...m, local: true });
-  for (const r of remote) { const e = byId.get(r.id) || {}; byId.set(r.id, { ...r, ...e, updated: Math.max(e.updated || 0, r.updated || 0), cloud: true, haspdf: r.haspdf, filled: e.filled ?? r.filled, total: e.total ?? r.total, pages: e.pages || r.pages, name: e.name || r.name }); }
-  const list = [...byId.values()].sort((a, b) => b.updated - a.updated);
-  $("#recentWrap").hidden = !list.length;
-  const ul = $("#recent"); ul.innerHTML = "";
-  for (const m of list) {
-    const li = document.createElement("li");
-    const d = new Date(m.updated);
-    const where = m.cloud && m.local ? "synced" : m.cloud ? "in your account" : "this device only";
-    li.innerHTML = `<div class="nm"><b></b><small>${m.pages || "?"} pages · ${m.filled ?? 0}/${m.total ?? "?"} answered · ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${where}</small></div>
-      <button class="open">Open</button><button class="bk" title="Download a backup file">Backup</button><button class="del">Delete</button>`;
-    $("b", li).textContent = m.name;
-    $(".open", li).onclick = () => openStored(m.id, m);
-    $(".bk", li).onclick = async () => { const d = await DB.get(m.id); if (d) downloadBackup(d); else toast("Open it once on this device first."); };
-    if (!m.local) $(".bk", li).hidden = true;
-    $(".del", li).onclick = () => {
-      const c = document.createElement("span"); c.className = "confirmdel";
-      c.innerHTML = `${m.cloud ? "Delete from every device?" : "Delete for good?"} <button>Delete</button><button>Keep</button>`;
-      const [y, n] = $$("button", c);
-      y.onclick = async () => { await DB.del(m.id).catch(() => {}); if (m.cloud && window.Sync) await Sync.deleteDoc(m.id).catch(() => {}); localStorage.removeItem("view:" + m.id); renderHomeList(); };
-      n.onclick = () => c.replaceWith(delBtn);
-      const delBtn = $(".del", li); delBtn.replaceWith(c);
-    };
-    ul.appendChild(li);
-  }
-}
-const drop = $("#drop");
-["dragover", "dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
-["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove("over")));
-drop.addEventListener("drop", e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) openFile(f); });
 $("#file").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) openFile(f); });
 document.addEventListener("dragover", e => e.preventDefault());
-document.addEventListener("drop", e => { e.preventDefault(); if (!$("#editor").hidden) { const f = e.dataTransfer.files[0]; if (f && /pdf|paperwork|json/i.test(f.type + f.name)) openFile(f); } });
+document.addEventListener("drop", e => { e.preventDefault(); if (!$("#editor").hidden) { const f = e.dataTransfer.files[0]; if (f && /pdf|paperwork|typepdf|json/i.test(f.type + f.name)) openFile(f); } });
 
 // paste a PDF (file or link) anywhere outside an answer space → opens it as a new paper
 document.addEventListener("paste", async e => {
@@ -144,6 +115,7 @@ async function openLink(url) {
 
 async function openFile(f) {
   try {
+    if ($("#pasteDlg").open) $("#pasteDlg").close();
     if (doc) { saveView(); await saveNow(); }
     const buf = await f.arrayBuffer();
     const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024)));
@@ -151,31 +123,44 @@ async function openFile(f) {
     if (!head.includes("%PDF")) { toast("That file isn't a PDF."); return; }
     const id = await sha(buf);
     const existing = await DB.get(id).catch(() => null);
-    if (existing) { toast("You've opened this paper before, so your answers are back."); return openDoc(existing); }
-    const d = { id, name: f.name.replace(/\.pdf$/i, "") || "Untitled", bytes: buf, pages: [], text: {}, fit: {}, strokes: {}, timer: null, seq: 0, dirty: {}, created: Date.now(), updated: Date.now() };
+    if (existing) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
+    const d = newDoc(id, id, f.name.replace(/\.pdf$/i, "") || "Untitled", buf);
+    await DB.putMeta({ id, name: d.name, pdf: id, folder: (window.Home && Home.folder) || null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
     await openDoc(d, true);
   } catch (e) { console.error(e); busy(false); toast("Couldn't open that file: " + (e.message || e)); }
 }
+function newDoc(id, pdfHash, name, bytes) { return { v: 2, id, pdf: pdfHash, name, bytes, pages: [], text: {}, fit: {}, strokes: {}, flags: {}, font: null, timer: null, seq: 0, dirty: {}, created: Date.now(), updated: Date.now() }; }
 async function openStored(id, meta) {
   let d = await DB.get(id).catch(() => null);
   if (!d && window.Sync && Sync.user) {
     busy(true, "Downloading from your account…");
     try {
-      const buf = await Sync.getPdf(id);
-      d = { id, name: (meta && meta.name) || "Untitled", bytes: buf, pages: [], text: {}, fit: {}, strokes: {}, timer: null, seq: 0, dirty: {}, created: Date.now(), updated: Date.now() };
+      const hash = (meta && meta.pdf) || id;
+      // another attempt at the same paper may already have the PDF on this device
+      let buf = null; for (const m of await DB.list().catch(() => [])) { if (m.pdf === hash && m.id !== id) { const o = await DB.get(m.id).catch(() => null); if (o && o.bytes) { buf = o.bytes.slice(0); break; } } }
+      if (!buf) buf = await Sync.getPdf(hash);
+      d = newDoc(id, hash, (meta && meta.name) || "Untitled", buf);
     } catch (e) { busy(false); toast("Couldn't download that paper: " + e.message); return; }
   }
   if (d) openDoc(d); else toast("That paper is no longer saved here.");
+}
+// older saved papers are brought up to the current format; nothing is dropped
+function migrateDoc(d) {
+  d.text ||= {}; d.fit ||= {}; d.strokes ||= {}; d.dirty ||= {}; d.seq ||= 0; d.flags ||= {};
+  if (!d.pdf) d.pdf = d.id;
+  for (const arr of Object.values(d.strokes)) for (const s of arr || []) { s.id ||= rid8(); s.t ||= "pen"; delete s._live; }
+  for (const [k, f] of Object.entries(d.fit)) if (typeof f !== "object") delete d.fit[k];
+  d.v = 2;
+  return d;
 }
 
 // ---------------- open / detect ----------------
 async function openDoc(d, fresh = false) {
   busy(true, "Opening…", null);
   if (pdf) { pdf.destroy(); pdf = null; }
-  doc = d; doc.text ||= {}; doc.fit ||= {}; doc.strokes ||= {}; doc.dirty ||= {}; doc.seq ||= 0;
+  doc = migrateDoc(d); doc.opened = Date.now();
   undoS.length = redoS.length = 0; views = [];
   pdf = await pdfjsLib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)), isEvalSupported: false }).promise;
-  await Promise.all([document.fonts.load("12px PaperSans"), document.fonts.load("12px PaperMono")]).catch(() => {});
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
   if (window.Sync && Sync.user) { busy(true, "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
   const need = [];
@@ -186,18 +171,57 @@ async function openDoc(d, fresh = false) {
     doc.pages[i] = await detectPage(i, doc.pages[i]);
     emit("page:" + i);
   }
+  if (!doc.font) { const name = await detectFont().catch(() => ""); doc.font = { key: matchFont(name) || FONT_DEFAULT, auto: true, detected: name || "" }; emit("font"); }
+  await applyFont(false);
   busy(false);
   $("#home").hidden = true; $("#editor").hidden = false;
   $("#docName").textContent = doc.name; document.title = doc.name + " · TypePDF";
   buildViews();
   const v = loadView();
   setZoom(v && v.zr ? fitWidthZoom() * v.zr : fitWidthZoom());
-  updateCount(); timerInit();
+  updateCount(); timerInit(); renderFlags(); fontMenu();
   if (v) restoreView(v);
   if (fresh || need.length) scheduleSave();
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
   if (window.Sync) Sync.live();
 }
+
+// the font the paper is mostly printed in, by amount of text
+async function detectFont() {
+  const tally = {};
+  for (let i = 0; i < Math.min(pdf.numPages, 4); i++) {
+    const page = await pdf.getPage(i + 1);
+    await page.getOperatorList();                       // loads the page's fonts so their names are known
+    const tc = await page.getTextContent();
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim() || /^\.+$/.test(it.str.trim())) continue;
+      let name = ""; try { const f = page.commonObjs.get(it.fontName); name = (f && (f.name || f.loadedName)) || ""; } catch (e) {}
+      if (!name) name = (tc.styles[it.fontName] || {}).fontFamily || "";
+      tally[name] = (tally[name] || 0) + it.str.length;
+    }
+  }
+  return Object.entries(tally).sort((a, b) => b[1] - a[1]).map(e => e[0]).find(n => matchFont(n)) || "";
+}
+async function applyFont(refit = true) {
+  const key = doc.font && FONTS[doc.font.key] ? doc.font.key : FONT_DEFAULT;
+  curFont = FONTS[key];
+  $("#pages").style.setProperty("--ans-font", `"TP-${key}", "PaperSans", sans-serif`);
+  await Promise.all([document.fonts.load(`12px "TP-${key}"`), document.fonts.load("12px PaperMono")]).catch(() => {});
+  if (refit && views.length) { doc.pages.forEach((P, p) => { P.regions.forEach(r => { delete doc.fit[r.id]; }); layoutPage(p); P.regions.forEach(r => { if (doc.text[r.id]) queueFit(p, r); }); }); }
+  fontMenu();
+}
+function fontMenu() {
+  const s = $("#fontSel"); if (!s || !doc) return;
+  const det = doc.font && doc.font.detected ? doc.font.detected.replace(/^[A-Z]{6}\+/, "").replace(/[-,].*$/, "") : "";
+  const auto = matchFont(det) || FONT_DEFAULT;
+  s.innerHTML = `<option value="auto">Match paper${det ? " (" + det + ")" : ""} → ${FONTS[auto].label}</option>` + Object.entries(FONTS).map(([k, f]) => `<option value="${k}">${f.label}</option>`).join("");
+  s.value = doc.font && !doc.font.auto ? doc.font.key : "auto";
+}
+$("#fontSel").addEventListener("change", e => {
+  const v = e.target.value, det = (doc.font && doc.font.detected) || "";
+  doc.font = v === "auto" ? { key: matchFont(det) || FONT_DEFAULT, auto: true, detected: det } : { key: v, auto: false, detected: det };
+  applyFont(); emit("font"); scheduleSave();
+});
 
 async function detectPage(i, prev) {
   const page = await pdf.getPage(i + 1);
@@ -305,6 +329,8 @@ function makeField(p, r) {
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
   ta.addEventListener("input", () => { if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
+  ta.addEventListener("focus", () => showFlagFloat(p, r));
+  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) hideFlagFloat(); }, 150));
   v.el.insertBefore(ta, v.ink);
   r._el = ta;
 }
@@ -354,7 +380,7 @@ function fieldTop(p, r, f) { return r.kind === "lines" ? disp(p, r.ys[0]) - 2 - 
 function applyField(p, r, f) {
   const ta = r._el; if (!ta) return;
   const z = zoom, rect = regionRect(p, r);
-  ta.style.fontSize = f.fs * z + "px"; ta.style.lineHeight = f.L * z + "px";
+  ta.style.fontSize = f.fs * fontScale(r) * z + "px"; ta.style.lineHeight = f.L * z + "px";
   ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
   ta.style.textIndent = (r.kind === "lines" ? r.indent || 0 : 0) * z + "px";
   if (r.kind === "lines") {
@@ -411,9 +437,18 @@ function layoutPage(p) {
     d.innerHTML = "<span>extra space</span>";
     v.el.insertBefore(d, v.pg.nextSibling); v.gapEls.push(d);
   }
+  $$(".flagmark", v.el).forEach(e => e.remove());
+  for (const r of P.regions) if (doc.flags && doc.flags[r.id]) {
+    const R = regionRect(p, r), m = document.createElement("button");
+    m.className = "flagmark"; m.title = "Flagged — click to go to this answer"; m.setAttribute("aria-label", "Flagged answer space");
+    m.style.left = Math.min(P.w - 14, r.x1 + 3) * z + "px"; m.style.top = (R.y0 + 1) * z + "px";
+    m.onclick = () => { const ta = r._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); };
+    v.el.appendChild(m);
+  }
   sizeInk(p); drawInk(p);
   if (v.visible) composite(p);
   if (boxMode) drawBoxes(p);
+  if (flagFor && flagFor.p === p) placeFlagFloat();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
@@ -776,7 +811,9 @@ function answerList(withQuestion) {
 
 // ---------------- export: filled-in PDF ----------------
 let fontCache = null;
-async function fontBytes() { if (!fontCache) fontCache = await Promise.all(["fonts/DejaVuSans.ttf", "fonts/DejaVuSansMono.ttf"].map(u => fetch(u).then(r => r.arrayBuffer()))); return fontCache; }
+const fontFiles = {};
+async function fontFile(name) { if (!fontFiles[name]) fontFiles[name] = fetch("fonts/" + name).then(r => r.arrayBuffer()); return fontFiles[name]; }
+async function fontBytes() { return Promise.all([fontFile(curFont.file), fontFile(MONO.file)]); }
 function wrapText(text, font, size, width, indent) {
   const out = []; let first = true;
   for (const para of text.replace(/\t/g, "    ").split("\n")) {
@@ -842,7 +879,7 @@ async function exportPDF() {
         const R = regionRect(p, r), pad = r.kind === "box" ? 4 : 0, width = r.x1 - r.x0 - 2 * pad;
         const f0 = fitOf(r); let fs = f0.fs, L = f0.L, lines, top;
         for (;;) {
-          lines = wrapText(txt, font, fs, width, r.kind === "lines" ? r.indent || 0 : 0);
+          lines = wrapText(txt, font, fs * fontScale(r), width, r.kind === "lines" ? r.indent || 0 : 0);
           top = fieldTop(p, r, { fs, L });
           const bottom = r.kind === "lines" ? R.y1 + 1 : R.y1 - pad;
           if (top + lines.length * L <= bottom + 0.5 || fs <= 5) break;
@@ -851,9 +888,9 @@ async function exportPDF() {
         if (r.kind === "cell") top = R.y0 + Math.max(0, ((R.y1 - R.y0) - lines.length * L) / 2);
         lines.forEach((ln, i) => {
           if (!ln) return;
-          const w = font.widthOfTextAtSize(ln, fs);
+          const w = font.widthOfTextAtSize(ln, fs * fontScale(r));
           const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 && r.kind === "lines" ? r.indent || 0 : 0);
-          page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs, font, color: rgb(0.067, 0.078, 0.094) });
+          page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: rgb(0.067, 0.078, 0.094) });
         });
       }
       const S = (doc.strokes[p] || []).slice().sort((a, b) => (a.t === "hl" ? 0 : 1) - (b.t === "hl" ? 0 : 1));
@@ -907,6 +944,9 @@ function aiJSON(withQuestion) {
   o.answers = answers;
   if (blank.length) o.blank = [...new Set(blank)];
   const wk = workingsAreas(); if (wk.length) o.handwritten = wk.map(a => ({ q: a.q, page: a.p + 1 }));
+  const idx = labelIndex(), fl = [];
+  doc.pages.forEach((P, p) => P.regions.forEach(r => { if (doc.flags && doc.flags[r.id]) fl.push(labelAt(idx, p, r.y0 + 6) + (r.label && r.label !== "label" ? ` [${r.label.replace(/[.\s]+$/, "")}]` : "")); }));
+  if (fl.length) o.flagged = fl;
   return o;
 }
 function workingsAreas() {
@@ -967,10 +1007,53 @@ async function openBackup(buf) {
 }
 
 window.addEventListener("beforeunload", () => { if (doc) { saveView(); DB.put(doc); } });
+// ---------------- flags: mark an answer space to come back to ----------------
+let flagFor = null;   // {p, r} of the focused answer space
+function showFlagFloat(p, r) { flagFor = { p, r }; placeFlagFloat(); }
+function hideFlagFloat() { flagFor = null; const b = $("#flagFloat"); if (b) b.hidden = true; }
+function placeFlagFloat() {
+  const b = $("#flagFloat"); if (!flagFor || !b) return;
+  const { p, r } = flagFor, v = views[p]; if (!v) return;
+  const R = regionRect(p, r), on = !!(doc.flags && doc.flags[r.id]);
+  if (b.parentElement !== v.el) v.el.appendChild(b);
+  b.hidden = false; b.classList.toggle("on", on);
+  b.textContent = on ? "⚑ Flagged" : "⚑ Flag";
+  b.title = on ? "Remove the flag" : "Flag this to come back to (e.g. to draw it on the iPad, or because it's hard)";
+  b.style.left = Math.max(0, Math.min(doc.pages[p].w - 70, r.x1 - 68)) * zoom + "px";
+  b.style.top = Math.max(0, R.y0 - 20) * zoom + "px";
+}
+function toggleFlag(p, r) {
+  doc.flags ||= {};
+  if (doc.flags[r.id]) delete doc.flags[r.id]; else doc.flags[r.id] = Date.now();
+  emit("flag:" + r.id); layoutPage(p); renderFlags(); scheduleSave();
+  toast(doc.flags[r.id] ? "Flagged. Find it again under Flags." : "Flag removed.");
+}
+$("#flagFloat").addEventListener("pointerdown", e => e.preventDefault());   // keep the cursor in the answer
+$("#flagFloat").addEventListener("click", () => { if (flagFor) toggleFlag(flagFor.p, flagFor.r); placeFlagFloat(); });
+function renderFlags() {
+  const n = doc ? Object.keys(doc.flags || {}).filter(id => findRegion(id)).length : 0;
+  $("#flagsBtn").textContent = n ? `⚑ ${n}` : "⚑ Flags"; $("#flagsBtn").classList.toggle("has", n > 0);
+}
+$("#flagsBtn").onclick = e => {
+  const pop = $("#flagsPop");
+  if (!pop.hidden) { pop.hidden = true; return; }
+  const idx = labelIndex(), rows = [];
+  doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0).forEach(r => { if (doc.flags[r.id]) rows.push({ p, r, q: labelAt(idx, p, r.y0 + 6) }); }));
+  pop.innerHTML = rows.length ? `<b>Flagged answer spaces</b>` : `<b>No flags yet</b><p>Click into an answer space and press ⚑ Flag to mark it to come back to.</p>`;
+  for (const x of rows) {
+    const b = document.createElement("button"); const t = (doc.text[x.r.id] || "").trim();
+    b.innerHTML = `<span>Q${x.q}${x.r.label && x.r.label !== "label" ? " · " + x.r.label.replace(/[.\s]+$/, "") : ""}</span><small>page ${x.p + 1}${t ? " · " + t.slice(0, 40).replace(/</g, "&lt;") : " · not answered"}</small>`;
+    b.onclick = () => { pop.hidden = true; const ta = x.r._el; ta.scrollIntoView({ block: "center", behavior: "smooth" }); ta.focus({ preventScroll: true }); };
+    pop.appendChild(b);
+  }
+  const r = e.currentTarget.getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = Math.max(8, Math.min(window.innerWidth - 300, r.left - 120)) + "px"; pop.hidden = false;
+};
+document.addEventListener("pointerdown", e => { const pop = $("#flagsPop"); if (pop && !pop.hidden && !pop.contains(e.target) && !$("#flagsBtn").contains(e.target)) pop.hidden = true; });
+
 // bring papers across from the earlier single-device version (same site, older storage name)
 (async () => {
   try {
-    if (localStorage.getItem("migrated-paperwork")) return renderHomeList();
+    if (localStorage.getItem("migrated-paperwork")) return;
     const old = await new Promise(res => { const r = indexedDB.open("paperwork"); r.onupgradeneeded = () => { r.transaction.abort(); res(null); }; r.onsuccess = () => res(r.result); r.onerror = () => res(null); });
     if (old && old.objectStoreNames.contains("docs")) {
       const all = await new Promise(res => { const q = old.transaction("docs").objectStore("docs").getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); });
@@ -984,5 +1067,8 @@ window.addEventListener("beforeunload", () => { if (doc) { saveView(); DB.put(do
     }
     localStorage.setItem("migrated-paperwork", "1");
   } catch (e) {}
-  renderHomeList();
+  if (window.renderHomeList) renderHomeList();
 })();
+
+// ask the browser to keep saved papers even when the device is low on space
+if (navigator.storage && navigator.storage.persist) navigator.storage.persisted().then(p => { if (!p) navigator.storage.persist().catch(() => {}); }).catch(() => {});

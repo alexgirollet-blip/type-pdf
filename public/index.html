@@ -18,19 +18,33 @@
       <div><h1>TypePDF</h1><p>Answer any PDF paper: type on the answer lines, write with a pen, export a filled-in PDF.</p></div>
     </header>
     <div class="acct" id="acct"></div>
-    <label class="drop" id="drop" for="file">
-      <input type="file" id="file" accept="application/pdf,.pdf,.typepdf,.paperwork,.json" hidden>
-      <strong>Open a PDF</strong>
-      <span>Drop a file here, click to choose, or paste one with ⌘/Ctrl+V. Backups (<em>.typepdf</em>) open here too.</span>
-    </label>
-    <form class="linkrow" id="linkForm">
-      <input id="linkIn" type="url" placeholder="…or paste a link to a PDF" aria-label="Link to a PDF">
-      <button type="submit">Open link</button>
-    </form>
-    <p class="privacy">Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers and answers are kept in your account so they sync live between your devices.</p>
-    <section id="recentWrap" hidden>
-      <h2>Your papers</h2>
+    <div class="openrow">
+      <label class="bigbtn primary" for="file"><input type="file" id="file" accept="application/pdf,.pdf,.typepdf,.paperwork,.json" hidden>Open a PDF</label>
+      <button class="bigbtn" id="pasteBtn" type="button">Paste PDF</button>
+      <form class="linkrow" id="linkForm">
+        <input id="linkIn" type="url" placeholder="…or paste a link to a PDF" aria-label="Link to a PDF">
+        <button type="submit">Open link</button>
+      </form>
+    </div>
+    <p class="privacy">You can also drop a PDF anywhere on this page. Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers are kept in your account and sync live between your devices.</p>
+    <div class="storage" id="storage" hidden><div class="sbar" id="storageBar"><i></i></div><span id="storageTxt"></span></div>
+    <section id="recentWrap" class="lib">
+      <div class="libbar">
+        <nav class="crumbs" id="crumbs" aria-label="Folder"></nav>
+        <span class="grow"></span>
+        <input id="search" type="search" placeholder="Search papers" aria-label="Search papers">
+        <select id="sortSel" aria-label="Sort">
+          <option value="opened">Recently opened</option><option value="updated">Recently changed</option><option value="name">Name</option><option value="size">Size</option><option value="progress">Progress</option>
+        </select>
+        <select id="filterSel" aria-label="Filter">
+          <option value="all">All papers</option><option value="star">Starred</option><option value="flag">Has flags</option><option value="new">Not started</option><option value="doing">In progress</option><option value="done">Finished</option><option value="bin">Bin</option>
+        </select>
+        <button id="newFolder" type="button">New folder</button>
+      </div>
+      <ul id="folderList" class="recent"></ul>
       <ul id="recent" class="recent"></ul>
+      <p class="empty" id="emptyLib"></p>
+      <button id="emptyBin" class="danger" hidden>Empty the bin</button>
     </section>
     <details class="help">
       <summary>How it works</summary>
@@ -38,6 +52,8 @@
         <li><b>Type:</b> click any dotted line, ruled line, empty table cell or answer box and type. Text sits on the lines, shrinks if you write a lot, and the page grows if it still doesn't fit.</li>
         <li><b>Write:</b> drag with the pen tool (mouse, trackpad, Apple Pencil or a mirrored iPad). A short tap on an answer space starts typing instead. Fingers scroll; pinch to zoom.</li>
         <li><b>Live sync:</b> sign in on two devices (say a laptop and an iPad) and open the same paper. Typing and ink appear on the other one straight away.</li>
+        <li><b>Flags:</b> click into an answer and press ⚑ Flag to mark it to come back to, e.g. to draw it on the iPad or because it's hard. The ⚑ button in the bar lists them.</li>
+        <li><b>Folders:</b> make folders (and folders inside folders), drag papers onto them, star papers to keep them at the top, and make a blank new attempt of any paper. Deleted papers stay in the Bin for 30 days.</li>
         <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed.</li>
         <li><b>Export PDF</b> keeps the original paper sharp and adds your writing on top. <b>Export for AI</b> gives typed answers as JSON plus a small PDF of only your handwritten work, which costs far fewer tokens to mark.</li>
         <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab jumps to the next answer space · Esc leaves a box.</li>
@@ -79,7 +95,9 @@
       <button class="zl" id="zfit" title="Fit width">100%</button>
       <button class="ib" id="zin" title="Zoom in" aria-label="Zoom in">+</button>
     </div>
+    <select id="fontSel" class="fontsel" aria-label="Answer font" title="Font for typed answers"></select>
     <span class="grow"></span>
+    <button id="flagsBtn" title="Flagged answer spaces">⚑ Flags</button>
     <button class="timer" id="timerBtn" title="Timer">⏱ <span id="timerTxt">Timer</span></button>
     <span class="count" id="count" title="Answer spaces with something typed in them"></span>
     <button id="hintBtn" title="Highlight every answer space">Show spaces</button>
@@ -111,7 +129,9 @@
     <label class="chk"><input type="checkbox" id="tUp"> Count up instead</label>
   </div>
 
+  <div class="pop flagspop" id="flagsPop" hidden></div>
   <div class="pages" id="pages"></div>
+  <button class="flagfloat" id="flagFloat" hidden>⚑ Flag</button>
   <div class="pageind" id="pageInd"></div>
 </div>
 
@@ -121,7 +141,7 @@
     <h2 id="auTitle">Sign in</h2>
     <label>Username <input id="auUser" autocomplete="username" required minlength="3" maxlength="24" autocapitalize="off" spellcheck="false"></label>
     <label>Password <input id="auPass" type="password" autocomplete="current-password" required minlength="8"></label>
-    <p class="note" id="auHint" hidden>3–24 letters, numbers, dots, dashes or underscores. At least 8 characters for the password. There's no email, so keep your password somewhere safe.</p>
+    <p class="note" id="auHint" hidden>3–24 letters, numbers, dots, dashes or underscores. At least 8 characters for the password. There's no email, so keep your password somewhere safe. The site's admin can see your papers' names and how much space they use.</p>
     <p class="err" id="authErr" role="alert"></p>
     <div class="row"><button class="primary" id="auGo" type="submit">Sign in</button><button type="button" id="auClose">Cancel</button></div>
     <button type="button" class="linkbtn" id="auSwitch">New here? Create an account</button>
@@ -161,14 +181,42 @@
   <div class="row"><button type="button" id="aiClose">Close</button></div>
 </dialog>
 
+<dialog id="nameDlg" class="dlg">
+  <form id="nameForm">
+    <h2 id="nameTitle">Name</h2>
+    <input id="nameIn" maxlength="80" aria-label="Name" autocomplete="off">
+    <p class="err" id="nameErr"></p>
+    <div class="row"><button class="primary" type="submit">Save</button><button type="button" id="nameCancel">Cancel</button></div>
+  </form>
+</dialog>
+<dialog id="moveDlg" class="dlg">
+  <h2 id="moveTitle">Move to</h2>
+  <div class="movelist" id="moveList"></div>
+  <div class="row"><button type="button" id="moveCancel">Cancel</button></div>
+</dialog>
+<dialog id="pasteDlg" class="dlg">
+  <h2>Paste a PDF</h2>
+  <p class="note">Your browser asked for the clipboard another way. Tap the box, then choose <b>Paste</b> (or press ⌘/Ctrl+V). A copied PDF file or a link to one both work.</p>
+  <div class="pastezone" id="pasteZone" contenteditable="true" role="textbox" aria-label="Paste here"></div>
+  <div class="row"><button type="button" id="pasteCancel">Cancel</button></div>
+</dialog>
+<dialog id="adminDlg" class="dlg wide">
+  <h2>Admin</h2>
+  <p class="note">You're the admin because yours was the first account. You have no storage limit. Everyone shares Cloudflare's free 5 GB.</p>
+  <div id="adminBody"></div>
+  <div class="row"><button type="button" id="adminClose">Close</button></div>
+</dialog>
+
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <div class="busy" id="busy" hidden><div class="busy-in"><div class="spin"></div><div id="busyTxt">Working…</div><div class="bar2"><i id="busyBar"></i></div></div></div>
 
 <script src="lib/pdf.min.js"></script>
 <script src="lib/pdf-lib.min.js"></script>
 <script src="lib/fontkit.umd.min.js"></script>
+<script src="fonts.js"></script>
 <script src="detect.js"></script>
 <script src="app.js"></script>
 <script src="sync.js"></script>
+<script src="home.js"></script>
 </body>
 </html>

@@ -13,6 +13,12 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top.
 - **Export for AI**: typed answers as compact JSON (labelled by question, optionally with the question wording) plus a small greyscale PDF holding only the hand-drawn areas. This is far cheaper for an AI model to mark than the whole paper.
 - **Fix anything detection missed** with the Boxes tool: add, move, resize, delete or retype any answer space, or re-detect a page.
+- **Flags**: mark any answer space to come back to (to draw it on the iPad, or because it's hard). Flagged spaces show a marker, are listed under ⚑ in the toolbar, and appear in the AI export.
+- **Fonts**: answers start in the font closest to the paper's own (detected from the PDF), and you can pick another per paper: Arial, Times, Calibri or Cambria style, a clear sans, an easy-to-read font, handwriting, or Courier style. The exported PDF uses the same font.
+- **Folders and organising**: nested folders, drag papers onto folders, search, sort (recently opened, changed, name, size, progress), filters (starred, has flags, not started, in progress, finished), stars, rename, and "New attempt" to make a blank copy of a paper without touching your first try. Copies share one stored PDF.
+- **Bin**: deleted papers stay in the bin for 30 days and can be restored.
+- **Storage**: each paper shows its size; a bar shows how much space you've used.
+- **Paste PDF button** for devices without a keyboard shortcut (e.g. an iPad).
 - Timer, "show answer spaces", Tab to jump between spaces, and backup files to move papers between devices without an account.
 
 Signed out, everything stays in the browser and the PDF is never uploaded.
@@ -24,7 +30,16 @@ Signed out, everything stays in the browser and the PDF is never uploaded.
   - `AuthStore` (Durable Object, SQLite): accounts (PBKDF2-hashed passwords), sessions, rate limits.
   - `UserStore` (one Durable Object per account, SQLite): papers, every synced change, and the PDFs (stored in 1 MB chunks). Live sync runs over hibernating WebSockets.
 
-Limits: 40 MB per PDF, 400 MB per account.
+### Accounts, admin and storage
+
+- The **first account created is the admin**. The admin has no storage limit, sees how much of Cloudflare's free 5 GB everyone is using, sets each user's allowance (100 MB – 2 GB, 250 MB by default), can list and delete any user's papers, and can delete accounts. Users are told the admin can see their papers' names and sizes.
+- Other accounts get the default allowance until the admin changes it. Single PDFs are limited to 40 MB.
+
+### Updates never lose data
+
+- Server storage changes are additive only: new tables and new columns are added if missing; nothing is dropped or rewritten.
+- Papers saved in the browser are upgraded in place when opened (older formats are converted, nothing is removed), and the site asks the browser to keep its storage persistent.
+- Answers not yet synced stay marked on the device and are sent when the connection returns.
 
 ## Deploy on Cloudflare (auto-deploys from GitHub)
 
@@ -46,4 +61,4 @@ npm run dev        # http://localhost:8787
 
 ## Licence
 
-Apache-2.0. Bundled libraries keep their own licences (pdf.js and pdf-lib: Apache-2.0 / MIT; fontkit: MIT; DejaVu fonts: Bitstream Vera licence).
+Apache-2.0. Bundled libraries keep their own licences (pdf.js and pdf-lib: Apache-2.0 / MIT; fontkit: MIT; bundled fonts: see `public/fonts/LICENSES.md`).

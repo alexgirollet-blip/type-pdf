@@ -5,7 +5,7 @@
 // when the connection comes back.
 "use strict";
 window.Sync = (() => {
-  const S = { user: null, token: null, ws: null, doc: null, live: false, ready: null, retry: 1000, received: null, presence: 1, pingT: 0, flushT: 0, ver: 0, state: "local" };
+  const S = { info: null, user: null, token: null, ws: null, doc: null, live: false, ready: null, retry: 1000, received: null, presence: 1, pingT: 0, flushT: 0, ver: 0, state: "local" };
   let device = ""; try { device = localStorage.getItem("device") || ""; if (!device) { device = Math.random().toString(36).slice(2, 12); localStorage.setItem("device", device); } } catch (e) {}
 
   // ---------- HTTP ----------
@@ -24,21 +24,22 @@ window.Sync = (() => {
     try { S.token = localStorage.getItem("token"); S.user = localStorage.getItem("user"); } catch (e) {}
     renderAccount();
     if (S.token) {
-      try { const j = await jsonOrThrow(await api("/api/auth/me")); S.user = j.user; localStorage.setItem("user", j.user); }
+      try { const j = await jsonOrThrow(await api("/api/auth/me")); S.user = j.user; S.info = j; localStorage.setItem("user", j.user); }
       catch (e) { if (!navigator.onLine) {/* keep the cached user while offline */} else signedOut(); }
     }
     renderAccount(); if (typeof renderHomeList === "function" && !$("#home").hidden) renderHomeList();
   }
-  function signedIn(j) { S.user = j.user; S.token = j.token; try { localStorage.setItem("token", j.token); localStorage.setItem("user", j.user); } catch (e) {} renderAccount(); renderHomeList(); if (doc) attach(doc).then(() => live()); }
-  function signedOut() { detach(); S.user = null; S.token = null; try { localStorage.removeItem("token"); localStorage.removeItem("user"); } catch (e) {} renderAccount(); setState("local"); }
+  function signedIn(j) { S.user = j.user; S.token = j.token; S.info = j; try { localStorage.setItem("token", j.token); localStorage.setItem("user", j.user); } catch (e) {} renderAccount(); renderHomeList(); if (doc) attach(doc).then(() => live()); }
+  function signedOut() { detach(); S.user = null; S.token = null; S.info = null; try { localStorage.removeItem("token"); localStorage.removeItem("user"); } catch (e) {} renderAccount(); setState("local"); }
   async function auth(kind, username, password) { signedIn(await jsonOrThrow(await api("/api/auth/" + kind, { method: "POST", body: JSON.stringify({ username, password }) }))); }
   async function logout() { try { await api("/api/auth/logout", { method: "POST", body: "{}" }); } catch (e) {} signedOut(); renderHomeList(); toast("Signed out. Papers already on this device stay here."); }
 
   function renderAccount() {
     const el = $("#acct"); if (!el) return;
     if (S.user) {
-      el.innerHTML = `<span>Signed in as <b></b></span><button id="acctBtn">Account</button><button id="outBtn">Sign out</button>`;
+      el.innerHTML = `<span>Signed in as <b></b>${S.info && S.info.admin ? ' <em class="adm">admin</em>' : ""}</span>${S.info && S.info.admin ? '<button id="adminBtn">Admin</button>' : ""}<button id="acctBtn">Account</button><button id="outBtn">Sign out</button>`;
       $("b", el).textContent = S.user;
+      if ($("#adminBtn")) $("#adminBtn").onclick = () => window.openAdmin && openAdmin();
       $("#outBtn").onclick = logout; $("#acctBtn").onclick = () => { $("#acctErr").textContent = ""; $("#acctDlg").showModal(); };
     } else {
       el.innerHTML = `<span>Sign in to sync your papers across devices, live.</span><button id="inBtn" class="primary">Sign in</button>`;
@@ -75,12 +76,24 @@ window.Sync = (() => {
 
   // ---------- documents over HTTP ----------
   async function listDocs() { return jsonOrThrow(await api("/api/docs")); }
-  async function deleteDoc(id) { return jsonOrThrow(await api("/api/docs/" + id, { method: "DELETE" })); }
-  async function getPdf(id) { const r = await api("/api/docs/" + id + "/pdf"); if (!r.ok) throw new Error("the PDF isn't in your account yet"); return r.arrayBuffer(); }
+  async function deleteDoc(id, purge) { return jsonOrThrow(await api("/api/docs/" + id + (purge ? "?purge=1" : ""), { method: "DELETE" })); }
+  async function patchDoc(id, fields) { return jsonOrThrow(await api("/api/docs/" + id, { method: "PATCH", body: JSON.stringify(fields) })); }
+  async function createDoc(rec) { return jsonOrThrow(await api("/api/docs", { method: "POST", body: JSON.stringify(rec) })); }
+  async function saveFolders(folders, ver) { const r = await api("/api/library", { method: "PUT", body: JSON.stringify({ folders, ver }) }); const j = await r.json().catch(() => ({})); if (r.status === 409) return { conflict: true, ...j }; if (!r.ok) throw new Error(j.error || "Couldn't save folders"); return j; }
+  async function getPdf(hash) { const r = await api("/api/pdf/" + hash); if (!r.ok) throw new Error("the PDF isn't in your account yet"); return r.arrayBuffer(); }
+  async function refreshInfo() { try { S.info = await jsonOrThrow(await api("/api/auth/me")); } catch (e) {} return S.info; }
+  const admin = {
+    overview: async () => jsonOrThrow(await api("/api/admin/overview")),
+    quota: async (user, quota) => jsonOrThrow(await api("/api/admin/quota", { method: "POST", body: JSON.stringify({ user, quota }) })),
+    setDefault: async quota => jsonOrThrow(await api("/api/admin/default", { method: "POST", body: JSON.stringify({ quota }) })),
+    docs: async user => jsonOrThrow(await api(`/api/admin/user/${user}/docs`)),
+    deleteDoc: async (user, id) => jsonOrThrow(await api(`/api/admin/user/${user}/docs/${id}`, { method: "DELETE" })),
+    deleteUser: async user => jsonOrThrow(await api(`/api/admin/user/${user}`, { method: "DELETE" })),
+  };
   function fetchPdf(url) { return api("/api/fetch-pdf?url=" + encodeURIComponent(url)); }
   async function uploadPdf(d) {
     try {
-      const r = await api(`/api/docs/${d.id}/pdf?name=${encodeURIComponent(d.name)}`, { method: "PUT", body: d.bytes.slice(0), headers: { "content-type": "application/pdf" } });
+      const r = await api(`/api/pdf/${d.pdf || d.id}?doc=${d.id}&name=${encodeURIComponent(d.name)}`, { method: "PUT", body: d.bytes.slice(0), headers: { "content-type": "application/pdf" } });
       if (!r.ok) { const j = await r.json().catch(() => ({})); toast("This paper's PDF couldn't be stored in your account: " + (j.error || r.status), 6000); }
     } catch (e) { /* retried next time the paper is opened */ }
   }
@@ -89,6 +102,8 @@ window.Sync = (() => {
   function valueOf(k) {
     if (k === "meta") return JSON.stringify(metaOf());
     if (k === "timer") return doc.timer ? JSON.stringify(doc.timer) : null;
+    if (k === "font") return doc.font ? JSON.stringify(doc.font) : null;
+    if (k.startsWith("flag:")) return doc.flags && doc.flags[k.slice(5)] ? JSON.stringify(doc.flags[k.slice(5)]) : null;
     let m;
     if ((m = k.match(/^page:(\d+)$/))) { const P = doc.pages[+m[1]]; if (!P) return null; return JSON.stringify({ w: P.w, h: P.h, rot: P.rot, hasText: P.hasText, items: P.items, regions: P.regions.map(({ _el, ...r }) => r) }); }
     if ((m = k.match(/^text:(.+)$/))) return doc.text[m[1]] ? JSON.stringify(doc.text[m[1]]) : null;
@@ -96,7 +111,8 @@ window.Sync = (() => {
     return null;
   }
   function allKeys() {
-    const ks = ["meta"]; if (doc.timer) ks.push("timer");
+    const ks = ["meta"]; if (doc.timer) ks.push("timer"); if (doc.font) ks.push("font");
+    for (const k of Object.keys(doc.flags || {})) ks.push("flag:" + k);
     doc.pages.forEach((P, p) => { if (P && P.regions) ks.push("page:" + p); });
     for (const k of Object.keys(doc.text)) ks.push("text:" + k);
     for (const [p, arr] of Object.entries(doc.strokes)) for (const s of arr || []) ks.push(`s:${p}:${s.id}`);
@@ -111,6 +127,8 @@ window.Sync = (() => {
     let m;
     if (k === "meta") { if (v && v.name && v.name !== doc.name) { doc.name = v.name; if (S.live) { $("#docName").textContent = doc.name; } } return; }
     if (k === "timer") { doc.timer = v; if (S.live) timerTick(); return; }
+    if (k === "font") { if (v) { doc.font = v; if (S.live) applyFont(); } return; }
+    if (k.startsWith("flag:")) { const id = k.slice(5); doc.flags ||= {}; if (v) doc.flags[id] = v; else delete doc.flags[id]; if (S.live) { const p = +id.split(":")[0]; layoutPage(p); renderFlags(); } return; }
     if ((m = k.match(/^page:(\d+)$/))) {
       const p = +m[1]; if (!v) return;
       const gaps = (doc.pages[p] && doc.pages[p].gaps) || {};
@@ -165,7 +183,7 @@ window.Sync = (() => {
     ws.onopen = () => {
       S.retry = 1000;
       S.received = d.seq ? null : new Set();
-      ws.send(JSON.stringify({ t: "hello", since: d.seq || 0, name: d.name }));
+      ws.send(JSON.stringify({ t: "hello", since: d.seq || 0, name: d.name, pdf: d.pdf || d.id }));
       clearInterval(S.pingT); S.pingT = setInterval(() => { if (ws.readyState === 1) ws.send('{"t":"ping"}'); }, 25000);
     };
     ws.onmessage = ev => {
@@ -233,8 +251,8 @@ window.Sync = (() => {
   function flashLive() { const pill = $("#syncPill"); if (!pill) return; pill.classList.remove("flash"); void pill.offsetWidth; pill.classList.add("flash"); }
 
   return {
-    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, getPdf, fetchPdf, openAuth,
-    get user() { return S.user; },
+    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, openAuth, refreshInfo, admin,
+    get user() { return S.user; }, get info() { return S.info; },
   };
 })();
 const Sync = window.Sync; Sync.wireDialogs();
