@@ -1,0 +1,295 @@
+// detect.js — finds answer spaces on a rendered PDF page.
+// Works on pixels (so it handles scans) and uses the text layer when there is one
+// for labels, question numbering and the "is this a code answer" hint.
+// All output coordinates are PDF points, origin top-left of the page view.
+"use strict";
+const Detect = (() => {
+  const S = 2;              // analysis scale: px per pt
+  const DARK = 165;         // grey level below which a pixel counts as ink
+
+  function grey(imgData) {
+    const { data, width, height } = imgData;
+    const g = new Uint8Array(width * height);
+    for (let i = 0, j = 0; i < g.length; i++, j += 4) {
+      // treat transparent as white
+      const a = data[j + 3] / 255;
+      g[i] = Math.round((0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2]) * a + 255 * (1 - a));
+    }
+    return { g, w: width, h: height };
+  }
+
+  // integral image of ink so any rectangle's ink count is O(1)
+  function integral(G) {
+    const { g, w, h } = G;
+    const I = new Uint32Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let row = 0;
+      for (let x = 0; x < w; x++) {
+        row += g[y * w + x] < DARK ? 1 : 0;
+        I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row;
+      }
+    }
+    return I;
+  }
+  function inkIn(I, w, x0, y0, x1, y1) { // px, inclusive-exclusive, clamped
+    const W = w + 1, H = I.length / W - 1;
+    x0 = Math.max(0, Math.min(w, x0 | 0)); x1 = Math.max(0, Math.min(w, x1 | 0));
+    y0 = Math.max(0, Math.min(H, y0 | 0)); y1 = Math.max(0, Math.min(H, y1 | 0));
+    if (x1 <= x0 || y1 <= y0) return 0;
+    return I[y1 * W + x1] - I[y0 * W + x1] - I[y1 * W + x0] + I[y0 * W + x0];
+  }
+
+  // ---- horizontal rules (solid, dotted, dashed, underscores) ----
+  function hRules(G, I) {
+    const { g, w, h } = G;
+    const T = 4;           // thinness probe distance (px)
+    const GAP = 9;         // max gap inside a dotted line (px)
+    const MINLEN = 34 * S; // shortest answer line (pt->px)
+    const segs = [];
+    for (let y = T; y < h - T; y++) {
+      const row = y * w;
+      let x = 0, runs = [];
+      while (x < w) {
+        if (g[row + x] < DARK) {
+          let a = x; while (x < w && g[row + x] < DARK) x++;
+          const b = x;
+          // thin: little ink T px above and below this run
+          const above = inkIn(I, w, a - 1, y - T, b + 1, y - T + 1);
+          const below = inkIn(I, w, a - 1, y + T, b + 1, y + T + 1);
+          if (above + below <= Math.max(1, (b - a) * 0.3)) runs.push([a, b]);
+        } else x++;
+      }
+      // merge thin runs separated by small gaps
+      let cur = null;
+      for (const r of runs) {
+        if (cur && r[0] - cur.b <= GAP) { cur.b = r[1]; cur.ink += r[1] - r[0]; cur.n++; }
+        else { if (cur) segs.push(cur); cur = { y, a: r[0], b: r[1], ink: r[1] - r[0], n: 1 }; }
+      }
+      if (cur) segs.push(cur);
+    }
+    const long = segs.filter(s => s.b - s.a >= MINLEN && (s.n >= 6 || s.ink / (s.b - s.a) > 0.85));
+    // merge the 1–4 px rows that make up one physical line
+    long.sort((p, q) => p.y - q.y || p.a - q.a);
+    const lines = [];
+    for (const s of long) {
+      const m = lines.find(l => s.y - l.yb <= 2 && Math.min(l.b, s.b) - Math.max(l.a, s.a) > 0.6 * Math.min(l.b - l.a, s.b - s.a));
+      if (m) { m.yb = s.y; m.a = Math.min(m.a, s.a); m.b = Math.max(m.b, s.b); m.ink = Math.max(m.ink, s.ink); m.n = Math.max(m.n, s.n); }
+      else lines.push({ ya: s.y, yb: s.y, a: s.a, b: s.b, ink: s.ink, n: s.n });
+    }
+    return lines.map(l => ({
+      x0: l.a / S, x1: l.b / S, y: (l.ya + l.yb) / 2 / S, th: (l.yb - l.ya + 1) / S,
+      solid: l.ink / (l.b - l.a) > 0.85
+    }));
+  }
+
+  // ---- vertical solid rules (table/box sides) ----
+  function vRules(G) {
+    const { g, w, h } = G;
+    const MIN = 8 * S, T = 4, out = [];
+    for (let x = T; x < w - T; x++) {
+      let y = 0;
+      while (y < h) {
+        if (g[y * w + x] < DARK && g[y * w + x - T] >= DARK && g[y * w + x + T] >= DARK) {
+          let a = y, miss = 0, b = y;
+          while (y < h && miss <= 1) {
+            const on = g[y * w + x] < DARK && g[y * w + x - T] >= DARK && g[y * w + x + T] >= DARK;
+            if (on) { b = y; miss = 0; } else miss++;
+            y++;
+          }
+          if (b - a >= MIN) out.push({ x, a, b });
+        } else y++;
+      }
+    }
+    // merge adjacent columns
+    out.sort((p, q) => p.x - q.x || p.a - q.a);
+    const res = [];
+    for (const s of out) {
+      const m = res.find(r => s.x - r.xb <= 2 && Math.min(r.b, s.b) - Math.max(r.a, s.a) > 0.6 * Math.min(r.b - r.a, s.b - s.a));
+      if (m) { m.xb = s.x; m.a = Math.min(m.a, s.a); m.b = Math.max(m.b, s.b); }
+      else res.push({ xa: s.x, xb: s.x, a: s.a, b: s.b });
+    }
+    return res.map(r => ({ x: (r.xa + r.xb) / 2 / S, y0: r.a / S, y1: r.b / S }));
+  }
+
+  // ---- enclosed empty areas: table cells and answer boxes ----
+  function enclosed(G, I, H, V) {
+    const { w, h } = G;
+    if (!V.length) return [];
+    const solidH = H.filter(l => l.solid);
+    if (!solidH.length) return [];
+    // mask of rule pixels, dilated so small gaps at corners close
+    const M = new Uint8Array(w * h);
+    const D = 2;
+    for (const l of solidH) {
+      const y0 = Math.round(l.y * S) - D, y1 = Math.round(l.y * S) + D;
+      for (let y = Math.max(0, y0); y <= Math.min(h - 1, y1); y++)
+        for (let x = Math.max(0, Math.round(l.x0 * S) - D); x <= Math.min(w - 1, Math.round(l.x1 * S) + D); x++) M[y * w + x] = 1;
+    }
+    for (const v of V) {
+      const x0 = Math.round(v.x * S) - D, x1 = Math.round(v.x * S) + D;
+      for (let x = Math.max(0, x0); x <= Math.min(w - 1, x1); x++)
+        for (let y = Math.max(0, Math.round(v.y0 * S) - D); y <= Math.min(h - 1, Math.round(v.y1 * S) + D); y++) M[y * w + x] = 1;
+    }
+    // flood fill every non-rule area; keep ones not touching the page edge
+    const seen = new Uint8Array(w * h), stack = new Int32Array(w * h), out = [];
+    for (let s = 0; s < w * h; s++) {
+      if (M[s] || seen[s]) continue;
+      let sp = 0, x0 = w, y0 = h, x1 = 0, y1 = 0, n = 0, edge = false;
+      stack[sp++] = s; seen[s] = 1;
+      while (sp) {
+        const p = stack[--sp], x = p % w, y = (p / w) | 0; n++;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        if (x === 0 || y === 0 || x === w - 1 || y === h - 1) edge = true;
+        if (x > 0 && !M[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack[sp++] = p - 1; }
+        if (x < w - 1 && !M[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack[sp++] = p + 1; }
+        if (y > 0 && !M[p - w] && !seen[p - w]) { seen[p - w] = 1; stack[sp++] = p - w; }
+        if (y < h - 1 && !M[p + w] && !seen[p + w]) { seen[p + w] = 1; stack[sp++] = p + w; }
+      }
+      if (edge) continue;
+      const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+      if (bw < 10 * S || bh < 8 * S) continue;
+      if (n < 0.8 * bw * bh) continue;                 // not rectangular
+      if (bw * bh > 0.6 * w * h) continue;             // whole-page frame
+      const pad = 3;
+      const ink = inkIn(I, w, x0 + pad, y0 + pad, x1 - pad + 1, y1 - pad + 1);
+      const area = Math.max(1, (bw - 2 * pad) * (bh - 2 * pad));
+      out.push({ x0: x0 / S, y0: y0 / S, x1: (x1 + 1) / S, y1: (y1 + 1) / S, empty: ink / area < 0.002 && ink < 12 });
+    }
+    return out;
+  }
+
+  // ---- text layer helpers ----
+  function textItems(tc, viewport) {
+    const items = [];
+    for (const it of tc.items) {
+      if (!it.str || !it.str.trim()) continue;
+      const [a, b, c, d, e, f] = pdfjsLib.Util.transform(viewport.transform, it.transform);
+      const fh = Math.hypot(c, d) || Math.hypot(a, b);
+      const x = e, base = f;
+      items.push({ str: it.str, x, y0: base - fh * 0.85, y1: base + fh * 0.2, x1: x + (it.width || 0) * viewport.scale, base, fh });
+    }
+    return items;
+  }
+
+  const CODE_RE = /\b(write|complete|rewrite|amend|modify|give)\b[^.]{0,80}\b(pseudo-?code|code|function|procedure|sub-?routine|algorithm|program|sql|statement|query|method|class|css|html|javascript|python)\b/i;
+
+  // ---- main ----
+  // canvas: page rendered at scale S. viewport: pdf.js viewport at scale 1.
+  function page(canvas, viewport, tc) {
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const G = grey(ctx.getImageData(0, 0, canvas.width, canvas.height));
+    const I = integral(G);
+    const PW = viewport.width, PH = viewport.height;
+    const H = hRules(G, I), V = vRules(G);
+    const items = tc ? textItems(tc, viewport) : [];
+    const inkPt = (x0, y0, x1, y1) => inkIn(I, G.w, x0 * S, y0 * S, x1 * S, y1 * S);
+
+    // rules touched by two or more vertical lines are table/box borders
+    const touching = l => V.filter(v => v.x >= l.x0 - 3 && v.x <= l.x1 + 3 && v.y0 <= l.y + 3 && v.y1 >= l.y - 3).length;
+    const boxes = enclosed(G, I, H, V);
+    const insideBox = (l) => boxes.some(b => l.x0 >= b.x0 - 2 && l.x1 <= b.x1 + 2 && l.y > b.y0 + 4 && l.y < b.y1 - 4);
+
+    // answer lines: thin, long, blank band above, not a table border
+    let lines = H.filter(l => {
+      if (l.th > 3.5) return false;
+      if (l.y < 25 || l.y > PH - 20) return false;                 // header/footer rules
+      if (l.x1 - l.x0 > 0.92 * PW) return false;                     // full-width separators
+      if (touching(l) >= 2 && !insideBox(l)) return false;
+      if (l.x1 - l.x0 < 60) return false;
+      // a box edge: ink runs straight up or down from both ends
+      const vert = (x) => { const dn = inkPt(x - 1.2, l.y + 1.5, x + 1.2, l.y + 9), up = inkPt(x - 1.2, l.y - 9, x + 1.2, l.y - 1.5); return Math.max(dn, up) > 9 * S * 1.2; };
+      if (vert(l.x0 + 0.5) && vert(l.x1 - 0.5) && !insideBox(l)) return false;                            // too short for an answer line
+      // sits on a line of printed text (underline, text baseline) rather than being a rule
+      const onText = items.some(it => Math.abs(it.base - l.y) < 2.6 && !/\.{4,}|_{4,}|…{2,}/.test(it.str) &&
+        Math.min(it.x1, l.x1) - Math.max(it.x, l.x0) > 0.3 * (l.x1 - l.x0));
+      if (onText) return false;
+      const band = inkPt(l.x0 + 2, l.y - 11, l.x1 - 2, l.y - 2.5);
+      const area = (l.x1 - l.x0 - 4) * 8.5 * S * S;
+      return band / area < 0.012;
+    });
+
+    // label to the left of a line ("Name ......", "Advantage ......")
+    const labelLeft = (l) => {
+      const t = items.filter(it => it.base > l.y - 12 && it.base < l.y + 3 && it.x1 <= l.x0 + 6 && it.x1 > l.x0 - 160);
+      if (t.length) return t.map(it => it.str).join(" ").trim();
+      return inkPt(Math.max(0, l.x0 - 120), l.y - 10, l.x0 - 4, l.y + 1) > 30 * S ? "label" : "";
+    };
+    lines.sort((p, q) => p.y - q.y || p.x0 - q.x0);
+    lines.forEach(l => l.label = labelLeft(l));
+
+    // group lines into regions
+    const groups = [];
+    for (const l of lines) {
+      const g = groups[groups.length - 1];
+      if (g && !l.label) {
+        const last = g.lines[g.lines.length - 1];
+        const dy = l.y - last.y;
+        const minx = Math.min(...g.lines.map(q => q.x0));
+        const okSpacing = dy >= 11 && dy <= 42 && (g.lines.length < 2 || Math.abs(dy - g.sp) <= 3.5);
+        const okX = l.x0 <= minx + 6 && l.x1 > minx + 40 && Math.min(l.x1, Math.max(...g.lines.map(q => q.x1))) - Math.max(l.x0, minx) > 60;
+        // nothing printed between the two rules apart from the rules themselves
+        const between = items.some(it => it.base > last.y + 3 && it.base < l.y - 1 && it.x < Math.max(l.x1, last.x1) && it.x1 > Math.min(l.x0, last.x0) && !/^\.*$/.test(it.str.replace(/\s/g, "")));
+        if (okSpacing && okX && !between) { g.lines.push(l); if (g.lines.length === 2) g.sp = dy; continue; }
+      }
+      groups.push({ lines: [l], sp: 0 });
+    }
+    // default spacing for single lines: page median, else 24
+    const sps = groups.filter(g => g.sp).map(g => g.sp).sort((a, b) => a - b);
+    const pageSp = sps.length ? sps[sps.length >> 1] : 24;
+
+    // a lone solid rule with printed text straight under it is a separator, not an answer line
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const g = groups[i]; if (g.lines.length > 1) continue; const l = g.lines[0];
+      if (!l.solid || l.label) continue;
+      if (items.some(it => it.base > l.y + 2 && it.base < l.y + (l.x1 - l.x0 > 0.75 * PW ? 28 : 13) && it.x < l.x1 && it.x1 > l.x0)) groups.splice(i, 1);
+    }
+    const regions = [];
+    for (const g of groups) {
+      const xs0 = Math.min(...g.lines.map(l => l.x0)), xmax = Math.max(...g.lines.map(l => l.x1)), xmin = Math.min(...g.lines.map(l => l.x1));
+      const xs1 = xmax - xmin < 45 ? xmin : xmax;   // keep clear of a "[2]" at the end of the last line
+      let sp = g.sp || pageSp;
+      // a single line: don't let it overlap whatever is printed above it
+      if (g.lines.length === 1) {
+        const l = g.lines[0];
+        const above = items.filter(it => it.y1 < l.y - 2 && it.x < xs1 && it.x1 > xs0 - 160).map(it => it.y1);
+        const lim = above.length ? l.y - Math.max(...above) : 40;
+        sp = Math.max(12, Math.min(sp, lim + 2, 30));
+      }
+      regions.push({
+        kind: "lines", x0: xs0, x1: xs1, ys: g.lines.map(l => l.y), sp,
+        indent: Math.max(0, g.lines[0].x0 - xs0), label: g.lines[0].label || ""
+      });
+    }
+
+    // empty enclosed areas → cells or boxes (skip ones already holding answer lines)
+    for (const b of boxes) {
+      if (!b.empty) continue;
+      if (regions.some(r => r.kind === "lines" && r.x0 >= b.x0 - 2 && r.x1 <= b.x1 + 2 && r.ys[0] > b.y0 && r.ys[r.ys.length - 1] < b.y1)) continue;
+      const hgt = b.y1 - b.y0;
+      regions.push({ kind: hgt <= 36 ? "cell" : "box", x0: b.x0 + 1.5, x1: b.x1 - 1.5, y0: b.y0 + 1.5, y1: b.y1 - 1.5 });
+    }
+
+    // geometry common to all kinds: top/bottom in pt
+    for (const r of regions) {
+      if (r.kind === "lines") { r.y0 = r.ys[0] - r.sp; r.y1 = r.ys[r.ys.length - 1] + 2; }
+    }
+    // where the page can be split to add space under a region without cutting through print
+    for (const r of regions) {
+      r.cut = r.y1 + 3;
+      for (let y = r.y1; y < r.y1 + 18; y += 0.5) if (inkPt(r.x0 - 40, y, r.x1 + 40, y + 0.5) === 0) { r.cut = y + 0.25; break; }
+    }
+    // code hint from the nearest instruction above
+    for (const r of regions) {
+      if (r.kind === "cell") continue;
+      const above = items.filter(it => it.base < r.y0 + 4 && it.base > r.y0 - 260).sort((a, b) => a.base - b.base || a.x - b.x);
+      const txt = above.map(it => it.str).join(" ");
+      const lastSentence = txt.split(/(?<=[.?!])\s+/).slice(-3).join(" ");
+      const nLines = r.kind === "lines" ? r.ys.length : (r.y1 - r.y0) / 20;
+      r.code = nLines >= 3 && CODE_RE.test(lastSentence);
+    }
+    regions.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+    return { regions, items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1) })), hasText: items.length > 0 };
+  }
+
+  return { page, S };
+})();

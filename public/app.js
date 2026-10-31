@@ -1,0 +1,988 @@
+// TypePDF — fill in any PDF in the browser: type on the answer lines, write with a pen,
+// sync live across devices, export a filled-in PDF or a compact pack for AI marking.
+"use strict";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "lib/pdf.worker.min.js";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ASC = 0.928, DESC = 0.236;            // DejaVu Sans metrics (em)
+const baseInLine = (fs, L) => (L - (ASC + DESC) * fs) / 2 + ASC * fs;
+const MIN_FS = 8.5;                          // smallest size typed answers shrink to (pt)
+const INK = "#111418";
+const rid8 = () => Math.random().toString(36).slice(2, 10);
+
+// ---------------- toast / busy ----------------
+let toastT;
+function toast(msg, ms = 2800) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), ms); }
+function busy(on, txt = "", frac = null) {
+  $("#busy").hidden = !on; if (txt) $("#busyTxt").textContent = txt;
+  $("#busyBar").parentElement.hidden = frac === null; if (frac !== null) $("#busyBar").style.width = (frac * 100).toFixed(0) + "%";
+}
+
+// ---------------- IndexedDB (this device) ----------------
+const DB = (() => {
+  let dbp;
+  const open = () => dbp || (dbp = new Promise((res, rej) => {
+    const r = indexedDB.open("typepdf", 1);
+    r.onupgradeneeded = () => { const d = r.result; d.createObjectStore("docs", { keyPath: "id" }); d.createObjectStore("meta", { keyPath: "id" }); };
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const tx = async (store, mode, fn) => { const d = await open(); return new Promise((res, rej) => { const t = d.transaction(store, mode); const s = t.objectStore(store); const q = fn(s); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); };
+  return {
+    get: id => tx("docs", "readonly", s => s.get(id)),
+    put: d => tx("docs", "readwrite", s => s.put(Object.assign(strip(d), { bytes: d.bytes }))),
+    del: async id => { await tx("docs", "readwrite", s => s.delete(id)); await tx("meta", "readwrite", s => s.delete(id)); },
+    putMeta: m => tx("meta", "readwrite", s => s.put(m)),
+    list: () => tx("meta", "readonly", s => s.getAll()),
+  };
+})();
+// a copy of the document without DOM references or the PDF bytes
+function strip(d) { return JSON.parse(JSON.stringify({ ...d, bytes: undefined, pages: d.pages.map(P => P && ({ ...P, regions: P.regions.map(({ _el, ...rest }) => rest) })) })); }
+async function sha(buf) { const h = await crypto.subtle.digest("SHA-256", buf); return [...new Uint8Array(h)].slice(0, 12).map(b => b.toString(16).padStart(2, "0")).join(""); }
+
+// ---------------- state ----------------
+let doc = null;      // {id,name,bytes,pages:[{w,h,rot,regions,items,gaps,hasText}],text,fit,strokes,timer,seq,dirty,created,updated}
+let pdf = null;      // pdf.js document
+let zoom = 1, fitZoom = 1, dpr = window.devicePixelRatio || 1;
+let tool = "pen", colour = INK, width = 1.3, newKind = "lines";
+let views = [];      // per page: {el, pg, ink, bm, bmZoom, visible, gapEls}
+const undoS = [], redoS = [];
+let saveT = null;
+
+function metaOf() { return { name: doc.name, pages: doc.pages.length, filled: filledCount(), total: totalRegions() }; }
+function scheduleSave() {
+  clearTimeout(saveT);
+  saveT = setTimeout(saveNow, 500);
+}
+async function saveNow() {
+  clearTimeout(saveT);
+  if (!doc) return;
+  doc.updated = Date.now();
+  try {
+    await DB.put(doc);
+    await DB.putMeta({ id: doc.id, ...metaOf(), updated: doc.updated });
+  } catch (e) { toast("Couldn't save in this browser (storage full or blocked). Export a backup."); }
+  const m = JSON.stringify(metaOf());
+  if (m !== doc._lastMeta) { doc._lastMeta = m; emit("meta"); }
+}
+// tell the sync layer that a key changed (no-op when not signed in)
+function emit(key) { if (window.Sync && doc) Sync.changed(key); }
+
+// ---------------- home ----------------
+async function showHome() {
+  if (doc) { saveView(); await saveNow(); }
+  if (window.Sync) Sync.detach();
+  $("#editor").hidden = true; $("#home").hidden = false; document.title = "TypePDF";
+  if (pdf) { pdf.destroy(); pdf = null; } doc = null; views = []; $("#pages").innerHTML = "";
+  undoS.length = redoS.length = 0;
+  renderHomeList();
+}
+async function renderHomeList() {
+  let local = [];
+  try { local = await DB.list(); } catch (e) {}
+  let remote = [];
+  if (window.Sync && Sync.user) { try { remote = (await Sync.listDocs()).docs || []; } catch (e) {} }
+  const byId = new Map();
+  for (const m of local) byId.set(m.id, { ...m, local: true });
+  for (const r of remote) { const e = byId.get(r.id) || {}; byId.set(r.id, { ...r, ...e, updated: Math.max(e.updated || 0, r.updated || 0), cloud: true, haspdf: r.haspdf, filled: e.filled ?? r.filled, total: e.total ?? r.total, pages: e.pages || r.pages, name: e.name || r.name }); }
+  const list = [...byId.values()].sort((a, b) => b.updated - a.updated);
+  $("#recentWrap").hidden = !list.length;
+  const ul = $("#recent"); ul.innerHTML = "";
+  for (const m of list) {
+    const li = document.createElement("li");
+    const d = new Date(m.updated);
+    const where = m.cloud && m.local ? "synced" : m.cloud ? "in your account" : "this device only";
+    li.innerHTML = `<div class="nm"><b></b><small>${m.pages || "?"} pages · ${m.filled ?? 0}/${m.total ?? "?"} answered · ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · ${where}</small></div>
+      <button class="open">Open</button><button class="bk" title="Download a backup file">Backup</button><button class="del">Delete</button>`;
+    $("b", li).textContent = m.name;
+    $(".open", li).onclick = () => openStored(m.id, m);
+    $(".bk", li).onclick = async () => { const d = await DB.get(m.id); if (d) downloadBackup(d); else toast("Open it once on this device first."); };
+    if (!m.local) $(".bk", li).hidden = true;
+    $(".del", li).onclick = () => {
+      const c = document.createElement("span"); c.className = "confirmdel";
+      c.innerHTML = `${m.cloud ? "Delete from every device?" : "Delete for good?"} <button>Delete</button><button>Keep</button>`;
+      const [y, n] = $$("button", c);
+      y.onclick = async () => { await DB.del(m.id).catch(() => {}); if (m.cloud && window.Sync) await Sync.deleteDoc(m.id).catch(() => {}); localStorage.removeItem("view:" + m.id); renderHomeList(); };
+      n.onclick = () => c.replaceWith(delBtn);
+      const delBtn = $(".del", li); delBtn.replaceWith(c);
+    };
+    ul.appendChild(li);
+  }
+}
+const drop = $("#drop");
+["dragover", "dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, () => drop.classList.remove("over")));
+drop.addEventListener("drop", e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) openFile(f); });
+$("#file").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) openFile(f); });
+document.addEventListener("dragover", e => e.preventDefault());
+document.addEventListener("drop", e => { e.preventDefault(); if (!$("#editor").hidden) { const f = e.dataTransfer.files[0]; if (f && /pdf|paperwork|json/i.test(f.type + f.name)) openFile(f); } });
+
+// paste a PDF (file or link) anywhere outside an answer space → opens it as a new paper
+document.addEventListener("paste", async e => {
+  if (document.activeElement && /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName)) return;
+  const files = [...(e.clipboardData?.files || [])];
+  const f = files.find(f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name));
+  if (f) { e.preventDefault(); return openFile(f); }
+  const txt = (e.clipboardData?.getData("text") || "").trim();
+  if (/^https?:\/\/\S+$/i.test(txt)) { e.preventDefault(); return openLink(txt); }
+  if (files.length) toast("Only PDF files can be pasted.");
+});
+$("#linkForm").addEventListener("submit", e => { e.preventDefault(); const v = $("#linkIn").value.trim(); if (v) openLink(v); });
+async function openLink(url) {
+  busy(true, "Fetching the PDF…");
+  try {
+    let res;
+    if (window.Sync && Sync.user) res = await Sync.fetchPdf(url);
+    else { try { res = await fetch(url); } catch (e) { busy(false); toast("That site doesn't allow direct downloads. Sign in to open PDFs from links, or download it and drop it here.", 6000); return; } }
+    if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || "the link didn't work (" + res.status + ")"); }
+    const buf = await res.arrayBuffer();
+    let name = decodeURIComponent(res.headers.get("x-file-name") || url.split("/").pop() || "paper.pdf");
+    busy(false);
+    await openFile(new File([buf], name, { type: "application/pdf" }));
+  } catch (e) { busy(false); toast("Couldn't open that link: " + (e.message || e), 5000); }
+}
+
+async function openFile(f) {
+  try {
+    if (doc) { saveView(); await saveNow(); }
+    const buf = await f.arrayBuffer();
+    const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024)));
+    if (head.trimStart().startsWith("{")) return openBackup(buf);
+    if (!head.includes("%PDF")) { toast("That file isn't a PDF."); return; }
+    const id = await sha(buf);
+    const existing = await DB.get(id).catch(() => null);
+    if (existing) { toast("You've opened this paper before, so your answers are back."); return openDoc(existing); }
+    const d = { id, name: f.name.replace(/\.pdf$/i, "") || "Untitled", bytes: buf, pages: [], text: {}, fit: {}, strokes: {}, timer: null, seq: 0, dirty: {}, created: Date.now(), updated: Date.now() };
+    await openDoc(d, true);
+  } catch (e) { console.error(e); busy(false); toast("Couldn't open that file: " + (e.message || e)); }
+}
+async function openStored(id, meta) {
+  let d = await DB.get(id).catch(() => null);
+  if (!d && window.Sync && Sync.user) {
+    busy(true, "Downloading from your account…");
+    try {
+      const buf = await Sync.getPdf(id);
+      d = { id, name: (meta && meta.name) || "Untitled", bytes: buf, pages: [], text: {}, fit: {}, strokes: {}, timer: null, seq: 0, dirty: {}, created: Date.now(), updated: Date.now() };
+    } catch (e) { busy(false); toast("Couldn't download that paper: " + e.message); return; }
+  }
+  if (d) openDoc(d); else toast("That paper is no longer saved here.");
+}
+
+// ---------------- open / detect ----------------
+async function openDoc(d, fresh = false) {
+  busy(true, "Opening…", null);
+  if (pdf) { pdf.destroy(); pdf = null; }
+  doc = d; doc.text ||= {}; doc.fit ||= {}; doc.strokes ||= {}; doc.dirty ||= {}; doc.seq ||= 0;
+  undoS.length = redoS.length = 0; views = [];
+  pdf = await pdfjsLib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)), isEvalSupported: false }).promise;
+  await Promise.all([document.fonts.load("12px PaperSans"), document.fonts.load("12px PaperMono")]).catch(() => {});
+  // signed in: pull the account's copy first (answers and page layouts) before detecting anything
+  if (window.Sync && Sync.user) { busy(true, "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
+  const need = [];
+  for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions) need.push(i);
+  for (let k = 0; k < need.length; k++) {
+    const i = need[k];
+    busy(true, `Finding answer spaces… page ${i + 1} of ${pdf.numPages}`, k / need.length);
+    doc.pages[i] = await detectPage(i, doc.pages[i]);
+    emit("page:" + i);
+  }
+  busy(false);
+  $("#home").hidden = true; $("#editor").hidden = false;
+  $("#docName").textContent = doc.name; document.title = doc.name + " · TypePDF";
+  buildViews();
+  const v = loadView();
+  setZoom(v && v.zr ? fitWidthZoom() * v.zr : fitWidthZoom());
+  updateCount(); timerInit();
+  if (v) restoreView(v);
+  if (fresh || need.length) scheduleSave();
+  if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
+  if (window.Sync) Sync.live();
+}
+
+async function detectPage(i, prev) {
+  const page = await pdf.getPage(i + 1);
+  const vp = page.getViewport({ scale: 1 });
+  const vp2 = page.getViewport({ scale: Detect.S });
+  const c = document.createElement("canvas"); c.width = Math.ceil(vp2.width); c.height = Math.ceil(vp2.height);
+  const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
+  let tc = null; try { tc = await page.getTextContent(); } catch (e) {}
+  const res = Detect.page(c, vp, tc);
+  c.width = c.height = 0;
+  res.regions.forEach((r, k) => r.id = `${i}:${k}`);
+  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, gaps: (prev && prev.gaps) || {} };
+}
+
+// ---------------- remembering exactly where you were ----------------
+function saveView() {
+  if (!doc || $("#editor").hidden) return;
+  const host = $("#pages"); let p = 0; views.forEach((v, i) => { if (v.el.offsetTop <= host.scrollTop + 4) p = i; });
+  const off = views[p] ? (host.scrollTop - views[p].el.offsetTop) / zoom : 0;
+  const a = document.activeElement; const foc = a && a.classList && a.classList.contains("ans") ? { rid: a.dataset.rid, s: a.selectionStart, e: a.selectionEnd } : null;
+  try { localStorage.setItem("view:" + doc.id, JSON.stringify({ zr: zoom / fitWidthZoom(), p, off, tool, colour, width, foc, hints: $("#pages").classList.contains("hints") })); } catch (e) {}
+}
+function loadView() { try { return JSON.parse(localStorage.getItem("view:" + doc.id) || "null"); } catch (e) { return null; } }
+function restoreView(v) {
+  if (v.tool && v.tool !== "boxes") setTool(v.tool);
+  if (v.colour) { colour = v.colour; $$(".sw").forEach(x => x.classList.toggle("on", x.dataset.c === colour)); }
+  if (v.width) { width = v.width; $$(".sz").forEach(x => x.classList.toggle("on", +x.dataset.w === width)); }
+  if (v.hints) { $("#pages").classList.add("hints"); $("#hintBtn").classList.add("on"); }
+  requestAnimationFrame(() => {
+    const host = $("#pages"); const pv = views[clamp(v.p | 0, 0, views.length - 1)];
+    if (pv) host.scrollTop = pv.el.offsetTop + (v.off || 0) * zoom;
+    if (v.foc) { const r = findRegion(v.foc.rid); if (r && r._el) { r._el.focus({ preventScroll: true }); try { r._el.setSelectionRange(v.foc.s, v.foc.e); } catch (e) {} } }
+  });
+}
+let viewT; $("#pages").addEventListener("scroll", () => { clearTimeout(viewT); viewT = setTimeout(saveView, 400); });
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") { saveView(); saveNow(); } });
+window.addEventListener("pagehide", () => { saveView(); });
+function findRegion(id) { for (const P of doc.pages) { const r = P && P.regions.find(q => q.id === id); if (r) return r; } return null; }
+
+// ---------------- geometry: page extension ("gaps") ----------------
+function gapList(p) {
+  const P = doc.pages[p];
+  return Object.entries(P.gaps || {}).map(([rid, h]) => { const r = P.regions.find(q => q.id === rid); return r && h > 0 ? { rid, at: r.cut ?? r.y1, h } : null; }).filter(Boolean).sort((a, b) => a.at - b.at);
+}
+function disp(p, y) { let d = y; for (const g of gapList(p)) if (g.at < y - 0.01) d += g.h; return d; }
+function src(p, d) { let off = 0; for (const g of gapList(p)) { const s = g.at + off; if (d <= s) break; if (d < s + g.h) return g.at; off += g.h; } return d - off; }
+function totalGap(p) { return gapList(p).reduce((s, g) => s + g.h, 0); }
+function regionRect(p, r) { const top = disp(p, r.y0), extra = (doc.pages[p].gaps || {})[r.id] || 0; return { x0: r.x0, x1: r.x1, y0: top, y1: extra ? disp(p, r.cut ?? r.y1) + extra : disp(p, r.y1) }; }
+// ink is stored against the printed page, so it stays put when extra space opens or closes above it.
+// a point is [x, y] in page points, or [x, offset, regionId] when it sits in a region's extra space.
+function toAnchor(p, x, yd) {
+  let off = 0;
+  for (const g of gapList(p)) { const s = g.at + off; if (yd < s) break; if (yd < s + g.h) return [r2(x), r2(yd - s), g.rid]; off += g.h; }
+  return [r2(x), r2(yd - off)];
+}
+function toDisp(p, pt) {
+  if (pt.length < 3) return [pt[0], disp(p, pt[1])];
+  const g = gapList(p).find(q => q.rid === pt[2]);
+  if (g) return [pt[0], disp(p, g.at) + Math.min(pt[1], g.h)];
+  const r = doc.pages[p].regions.find(q => q.id === pt[2]);
+  return [pt[0], r ? disp(p, r.cut ?? r.y1) + pt[1] : pt[1]];
+}
+const r2 = n => Math.round(n * 100) / 100;
+function setGap(p, r, h) {
+  const P = doc.pages[p]; P.gaps = P.gaps || {};
+  const old = P.gaps[r.id] || 0; h = Math.round(h * 10) / 10;
+  if (Math.abs(old - h) < 0.5) return false;
+  if (h > 0) P.gaps[r.id] = h; else delete P.gaps[r.id];
+  layoutPage(p);
+  return true;
+}
+
+// ---------------- views ----------------
+let io;
+function buildViews() {
+  const host = $("#pages"); host.innerHTML = ""; views = [];
+  io && io.disconnect();
+  io = new IntersectionObserver(ents => {
+    for (const e of ents) { const v = views[+e.target.dataset.p]; if (!v) continue; v.visible = e.isIntersecting; if (v.visible) renderPage(+e.target.dataset.p); else dropBitmap(+e.target.dataset.p); }
+  }, { root: host, rootMargin: "1600px 0px" });
+  doc.pages.forEach((P, p) => {
+    const el = document.createElement("div"); el.className = "page"; el.dataset.p = p;
+    const pg = document.createElement("canvas"); pg.className = "pg";
+    const ink = document.createElement("canvas"); ink.className = "ink";
+    const pno = document.createElement("div"); pno.className = "pno"; pno.textContent = `${p + 1}`;
+    el.append(pg, ink, pno);
+    host.appendChild(el);
+    const v = { el, pg, ink, bm: null, bmZoom: 0, visible: false, gapEls: [] };
+    views.push(v);
+    P.regions.forEach(r => makeField(p, r));
+    bindInk(p, v);
+    io.observe(el);
+  });
+  host.onscroll = pageIndicator;
+  pageIndicator();
+}
+
+function makeField(p, r) {
+  const v = views[p];
+  const ta = document.createElement("textarea");
+  ta.className = "ans " + r.kind + (r.code ? " code" : "");
+  ta.spellcheck = !r.code; ta.autocapitalize = r.code ? "off" : "sentences"; ta.setAttribute("autocorrect", r.code ? "off" : "on");
+  ta.dataset.rid = r.id; ta.value = doc.text[r.id] || "";
+  ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
+  ta.addEventListener("input", () => { if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
+  ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
+  v.el.insertBefore(ta, v.ink);
+  r._el = ta;
+}
+
+function fieldKeys(e, p, r, ta) {
+  if (e.key === "Escape") { ta.blur(); return; }
+  if (e.key === "Tab") {
+    if (r.code && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      const s = ta.selectionStart, en = ta.selectionEnd, v = ta.value;
+      const ls = v.lastIndexOf("\n", s - 1) + 1;
+      if (e.shiftKey) { const m = v.slice(ls).match(/^ {1,4}/); if (m) ta.setRangeText("", ls, ls + m[0].length, "preserve"); }
+      else ta.setRangeText("    ", s, en, "end");
+      ta.dispatchEvent(new Event("input")); return;
+    }
+    e.preventDefault(); focusNext(r, e.shiftKey ? -1 : 1); return;
+  }
+  if (e.key === "Enter" && r.kind === "cell" && !e.shiftKey) { e.preventDefault(); focusNext(r, 1); }
+}
+function orderedRegions() { const out = []; doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
+function focusNext(r, dir) {
+  const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
+  const ta = n[1]._el; ta.focus({ preventScroll: true }); ta.scrollIntoView({ block: "center", behavior: "smooth" }); const L = ta.value.length; ta.setSelectionRange(L, L);
+}
+
+// ---------------- fitting typed text ----------------
+const fitQ = new Map(); let fitRaf = 0;
+function queueFit(p, r) { fitQ.set(r.id, [p, r]); if (!fitRaf) fitRaf = requestAnimationFrame(() => { fitRaf = 0; const q = [...fitQ.values()]; fitQ.clear(); q.forEach(([p, r]) => fitRegion(p, r)); }); }
+function baseFit(r) {
+  if (r.kind === "lines") { const fs = clamp(r.sp * 0.42, 7.5, 11.5) * (r.code ? 0.9 : 1); return { fs, L: r.sp }; }
+  if (r.kind === "cell") { const fs = clamp((r.y1 - r.y0) * 0.55, 6, 12); return { fs, L: fs * 1.18 }; }
+  const fs = r.code ? 10 : 11; return { fs, L: fs * 1.38 };
+}
+function fitOf(r) { const f = doc.fit[r.id]; return f && typeof f === "object" ? f : baseFit(r); }
+// settings to try, roomiest first: smaller text on the printed lines, then two text lines per printed line
+function fitSteps(r) {
+  const b = baseFit(r), out = [], R = v => Math.round(v * 100) / 100;
+  if (r.kind === "lines") {
+    const floor1 = r.sp >= 21 ? Math.min(b.fs, 9) : MIN_FS;
+    for (let fs = b.fs; fs >= floor1 - 0.01; fs -= 0.25) out.push({ fs: R(fs), L: r.sp });
+    if (r.sp >= 21) { const L = r.sp / 2; for (let fs = Math.min(b.fs, L * 0.74); fs >= Math.min(L * 0.74, MIN_FS) - 0.01; fs -= 0.25) out.push({ fs: R(fs), L, half: 1 }); }
+  } else if (r.kind === "cell") { for (let fs = b.fs; fs >= 5.5; fs -= 0.25) out.push({ fs: R(fs), L: R(fs * 1.18) }); }
+  else { for (let fs = b.fs; fs >= MIN_FS - 0.01; fs -= 0.25) out.push({ fs: R(fs), L: R(fs * 1.38) }); }
+  return out;
+}
+function fieldTop(p, r, f) { return r.kind === "lines" ? disp(p, r.ys[0]) - 2 - baseInLine(f.fs, f.L) : disp(p, r.y0) + (r.kind === "box" ? 4 : 0); }
+function applyField(p, r, f) {
+  const ta = r._el; if (!ta) return;
+  const z = zoom, rect = regionRect(p, r);
+  ta.style.fontSize = f.fs * z + "px"; ta.style.lineHeight = f.L * z + "px";
+  ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
+  ta.style.textIndent = (r.kind === "lines" ? r.indent || 0 : 0) * z + "px";
+  if (r.kind === "lines") {
+    const top = fieldTop(p, r, f);
+    ta.style.top = top * z + "px"; ta.style.height = (rect.y1 + 1 - top) * z + "px"; ta.style.padding = "0";
+  } else if (r.kind === "box") {
+    ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = `${4 * z}px ${4 * z}px`;
+  } else {
+    ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = "0";
+  }
+}
+function contentH(r) { const ta = r._el; const prev = ta.style.height; ta.style.height = "1px"; const h = ta.scrollHeight; ta.style.height = prev; return h / zoom; }
+function availFor(r, f) {
+  if (r.kind === "lines") return (r.ys[r.ys.length - 1] + 1) - (r.ys[0] - 2 - baseInLine(f.fs, f.L));
+  return r.y1 - r.y0;
+}
+function fitRegion(p, r) {
+  const ta = r._el; if (!ta || !ta.isConnected) return;
+  const steps = fitSteps(r);
+  const fits = f => { applyFieldNoGap(p, r, f); return contentH(r) <= availFor(r, f) + 0.5; };
+  let f = steps[0], gap = 0;
+  if (ta.value && !fits(steps[0])) {
+    const last = steps[steps.length - 1];
+    if (fits(last)) { let lo = steps.length - 1, hi = 0; while (lo - hi > 1) { const m = (lo + hi) >> 1; if (fits(steps[m])) lo = m; else hi = m; } f = steps[lo]; }
+    else {
+      f = last;
+      if (r.kind !== "cell") { applyFieldNoGap(p, r, f); gap = Math.ceil((contentH(r) - availFor(r, f) - ((r.cut ?? r.y1) - r.y1) + 1) / f.L) * f.L + 2; }
+    }
+  }
+  doc.fit[r.id] = f;
+  const changed = setGap(p, r, gap);
+  applyField(p, r, f);
+  if (r.kind === "cell") centreCell(r);
+  if (changed) scheduleSave();
+}
+function applyFieldNoGap(p, r, f) { const P = doc.pages[p]; const g = (P.gaps || {})[r.id]; if (g) { P.gaps[r.id] = 0; applyField(p, r, f); P.gaps[r.id] = g; } else applyField(p, r, f); if (r.kind === "cell") r._el.style.paddingTop = "0"; }
+function centreCell(r) { const ta = r._el; ta.style.paddingTop = "0"; const h = (r.y1 - r.y0); const c = contentH(r); const pad = Math.max(0, (h - c) / 2); ta.style.paddingTop = pad * zoom + "px"; ta.style.height = (h - pad) * zoom + "px"; }
+function gapRules(p, r, g) {
+  const f = fitOf(r), top = fieldTop(p, r, f), g0 = disp(p, g.at), g1 = g0 + g.h, out = [];
+  for (let k = 0; k < 400; k++) { const y = top + k * f.L + baseInLine(f.fs, f.L) + 2; if (y > g1 - 1) break; if (y > g0 + 1) out.push(y); }
+  return out;
+}
+
+// ---------------- layout & rendering ----------------
+function layoutPage(p) {
+  const P = doc.pages[p], v = views[p]; if (!v) return;
+  const z = zoom, H = P.h + totalGap(p);
+  v.el.style.width = P.w * z + "px"; v.el.style.height = H * z + "px";
+  for (const r of P.regions) { applyField(p, r, fitOf(r)); if (r.kind === "cell") centreCell(r); }
+  v.gapEls.forEach(e => e.remove()); v.gapEls = [];
+  for (const g of gapList(p)) {
+    const d = document.createElement("div"); d.className = "gapfill";
+    d.style.top = disp(p, g.at) * z + "px"; d.style.height = g.h * z + "px";
+    d.innerHTML = "<span>extra space</span>";
+    v.el.insertBefore(d, v.pg.nextSibling); v.gapEls.push(d);
+  }
+  sizeInk(p); drawInk(p);
+  if (v.visible) composite(p);
+  if (boxMode) drawBoxes(p);
+}
+async function renderPage(p) {
+  const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
+  if (v.bm && v.bmZoom === want) { composite(p); return; }
+  if (v.rendering) { v.again = true; return; }
+  v.rendering = true;
+  try {
+    const page = await pdf.getPage(p + 1);
+    const vp = page.getViewport({ scale: want });
+    const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+    const ctx = c.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    v.bm = c; v.bmZoom = want;
+  } catch (e) { console.error(e); }
+  v.rendering = false;
+  if (v.again) { v.again = false; return renderPage(p); }
+  if (v.visible) composite(p);
+}
+function dropBitmap(p) { const v = views[p]; if (v.bm) { v.bm.width = v.bm.height = 0; v.bm = null; v.bmZoom = 0; } v.pg.width = v.pg.height = 0; }
+function composite(p) {
+  const v = views[p], P = doc.pages[p]; if (!v || !v.bm) return;
+  const k = v.bmZoom, H = P.h + totalGap(p);
+  const cw = Math.round(P.w * zoom * dpr), ch = Math.round(H * zoom * dpr);
+  if (v.pg.width !== cw || v.pg.height !== ch) { v.pg.width = cw; v.pg.height = ch; }
+  v.pg.style.width = P.w * zoom + "px"; v.pg.style.height = H * zoom + "px";
+  const ctx = v.pg.getContext("2d"); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cw, ch);
+  let sTop = 0, dTop = 0;
+  const bands = gapList(p).map(g => ({ at: g.at, h: g.h })); bands.push({ at: P.h, h: 0 });
+  for (const b of bands) {
+    const hS = b.at - sTop; if (hS > 0) ctx.drawImage(v.bm, 0, sTop * k, v.bm.width, hS * k, 0, dTop * zoom * dpr, cw, hS * zoom * dpr);
+    dTop += hS + b.h; sTop = b.at;
+  }
+  ctx.save(); ctx.strokeStyle = "#9aa3a0"; ctx.lineWidth = Math.max(1, 0.6 * zoom * dpr); ctx.setLineDash([1.2 * zoom * dpr, 2.2 * zoom * dpr]);
+  for (const g of gapList(p)) { const r = P.regions.find(q => q.id === g.rid); for (const y of gapRules(p, r, g)) { ctx.beginPath(); ctx.moveTo(r.x0 * zoom * dpr, y * zoom * dpr); ctx.lineTo(r.x1 * zoom * dpr, y * zoom * dpr); ctx.stroke(); } }
+  ctx.restore();
+}
+function fitWidthZoom() { const host = $("#pages"); const maxW = Math.max(...doc.pages.map(P => P.w)); return clamp((host.clientWidth - 28) / maxW, 0.3, 2.2); }
+function setZoom(z) {
+  zoom = clamp(z, 0.3, 4); fitZoom = fitWidthZoom();
+  const host = $("#pages"); const frac = host.scrollTop / Math.max(1, host.scrollHeight);
+  doc.pages.forEach((P, p) => layoutPage(p));
+  views.forEach((v, p) => { if (v.visible) renderPage(p); });
+  host.scrollTop = frac * host.scrollHeight;
+  $("#zfit").textContent = Math.round(zoom / fitZoom * 100) + "%";
+  doc.pages.forEach((P, p) => P.regions.forEach(r => { if (doc.text[r.id]) queueFit(p, r); }));
+}
+$("#zin").onclick = () => setZoom(zoom * 1.2);
+$("#zout").onclick = () => setZoom(zoom / 1.2);
+$("#zfit").onclick = () => setZoom(fitWidthZoom());
+let rsT; window.addEventListener("resize", () => { clearTimeout(rsT); rsT = setTimeout(() => { if (!doc || $("#editor").hidden) return; const wasFit = Math.abs(zoom - fitZoom) < 0.01; dpr = window.devicePixelRatio || 1; setZoom(wasFit ? fitWidthZoom() : zoom); }, 200); });
+$("#pages").addEventListener("wheel", e => { if (e.ctrlKey && doc) { e.preventDefault(); setZoom(zoom * Math.exp(-clamp(e.deltaY, -50, 50) * 0.01)); } }, { passive: false });
+function pageIndicator() {
+  const host = $("#pages"); const mid = host.scrollTop + host.clientHeight / 3;
+  let cur = 0; views.forEach((v, p) => { if (v.el.offsetTop <= mid) cur = p; });
+  $("#pageInd").textContent = `Page ${cur + 1} of ${views.length}`;
+}
+
+// ---------------- ink ----------------
+function sizeInk(p) {
+  const v = views[p], P = doc.pages[p]; const H = P.h + totalGap(p);
+  const cw = Math.round(P.w * zoom * dpr), ch = Math.round(H * zoom * dpr);
+  if (v.ink.width !== cw || v.ink.height !== ch) { v.ink.width = cw; v.ink.height = ch; }
+  v.ink.style.width = P.w * zoom + "px"; v.ink.style.height = H * zoom + "px";
+}
+function dispPts(p, s) { return s.pts.map(pt => toDisp(p, pt)); }
+function tracePath(ctx, pts, k, ox = 0, oy = 0) {
+  if (!pts.length) return;
+  ctx.beginPath(); ctx.moveTo((pts[0][0] - ox) * k, (pts[0][1] - oy) * k);
+  if (pts.length === 1) ctx.lineTo((pts[0][0] - ox) * k + 0.01, (pts[0][1] - oy) * k);
+  for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2; ctx.quadraticCurveTo((pts[i][0] - ox) * k, (pts[i][1] - oy) * k, (mx - ox) * k, (my - oy) * k); }
+  if (pts.length > 1) ctx.lineTo((pts[pts.length - 1][0] - ox) * k, (pts[pts.length - 1][1] - oy) * k);
+}
+function drawStroke(ctx, s, pts, k, ox, oy) {
+  ctx.save();
+  ctx.globalAlpha = s.t === "hl" ? 0.35 : 1; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * k; ctx.lineCap = s.t === "hl" ? "butt" : "round"; ctx.lineJoin = "round";
+  tracePath(ctx, pts, k, ox, oy); ctx.stroke(); ctx.restore();
+}
+function drawInk(p) {
+  const v = views[p]; if (!v) return; const ctx = v.ink.getContext("2d"); const k = zoom * dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, v.ink.width, v.ink.height);
+  const S = doc.strokes[p] || [];
+  for (const pass of ["hl", "pen"]) for (const s of S) if ((s.t === "hl") === (pass === "hl")) drawStroke(ctx, s, s._live || dispPts(p, s), k);
+}
+function hitRegion(p, x, y) {
+  const P = doc.pages[p];
+  return P.regions.find(r => { const R = regionRect(p, r); return x >= R.x0 - 3 && x <= R.x1 + 3 && y >= R.y0 - 4 && y <= R.y1 + 3; });
+}
+function bindInk(p, v) {
+  let st = null;
+  const pos = e => { const b = v.ink.getBoundingClientRect(); return [(e.clientX - b.left) / zoom, (e.clientY - b.top) / zoom]; };
+  v.ink.addEventListener("pointerdown", e => {
+    if (boxMode) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const p0 = pos(e);
+    st = { id: e.pointerId, type: e.pointerType, start: p0, t0: performance.now(), moved: false, stroke: null, erased: [] };
+    if (e.pointerType !== "touch") { v.ink.setPointerCapture(e.pointerId); e.preventDefault(); }
+    if (e.pointerType === "pen") beginDraw(st, p0);
+  });
+  v.ink.addEventListener("pointermove", e => {
+    if (!st || e.pointerId !== st.id) return;
+    const q = pos(e);
+    if (!st.moved && Math.hypot(q[0] - st.start[0], q[1] - st.start[1]) * zoom > 4) {
+      st.moved = true;
+      if (st.type === "touch") { st = null; return; }       // a finger scrolls the page
+      if (!st.stroke && !st.erasing) beginDraw(st, st.start);
+    }
+    if (!st.moved && st.type !== "pen") return;
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    if (st.erasing) { for (const ev of evs) eraseAt(p, pos(ev), st.erased); return; }
+    if (!st.stroke) return;
+    const live = st.stroke._live;
+    if (e.shiftKey) st.stroke._live = [live[0], q];
+    else for (const ev of evs) live.push(pos(ev));
+    drawInk(p);
+  });
+  const finish = () => { const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1])); delete s._live; return s; };
+  const end = e => {
+    if (!st || e.pointerId !== st.id) return;
+    const tapped = !st.moved && performance.now() - st.t0 < 500;
+    if (tapped) {
+      const r = hitRegion(p, st.start[0], st.start[1]);
+      if (st.stroke && !r) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); st = null; return; }   // a deliberate dot
+      if (st.stroke) { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
+      if (r) { const ta = r._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
+      else if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
+    } else if (st.stroke) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); drawInk(p); }
+    else if (st.erased && st.erased.length) { pushUndo({ t: "erase", p, list: st.erased }); st.erased.forEach(s => emit(`s:${p}:${s.id}`)); scheduleSave(); }
+    st = null;
+  };
+  v.ink.addEventListener("pointerup", end);
+  v.ink.addEventListener("pointercancel", () => { if (st && st.stroke) { const arr = doc.strokes[p]; const i = arr.indexOf(st.stroke); if (i >= 0) { if (st.stroke._live.length < 3) arr.splice(i, 1); else { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); } } drawInk(p); } st = null; });
+  function beginDraw(s, p0) {
+    if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
+    if (tool === "eraser") { s.erasing = true; eraseAt(p, p0, s.erased); return; }
+    doc.strokes[p] = doc.strokes[p] || [];
+    s.stroke = tool === "hl" ? { id: rid8(), t: "hl", c: "#f2d21b", w: 9, pts: [], _live: [p0] } : { id: rid8(), t: "pen", c: colour, w: width, pts: [], _live: [p0] };
+    doc.strokes[p].push(s.stroke);
+  }
+}
+function eraseAt(p, q, out) {
+  const arr = doc.strokes[p] || []; let hit = false;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const s = arr[i], R = Math.max(5, s.w / 2 + 3), pts = dispPts(p, s);
+    if (pts.some((a, j) => segDist(q, a, pts[j + 1] || a) < R)) { out.push(s); arr.splice(i, 1); hit = true; }
+  }
+  if (hit) drawInk(p);
+}
+function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1]; const L = dx * dx + dy * dy; let t = L ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L : 0; t = clamp(t, 0, 1); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
+// stop an Apple Pencil from scrolling the page on iPad while fingers still scroll
+for (const ev of ["touchstart", "touchmove"]) $("#pages").addEventListener(ev, e => { if ([...e.touches].some(t => t.touchType === "stylus") && !boxMode && e.target.classList.contains("ink")) e.preventDefault(); }, { passive: false });
+
+function pushUndo(a) { undoS.push(a); redoS.length = 0; }
+function undo() { const a = undoS.pop(); if (!a) return; const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { const i = arr.indexOf(a.s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${a.s.id}`); } else { arr.push(...a.list); a.list.forEach(s => emit(`s:${a.p}:${s.id}`)); } redoS.push(a); drawInk(a.p); scheduleSave(); }
+function redo() { const a = redoS.pop(); if (!a) return; const arr = doc.strokes[a.p] ||= []; if (a.t === "add") { arr.push(a.s); emit(`s:${a.p}:${a.s.id}`); } else a.list.forEach(s => { const i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); emit(`s:${a.p}:${s.id}`); }); undoS.push(a); drawInk(a.p); scheduleSave(); }
+$("#undo").onclick = undo; $("#redo").onclick = redo;
+
+// ---------------- tools ----------------
+function setTool(t) {
+  if (t === "boxes") { setBoxMode(!boxMode); return; }
+  if (boxMode) setBoxMode(false);
+  tool = t; $$(".tool").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
+  views.forEach(v => v.el.classList.toggle("tool-eraser", t === "eraser"));
+  saveView();
+}
+$$(".tool").forEach(b => b.onclick = () => setTool(b.dataset.tool));
+$$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); setTool("pen"); });
+$$(".sz").forEach(b => b.onclick = () => { width = +b.dataset.w; $$(".sz").forEach(x => x.classList.toggle("on", x === b)); setTool("pen"); });
+$("#hintBtn").onclick = e => { const on = $("#pages").classList.toggle("hints"); e.currentTarget.classList.toggle("on", on); saveView(); };
+$("#homeBtn").onclick = () => showHome();
+document.addEventListener("keydown", e => {
+  if (!doc || $("#editor").hidden) return;
+  const typing = /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName);
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key.toLowerCase() === "z" && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && e.key.toLowerCase() === "y" && !typing) { e.preventDefault(); redo(); return; }
+  if (mod && (e.key === "=" || e.key === "+" || e.key === "-")) { e.preventDefault(); setZoom(zoom * (e.key === "-" ? 1 / 1.2 : 1.2)); return; }
+  if (mod && e.key === "0") { e.preventDefault(); setZoom(fitWidthZoom()); return; }
+  if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); toast(window.Sync && Sync.user ? "Saved and synced to your account." : "Saved in this browser. Sign in to sync it to your other devices."); return; }
+  if (typing || mod || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (e.key.length === 1 && /[\p{L}\p{N}]/u.test(e.key) && !boxMode) { toast("Click or tap an answer space first, then type."); return; }
+  if (k === "tab") { e.preventDefault(); const all = orderedRegions(); const first = all.find(([p, r]) => !doc.text[r.id]) || all[0]; if (first) focusNext(first[1], 0); }
+  else if ((k === "delete" || k === "backspace") && boxMode && sel) { e.preventDefault(); deleteSel(); }
+  else if (k === "escape" && boxMode) setBoxMode(false);
+});
+
+// ---------------- counts ----------------
+function totalRegions() { return doc ? doc.pages.reduce((s, P) => s + (P ? P.regions.length : 0), 0) : 0; }
+function filledCount() { if (!doc) return 0; const ids = new Set(doc.pages.flatMap(P => P ? P.regions.map(r => r.id) : [])); return Object.keys(doc.text).filter(k => ids.has(k) && doc.text[k].trim()).length; }
+function updateCount() { $("#count").textContent = `${filledCount()}/${totalRegions()} typed`; }
+
+// ---------------- box editing ----------------
+let boxMode = false, sel = null; // sel = {p, r}
+function setBoxMode(on) {
+  boxMode = on; $("#boxBar").hidden = !on; $("#editor").classList.toggle("boxmode", on);
+  $$(".tool").forEach(b => b.classList.toggle("on", on ? b.dataset.tool === "boxes" : b.dataset.tool === tool));
+  sel = null; updateSelTools();
+  doc.pages.forEach((P, p) => drawBoxes(p));
+}
+const KIND_NAME = { lines: "Lines", box: "Box", cell: "Cell" };
+function drawBoxes(p) {
+  const v = views[p]; if (!v) return; $$(".bx,.rubber", v.el).forEach(e => e.remove());
+  if (!boxMode) return;
+  for (const r of doc.pages[p].regions) {
+    const R = regionRect(p, r), d = document.createElement("div");
+    d.className = "bx" + (sel && sel.r === r ? " sel" : "");
+    d.style.left = R.x0 * zoom + "px"; d.style.top = R.y0 * zoom + "px"; d.style.width = (R.x1 - R.x0) * zoom + "px"; d.style.height = (R.y1 - R.y0) * zoom + "px";
+    d.innerHTML = `<b>${KIND_NAME[r.kind]}${r.kind === "lines" ? " ×" + r.ys.length : ""}${r.code ? " · code" : ""}</b><i></i>`;
+    d.dataset.rid = r.id; v.el.appendChild(d);
+  }
+}
+function updateSelTools() {
+  $("#selTools").hidden = !sel;
+  if (sel) { $("#kindBtn").textContent = "Type: " + KIND_NAME[sel.r.kind]; $("#codeBtn").textContent = "Code: " + (sel.r.code ? "on" : "off"); }
+}
+$$(".nk").forEach(b => b.onclick = () => { newKind = b.dataset.k; $$(".nk").forEach(x => x.classList.toggle("on", x === b)); });
+$("#doneBoxes").onclick = () => setBoxMode(false);
+$("#delBtn").onclick = () => deleteSel();
+$("#kindBtn").onclick = () => { if (!sel) return; const order = ["lines", "box", "cell"]; const nk = order[(order.indexOf(sel.r.kind) + 1) % 3]; convertKind(sel.p, sel.r, nk); };
+$("#codeBtn").onclick = () => { if (!sel) return; sel.r.code = !sel.r.code; rebuildField(sel.p, sel.r); pageChanged(sel.p); };
+function currentPage() { const host = $("#pages"); let p = 0; const mid = host.scrollTop + host.clientHeight / 3; views.forEach((v, i) => { if (v.el.offsetTop <= mid) p = i; }); return p; }
+$("#redetect").onclick = async () => {
+  const p = currentPage();
+  busy(true, `Finding answer spaces on page ${p + 1}…`);
+  const old = doc.pages[p].regions; const fresh = await detectPage(p, null);
+  fresh.regions.forEach(r => r.id = `${p}:d${rid8()}`);
+  for (const o of old) {
+    const t = doc.text[o.id]; delete doc.text[o.id]; delete doc.fit[o.id]; emit("text:" + o.id);
+    if (!t) continue;
+    let best = null, bo = 0;
+    for (const n of fresh.regions) { const ov = Math.max(0, Math.min(o.x1, n.x1) - Math.max(o.x0, n.x0)) * Math.max(0, Math.min(o.y1, n.y1) - Math.max(o.y0, n.y0)); if (ov > bo) { bo = ov; best = n; } }
+    if (best) { doc.text[best.id] = (doc.text[best.id] ? doc.text[best.id] + "\n" : "") + t; emit("text:" + best.id); }
+    else toast("Some typed text had no matching box and was removed.", 4000);
+  }
+  doc.pages[p].gaps = {}; doc.pages[p].regions = fresh.regions; doc.pages[p].items = fresh.items;
+  rebuildPageFields(p); pageChanged(p); busy(false); toast(`Page ${p + 1}: ${fresh.regions.length} answer spaces.`);
+};
+function pageChanged(p) { emit("page:" + p); scheduleSave(); }
+function rebuildPageFields(p) { $$(".ans", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
+function rebuildField(p, r) { if (r._el) r._el.remove(); makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
+function deleteSel() {
+  if (!sel) return; const { p, r } = sel; const P = doc.pages[p];
+  setGap(p, r, 0); P.regions.splice(P.regions.indexOf(r), 1); if (r._el) r._el.remove();
+  if (doc.text[r.id]) toast("Box deleted. Its typed text was removed too.");
+  delete doc.text[r.id]; delete doc.fit[r.id]; emit("text:" + r.id); sel = null; updateSelTools(); layoutPage(p); updateCount(); pageChanged(p);
+}
+function pageSpacing(p) { const s = doc.pages[p].regions.filter(r => r.kind === "lines" && r.ys.length > 1).map(r => r.sp).sort((a, b) => a - b); return s.length ? s[s.length >> 1] : 24; }
+function convertKind(p, r, nk) {
+  setGap(p, r, 0);
+  if (nk === "lines") { const sp = r.sp || pageSpacing(p); const n = Math.max(1, Math.round((r.y1 - r.y0) / sp)); r.sp = sp; r.ys = Array.from({ length: n }, (_, i) => r.y0 + sp * (i + 1)); r.y1 = r.ys[n - 1] + 2; r.indent = 0; }
+  else delete r.ys;
+  r.kind = nk; r.cut = r.y1 + 3; rebuildField(p, r); pageChanged(p);
+}
+function setRegionRect(p, r, x0, y0, x1, y1) {
+  r.x0 = Math.min(x0, x1); r.x1 = Math.max(x0, x1); y0 = Math.min(y0, y1); y1 = Math.max(y0, y1);
+  if (r.kind === "lines") { const sp = r.sp || pageSpacing(p); const n = Math.max(1, Math.round((y1 - y0) / sp)); r.sp = sp; r.ys = Array.from({ length: n }, (_, i) => y0 + sp * (i + 1)); r.y0 = y0; r.y1 = r.ys[n - 1] + 2; r.indent = Math.min(r.indent || 0, r.x1 - r.x0 - 20); }
+  else { r.y0 = y0; r.y1 = y1; }
+  r.cut = r.y1 + 3;
+}
+$("#pages").addEventListener("pointerdown", e => {
+  if (!boxMode) return;
+  const pageEl = e.target.closest(".page"); if (!pageEl) return;
+  const p = +pageEl.dataset.p, v = views[p];
+  const b = v.el.getBoundingClientRect();
+  const pt = ev => [(ev.clientX - b.left) / zoom, (ev.clientY - b.top) / zoom];
+  const p0 = pt(e);
+  const bx = e.target.closest(".bx");
+  e.preventDefault();
+  if (bx) {
+    const r = doc.pages[p].regions.find(q => q.id === bx.dataset.rid); sel = { p, r }; updateSelTools(); drawBoxes(p);
+    const resize = e.target.tagName === "I";
+    setGap(p, r, 0);
+    const o = { x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1 };
+    const mv = ev => { const q = pt(ev), dx = q[0] - p0[0], dy = q[1] - p0[1];
+      if (resize) setRegionRect(p, r, o.x0, o.y0, Math.max(o.x0 + 12, o.x1 + dx), Math.max(o.y0 + 8, o.y1 + dy));
+      else setRegionRect(p, r, o.x0 + dx, o.y0 + dy, o.x1 + dx, o.y1 + dy);
+      layoutPage(p); };
+    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); pageChanged(p); };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+    return;
+  }
+  sel = null; updateSelTools(); drawBoxes(p);
+  const rb = document.createElement("div"); rb.className = "rubber"; v.el.appendChild(rb);
+  let q = p0;
+  const mv = ev => { q = pt(ev); rb.style.left = Math.min(p0[0], q[0]) * zoom + "px"; rb.style.top = Math.min(p0[1], q[1]) * zoom + "px"; rb.style.width = Math.abs(q[0] - p0[0]) * zoom + "px"; rb.style.height = Math.abs(q[1] - p0[1]) * zoom + "px"; };
+  const up = () => {
+    window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); rb.remove();
+    const w = Math.abs(q[0] - p0[0]), h = Math.abs(q[1] - p0[1]);
+    if (w < 12 || h < 8) return;
+    const r = { id: `${p}:u${rid8()}`, kind: newKind, code: false, label: "" };
+    const y0 = src(p, Math.min(p0[1], q[1])), y1 = src(p, Math.max(p0[1], q[1]));
+    if (newKind === "lines") { r.sp = Math.min(pageSpacing(p), h); r.indent = 0; }
+    setRegionRect(p, r, Math.min(p0[0], q[0]), y0, Math.max(p0[0], q[0]), y1);
+    doc.pages[p].regions.push(r); makeField(p, r); sel = { p, r }; updateSelTools(); layoutPage(p); updateCount(); pageChanged(p);
+  };
+  window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+});
+
+// ---------------- timer ----------------
+let timerIv = 0;
+function timerInit() { clearInterval(timerIv); timerIv = setInterval(timerTick, 500); timerTick(); }
+function fmtT(s) { const neg = s < 0; s = Math.abs(Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (neg ? "−" : "") + (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + ":" + String(x).padStart(2, "0"); }
+function timerUsed(T) { return T.acc + (T.run ? (Date.now() - T.since) / 1000 : 0); }
+function timerTick() {
+  const T = doc && doc.timer, b = $("#timerBtn");
+  if (!T) { $("#timerTxt").textContent = "Timer"; b.className = "timer"; return; }
+  const el = timerUsed(T), show = T.up ? el : T.total - el;
+  $("#timerTxt").textContent = fmtT(show);
+  b.className = "timer" + (T.run ? " run" : "") + (!T.up && show <= T.total * 0.1 ? " low" : "") + (!T.up && show < 0 && T.run ? " over" : "");
+}
+$("#timerBtn").onclick = e => { const pop = $("#timerPop"); pop.hidden = !pop.hidden; const r = e.currentTarget.getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = Math.max(8, Math.min(window.innerWidth - 240, r.left - 60)) + "px"; if (doc.timer) { $("#tMin").value = Math.round(doc.timer.total / 60); $("#tUp").checked = doc.timer.up; } };
+$("#tStart").onclick = () => { const T = doc.timer; const mins = clamp(+$("#tMin").value || 90, 1, 600); if (!T || (!T.run && T.acc === 0)) doc.timer = { total: mins * 60, up: $("#tUp").checked, acc: 0, run: true, since: Date.now() }; else if (!T.run) { T.run = true; T.since = Date.now(); T.up = $("#tUp").checked; T.total = mins * 60; } $("#timerPop").hidden = true; timerTick(); scheduleSave(); emit("timer"); };
+$("#tPause").onclick = () => { const T = doc.timer; if (T && T.run) { T.acc += (Date.now() - T.since) / 1000; T.run = false; } timerTick(); scheduleSave(); emit("timer"); };
+$("#tReset").onclick = () => { doc.timer = null; timerTick(); scheduleSave(); emit("timer"); };
+document.addEventListener("pointerdown", e => { const pop = $("#timerPop"); if (!pop.hidden && !pop.contains(e.target) && !$("#timerBtn").contains(e.target)) pop.hidden = true; });
+
+// ---------------- question labels ----------------
+// walk the printed text in reading order, tracking question / part / sub-part numbers
+function labelIndex() {
+  const idx = []; let q = "", a = "", r = "";
+  doc.pages.forEach((P, p) => {
+    const items = (P.items || []).filter(it => it.x < 150).sort((m, n) => m.y - n.y || m.x - n.x);
+    for (const it of items) {
+      let changed = false;
+      for (const t of it.s.trim().split(/\s+/)) {
+        let m;
+        if ((m = t.match(/^(\d{1,2})\*?$/)) && it.x < 75 && +m[1] > 0 && +m[1] < 40) { q = m[1]; a = ""; r = ""; changed = true; }
+        else if ((m = t.match(/^\(([ivx]{1,4})\)\*?$/)) && a && !(m[1] === "i" && a === "h")) { r = m[1]; changed = true; }
+        else if ((m = t.match(/^\(([a-h,j-z])\)\*?$/)) || (m = t.match(/^\((i)\)\*?$/))) { a = m[1]; r = ""; changed = true; }
+        else break;
+      }
+      if (changed) idx.push({ p, y: it.y - 2, label: q + (a ? `(${a})` : "") + (r ? `(${r})` : "") });
+    }
+  });
+  return idx;
+}
+function labelAt(idx, p, y) { let lab = "?"; for (const e of idx) { if (e.p < p || (e.p === p && e.y <= y)) lab = e.label; else break; } return lab; }
+// the printed wording just above an answer space (for marking without the paper)
+function questionText(p, r, prevBottom) {
+  const P = doc.pages[p];
+  const junk = it => { const s = it.s.trim(); return /^\.{4,}|^\[\d+\]$|^PMT$|^©|^Turn over$|^Answer all questions\.?$|^BLANK PAGE$/i.test(s) || /^\s*\.+\s*$/.test(s) || (/^\d{1,3}$/.test(s) && it.x > 150 && it.y < 70); };
+  const its = (P.items || []).filter(it => it.y > prevBottom + 1 && it.y < r.y0 + 6 && !junk(it));
+  return its.sort((a, b) => a.y - b.y || a.x - b.x).map(it => it.s.replace(/\.{4,}/g, "").trim()).filter(Boolean).join(" ").replace(/\s+/g, " ").slice(-500).trim();
+}
+function answerList(withQuestion) {
+  const idx = labelIndex(); const out = [];
+  doc.pages.forEach((P, p) => {
+    let prev = 0;
+    for (const r of [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)) {
+      const e = { q: labelAt(idx, p, r.y0 + 6), page: p + 1 };
+      if (r.label && r.label !== "label") e.part = r.label.replace(/[.\s]+$/, "").slice(0, 40);
+      if (r.kind === "cell") e.cell = true;
+      if (withQuestion) { const qt = questionText(p, r, prev); if (qt) e.question = qt; }
+      e.answer = (doc.text[r.id] || "").trim();
+      out.push(e); prev = Math.max(prev, r.y1);
+    }
+  });
+  return out;
+}
+
+// ---------------- export: filled-in PDF ----------------
+let fontCache = null;
+async function fontBytes() { if (!fontCache) fontCache = await Promise.all(["fonts/DejaVuSans.ttf", "fonts/DejaVuSansMono.ttf"].map(u => fetch(u).then(r => r.arrayBuffer()))); return fontCache; }
+function wrapText(text, font, size, width, indent) {
+  const out = []; let first = true;
+  for (const para of text.replace(/\t/g, "    ").split("\n")) {
+    const toks = para.match(/\S+|\s+/g) || [""]; let line = ""; let avail = width - (first ? indent : 0);
+    const W = s => font.widthOfTextAtSize(s, size);
+    for (let tok of toks) {
+      if (W(line + tok) <= avail || (!line && /^\s+$/.test(tok))) { line += tok; continue; }
+      if (/^\s+$/.test(tok)) { out.push(line); first = false; line = ""; avail = width; continue; }
+      if (line.trim()) { out.push(line.replace(/\s+$/, "")); first = false; line = ""; avail = width; }
+      while (W(line + tok) > avail) {
+        let k = 1; while (k < tok.length && W(line + tok.slice(0, k + 1)) <= avail) k++;
+        out.push(line + tok.slice(0, k)); first = false; line = ""; avail = width; tok = tok.slice(k);
+      }
+      line += tok;
+    }
+    out.push(line.replace(/\s+$/, "")); first = false;
+  }
+  return out;
+}
+async function exportPDF() {
+  const btn = $("#exportBtn"); btn.disabled = true;
+  try {
+    busy(true, "Building your PDF…", 0);
+    const { PDFDocument, rgb, LineCapStyle } = PDFLib;
+    const srcDoc = await PDFDocument.load(doc.bytes.slice(0), { ignoreEncryption: true, updateMetadata: false });
+    const out = await PDFDocument.create(); out.registerFontkit(fontkit);
+    const [fb1, fb2] = await fontBytes();
+    const sans = await out.embedFont(fb1, { subset: true }), mono = await out.embedFont(fb2, { subset: true });
+    const okS = new Set(sans.getCharacterSet()), okM = new Set(mono.getCharacterSet());
+    const clean = (t, set) => [...t].map(ch => ch === "\n" || set.has(ch.codePointAt(0)) ? ch : (ch === "\t" ? "    " : "?")).join("");
+    const hex = c => { const n = parseInt(c.slice(1), 16); return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
+    for (let p = 0; p < doc.pages.length; p++) {
+      busy(true, `Building your PDF… page ${p + 1} of ${doc.pages.length}`, p / doc.pages.length);
+      const P = doc.pages[p], srcPage = srcDoc.getPage(p), cb = srcPage.getCropBox(), rot = (srcPage.getRotation().angle % 360 + 360) % 360;
+      const G = totalGap(p), gaps = gapList(p);
+      let page, tx, ty;
+      if (!G && rot === 0) {
+        const [cp] = await out.copyPages(srcDoc, [p]); page = out.addPage(cp);
+        tx = x => cb.x + x; ty = y => cb.y + cb.height - y;
+      } else {
+        const newH = P.h + G; page = out.addPage([P.w, newH]); tx = x => x; ty = y => newH - y;
+        const bands = gaps.map(g => ({ at: g.at, h: g.h })); bands.push({ at: P.h, h: 0 });
+        if (rot === 0) {
+          let sTop = 0, dTop = 0;
+          for (const b of bands) {
+            const hS = b.at - sTop;
+            if (hS > 0.5) { const emb = await out.embedPage(srcPage, { left: cb.x, right: cb.x + cb.width, top: cb.y + cb.height - sTop, bottom: cb.y + cb.height - b.at }); page.drawPage(emb, { x: 0, y: newH - (dTop + hS), width: P.w, height: hS }); }
+            dTop += hS + b.h; sTop = b.at;
+          }
+        } else { // rotated page: flatten it to a picture, then add everything on top
+          const c2 = await pageRaster(p, 2.5, false);
+          const img = await out.embedJpg(await (await fetch(c2.toDataURL("image/jpeg", 0.9))).arrayBuffer());
+          page.drawImage(img, { x: 0, y: 0, width: P.w, height: P.h + G }); c2.width = 0;
+        }
+        for (const g of gaps) {
+          const r = P.regions.find(q => q.id === g.rid);
+          for (const y of gapRules(p, r, g)) page.drawLine({ start: { x: r.x0, y: ty(y) }, end: { x: r.x1, y: ty(y) }, thickness: 0.5, color: rgb(0.6, 0.63, 0.62), dashArray: [1.2, 2.2] });
+        }
+      }
+      for (const r of P.regions) {
+        const raw = doc.text[r.id]; if (!raw || !raw.trim()) continue;
+        const font = r.code ? mono : sans, txt = clean(raw, r.code ? okM : okS);
+        const R = regionRect(p, r), pad = r.kind === "box" ? 4 : 0, width = r.x1 - r.x0 - 2 * pad;
+        const f0 = fitOf(r); let fs = f0.fs, L = f0.L, lines, top;
+        for (;;) {
+          lines = wrapText(txt, font, fs, width, r.kind === "lines" ? r.indent || 0 : 0);
+          top = fieldTop(p, r, { fs, L });
+          const bottom = r.kind === "lines" ? R.y1 + 1 : R.y1 - pad;
+          if (top + lines.length * L <= bottom + 0.5 || fs <= 5) break;
+          L = L * (fs - 0.25) / fs; fs = fs - 0.25;
+        }
+        if (r.kind === "cell") top = R.y0 + Math.max(0, ((R.y1 - R.y0) - lines.length * L) / 2);
+        lines.forEach((ln, i) => {
+          if (!ln) return;
+          const w = font.widthOfTextAtSize(ln, fs);
+          const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 && r.kind === "lines" ? r.indent || 0 : 0);
+          page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs, font, color: rgb(0.067, 0.078, 0.094) });
+        });
+      }
+      const S = (doc.strokes[p] || []).slice().sort((a, b) => (a.t === "hl" ? 0 : 1) - (b.t === "hl" ? 0 : 1));
+      for (const s of S) {
+        let pts = dispPts(p, s); if (!pts.length) continue;
+        if (pts.length === 1) pts = [pts[0], [pts[0][0] + 0.05, pts[0][1]]];
+        const d = "M" + pts.map(q => `${q[0].toFixed(2)} ${q[1].toFixed(2)}`).join(" L");
+        page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: s.w, borderOpacity: s.t === "hl" ? 0.35 : 1, borderLineCap: s.t === "hl" ? LineCapStyle.Butt : LineCapStyle.Round });
+      }
+    }
+    out.setTitle(doc.name + " (answered)"); out.setSubject(JSON.stringify(aiJSON(false))); out.setCreator("TypePDF"); out.setProducer("TypePDF");
+    const bytes = await out.save();
+    download(new Blob([bytes], { type: "application/pdf" }), doc.name + " - answered.pdf");
+    busy(false); toast("PDF exported.");
+  } catch (e) { console.error(e); busy(false); toast("Export failed: " + (e.message || e), 6000); }
+  finally { btn.disabled = false; }
+}
+$("#exportBtn").onclick = exportPDF;
+function download(blob, name) { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000); }
+
+// a page as a picture (with extra space, optionally with ink), for flattening and for AI crops
+async function pageRaster(p, scale, withInk, grey) {
+  const P = doc.pages[p], pg = await pdf.getPage(p + 1), vp = pg.getViewport({ scale });
+  const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+  const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height); await pg.render({ canvasContext: cx, viewport: vp }).promise;
+  const G = totalGap(p), c2 = document.createElement("canvas"); c2.width = c.width; c2.height = Math.ceil((P.h + G) * scale);
+  const x2 = c2.getContext("2d"); x2.fillStyle = "#fff"; x2.fillRect(0, 0, c2.width, c2.height);
+  let sTop = 0, dTop = 0; const bands = gapList(p).map(g => ({ at: g.at, h: g.h })); bands.push({ at: P.h, h: 0 });
+  for (const b of bands) { const hS = b.at - sTop; if (hS > 0) x2.drawImage(c, 0, sTop * scale, c.width, hS * scale, 0, dTop * scale, c.width, hS * scale); dTop += hS + b.h; sTop = b.at; }
+  c.width = 0;
+  if (withInk) for (const pass of ["hl", "pen"]) for (const s of doc.strokes[p] || []) if ((s.t === "hl") === (pass === "hl")) drawStroke(x2, s, dispPts(p, s), scale);
+  if (grey) x2.filter = "none";
+  return c2;
+}
+
+// ---------------- export for AI: typed answers as JSON + only the hand-drawn work as a small PDF ----------------
+function aiJSON(withQuestion) {
+  const list = answerList(withQuestion);
+  const answered = list.filter(e => e.answer), blank = list.filter(e => !e.answer).map(e => e.q + (e.part ? ` [${e.part}]` : "") + (e.cell ? " [cell]" : ""));
+  // group table cells under one entry so a filled truth table reads as rows
+  const answers = [];
+  for (const e of answered) {
+    const last = answers[answers.length - 1];
+    if (e.cell && last && last.cells && last.q === e.q && last.page === e.page) { last.cells.push(e.answer); continue; }
+    if (e.cell) { const { answer, cell, ...rest } = e; answers.push({ ...rest, cells: [answer] }); continue; }
+    answers.push(e);
+  }
+  const o = { paper: doc.name, exported: new Date().toISOString() };
+  if (doc.timer) o.time_used = fmtT(timerUsed(doc.timer)) + (doc.timer.up ? "" : " of " + fmtT(doc.timer.total));
+  o.note = "Typed answers are listed by question number. Table cells are given left-to-right, top-to-bottom. Handwritten or drawn work is in the separate workings PDF, one cropped image per area, captioned with page and question.";
+  o.answers = answers;
+  if (blank.length) o.blank = [...new Set(blank)];
+  const wk = workingsAreas(); if (wk.length) o.handwritten = wk.map(a => ({ q: a.q, page: a.p + 1 }));
+  return o;
+}
+function workingsAreas() {
+  const idx = labelIndex(); const areas = [];
+  doc.pages.forEach((P, p) => {
+    const boxes = (doc.strokes[p] || []).filter(s => s.t === "pen" && s.pts.length).map(s => { const pts = dispPts(p, s); const ys = pts.map(q => q[1]); return [Math.min(...ys), Math.max(...ys)]; }).sort((a, b) => a[0] - b[0]);
+    const bands = [];
+    for (const b of boxes) { const l = bands[bands.length - 1]; if (l && b[0] - l[1] < 70) l[1] = Math.max(l[1], b[1]); else bands.push([b[0], b[1]]); }
+    const H = P.h + totalGap(p);
+    for (const b of bands) { const y0 = Math.max(0, b[0] - 100), y1 = Math.min(H, b[1] + 18); areas.push({ p, y0, y1, q: labelAt(idx, p, src(p, b[0])) }); }
+  });
+  return areas;
+}
+async function workingsPDF() {
+  const areas = workingsAreas(); if (!areas.length) return null;
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const out = await PDFDocument.create(); const font = await out.embedFont(StandardFonts.Helvetica);
+  const scale = 1.6; let lastP = -1, ras = null;
+  for (let i = 0; i < areas.length; i++) {
+    const a = areas[i]; busy(true, `Preparing workings… ${i + 1} of ${areas.length}`, i / areas.length);
+    if (a.p !== lastP) { if (ras) ras.width = 0; ras = await pageRaster(a.p, scale, true); lastP = a.p; }
+    const P = doc.pages[a.p], hPt = a.y1 - a.y0;
+    const c = document.createElement("canvas"); c.width = Math.round(P.w * scale); c.height = Math.round(hPt * scale);
+    const cx = c.getContext("2d"); cx.filter = "grayscale(1)"; cx.drawImage(ras, 0, a.y0 * scale, c.width, c.height, 0, 0, c.width, c.height);
+    const img = await out.embedJpg(await (await fetch(c.toDataURL("image/jpeg", 0.72))).arrayBuffer()); c.width = 0;
+    const page = out.addPage([P.w, hPt + 18]);
+    page.drawImage(img, { x: 0, y: 0, width: P.w, height: hPt });
+    page.drawText(`Page ${a.p + 1} · Question ${a.q}`, { x: 10, y: hPt + 5, size: 9, font, color: rgb(0.2, 0.2, 0.2) });
+  }
+  if (ras) ras.width = 0;
+  out.setTitle(doc.name + " – handwritten workings"); out.setCreator("TypePDF");
+  return out.save();
+}
+$("#aiBtn").onclick = () => { $("#aiDlg").showModal(); updateAiInfo(); };
+$("#aiQ").onchange = updateAiInfo;
+function updateAiInfo() {
+  const o = aiJSON($("#aiQ").checked); const txt = JSON.stringify(o);
+  const wk = workingsAreas();
+  $("#aiInfo").textContent = `${o.answers.length} typed answers, ${(o.blank || []).length} blank. ${wk.length ? wk.length + " area" + (wk.length > 1 ? "s" : "") + " of handwriting go in the workings PDF." : "No handwriting, so no workings PDF is needed."} About ${Math.round(txt.length / 4).toLocaleString()} tokens of text.`;
+  $("#aiWork").disabled = !wk.length;
+}
+$("#aiCopy").onclick = async () => { const t = JSON.stringify(aiJSON($("#aiQ").checked), null, 1); try { await navigator.clipboard.writeText(t); toast("Answers copied as JSON."); } catch (e) { fallbackCopy(t); } };
+$("#aiJson").onclick = () => download(new Blob([JSON.stringify(aiJSON($("#aiQ").checked), null, 1)], { type: "application/json" }), doc.name + " - answers.json");
+$("#aiWork").onclick = async () => { try { const b = await workingsPDF(); busy(false); if (b) download(new Blob([b], { type: "application/pdf" }), doc.name + " - workings.pdf"); } catch (e) { busy(false); toast("Couldn't build the workings PDF: " + e.message); } };
+$("#aiBoth").onclick = async () => { $("#aiJson").click(); if (!$("#aiWork").disabled) setTimeout(() => $("#aiWork").click(), 600); };
+$("#aiClose").onclick = () => $("#aiDlg").close();
+function fallbackCopy(t) { const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); toast("Copied."); }
+
+// ---------------- backups ----------------
+function b64(buf) { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u.buffer; }
+function downloadBackup(d) { const o = { format: "typepdf", v: 2, pdf: b64(d.bytes), state: strip(d) }; download(new Blob([JSON.stringify(o)], { type: "application/json" }), d.name + ".typepdf"); }
+async function openBackup(buf) {
+  try {
+    const o = JSON.parse(new TextDecoder().decode(buf)); if (!/^(typepdf|paperwork)$/.test(o.format)) throw new Error("not a TypePDF backup");
+    const d = o.state; d.bytes = unb64(o.pdf); d.seq = 0; d.dirty = {}; await DB.put(d); toast("Backup restored."); openDoc(d);
+  } catch (e) { toast("Couldn't open that backup: " + e.message); }
+}
+
+window.addEventListener("beforeunload", () => { if (doc) { saveView(); DB.put(doc); } });
+// bring papers across from the earlier single-device version (same site, older storage name)
+(async () => {
+  try {
+    if (localStorage.getItem("migrated-paperwork")) return renderHomeList();
+    const old = await new Promise(res => { const r = indexedDB.open("paperwork"); r.onupgradeneeded = () => { r.transaction.abort(); res(null); }; r.onsuccess = () => res(r.result); r.onerror = () => res(null); });
+    if (old && old.objectStoreNames.contains("docs")) {
+      const all = await new Promise(res => { const q = old.transaction("docs").objectStore("docs").getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); });
+      for (const d of all) {
+        if (await DB.get(d.id).catch(() => null)) continue;
+        d.seq = 0; d.dirty = {}; d.fit = {};
+        for (const arr of Object.values(d.strokes || {})) for (const s of arr) { s.id ||= rid8(); s.t ||= "pen"; }
+        await DB.put(d); await DB.putMeta({ id: d.id, name: d.name, updated: d.updated || Date.now(), pages: d.pages.length, filled: Object.keys(d.text || {}).length, total: d.pages.reduce((s, P) => s + P.regions.length, 0) });
+      }
+      old.close();
+    }
+    localStorage.setItem("migrated-paperwork", "1");
+  } catch (e) {}
+  renderHomeList();
+})();
