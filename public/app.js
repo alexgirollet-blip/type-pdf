@@ -474,6 +474,7 @@ function fitRegion(p, r) {
   if (r.kind === "cell") centreCell(r);
   if (changed) scheduleSave();
   if (handFor && handFor.r === r) placeHandles();
+  if (flagFor && flagFor.r === r) placeFlagFloat();
 }
 function applyFieldNoGap(p, r, f) { const P = doc.pages[p]; const g = (P.gaps || {})[r.id]; if (g) { P.gaps[r.id] = 0; applyField(p, r, f); P.gaps[r.id] = g; } else applyField(p, r, f); if (r.kind === "cell") r._el.style.paddingTop = "0"; }
 function centreCell(r) { const ta = r._el; ta.style.paddingTop = "0"; const h = (r.y1 - r.y0); const c = contentH(r); const pad = Math.max(0, (h - c) / 2); ta.style.paddingTop = pad * zoom + "px"; ta.style.height = (h - pad) * zoom + "px"; }
@@ -1129,8 +1130,10 @@ function placeFlagFloat() {
   b.hidden = false; b.classList.toggle("on", on);
   b.textContent = on ? "⚑ Flagged" : "⚑ Flag";
   b.title = on ? "Remove the flag" : "Flag this to come back to (e.g. to draw it on the iPad, or because it's hard)";
-  b.style.left = Math.max(0, Math.min(doc.pages[p].w - 70, r.x1 - 68)) * zoom + "px";
-  b.style.top = Math.max(0, R.y0 - 20) * zoom + "px";
+  // just outside the box, halfway down its right-hand side
+  const ta = r._el;
+  b.style.left = (ta.offsetLeft + ta.offsetWidth + 8) + "px";
+  b.style.top = (ta.offsetTop + ta.offsetHeight / 2 - b.offsetHeight / 2) + "px";
 }
 function toggleFlag(p, r) {
   doc.flags ||= {};
