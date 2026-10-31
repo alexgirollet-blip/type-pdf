@@ -384,8 +384,8 @@ function applyField(p, r, f) {
   ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
   ta.style.textIndent = (r.kind === "lines" ? r.indent || 0 : 0) * z + "px";
   if (r.kind === "lines") {
-    const top = fieldTop(p, r, f);
-    ta.style.top = top * z + "px"; ta.style.height = (rect.y1 + 1 - top) * z + "px"; ta.style.padding = "0";
+    const top = fieldTop(p, r, f), extra = rect.y1 - disp(p, r.y1);   // extra = page space added under it
+    ta.style.top = top * z + "px"; ta.style.height = Math.max(rect.y1 + 1 - top, availFor(r, f) + extra) * z + "px"; ta.style.padding = "0";
   } else if (r.kind === "box") {
     ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = `${4 * z}px ${4 * z}px`;
   } else {
@@ -394,7 +394,8 @@ function applyField(p, r, f) {
 }
 function contentH(r) { const ta = r._el; const prev = ta.style.height; ta.style.height = "1px"; const h = ta.scrollHeight; ta.style.height = prev; return h / zoom; }
 function availFor(r, f) {
-  if (r.kind === "lines") return (r.ys[r.ys.length - 1] + 1) - (r.ys[0] - 2 - baseInLine(f.fs, f.L));
+  // room for one line of text on every printed line, including the last one
+  if (r.kind === "lines") return (r.ys[r.ys.length - 1] - r.ys[0]) + f.L + 0.5;
   return r.y1 - r.y0;
 }
 function fitRegion(p, r) {
@@ -590,7 +591,11 @@ function bindInk(p, v) {
       const r = hitRegion(p, st.start[0], st.start[1]);
       if (st.stroke && !r) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); st = null; return; }   // a deliberate dot
       if (st.stroke) { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
-      if (r) { const ta = r._el; ta.focus({ preventScroll: true }); const L = offsetAt(ta, e.clientX, e.clientY); ta.setSelectionRange(L, L); }
+      if (r) {
+        const ta = r._el; ta.focus({ preventScroll: true }); const L = offsetAt(ta, e.clientX, e.clientY); ta.setSelectionRange(L, L);
+        // this click counts towards a double/triple click, so double-clicking a word in an inactive box selects it
+        if (st.type !== "touch") clickRun = { t: performance.now(), x: e.clientX, y: e.clientY, n: 1 };
+      }
       else if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
     } else if (st.stroke) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); drawInk(p); }
     else if (st.erased && st.erased.length) { pushUndo({ t: "erase", p, list: st.erased }); st.erased.forEach(s => emit(`s:${p}:${s.id}`)); scheduleSave(); }
@@ -920,8 +925,10 @@ async function exportPDF() {
         for (;;) {
           lines = wrapText(txt, font, fs * fontScale(r), width, r.kind === "lines" ? r.indent || 0 : 0);
           top = fieldTop(p, r, { fs, L });
-          const bottom = r.kind === "lines" ? R.y1 + 1 : R.y1 - pad;
-          if (top + lines.length * L <= bottom + 0.5 || fs <= 5) break;
+          const fitsNow = r.kind === "lines"
+            ? top + (lines.length - 1) * L + baseInLine(fs, L) <= R.y1 - 3.5 + 0.5   // last baseline on or above the last printed line
+            : top + lines.length * L <= R.y1 - pad + 0.5;
+          if (fitsNow || fs <= 5) break;
           L = L * (fs - 0.25) / fs; fs = fs - 0.25;
         }
         if (r.kind === "cell") top = R.y0 + Math.max(0, ((R.y1 - R.y0) - lines.length * L) / 2);
