@@ -603,10 +603,67 @@ function tracePath(ctx, pts, k, ox = 0, oy = 0) {
   for (let i = 1; i < pts.length - 1; i++) { const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2; ctx.quadraticCurveTo((pts[i][0] - ox) * k, (pts[i][1] - oy) * k, (mx - ox) * k, (my - oy) * k); }
   if (pts.length > 1) ctx.lineTo((pts[pts.length - 1][0] - ox) * k, (pts[pts.length - 1][1] - oy) * k);
 }
-function drawStroke(ctx, s, pts, k, ox, oy) {
+function drawStroke(ctx, s, pts, k, ox = 0, oy = 0) {
   ctx.save();
   ctx.globalAlpha = s.t === "hl" ? 0.35 : 1; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * k; ctx.lineCap = s.t === "hl" ? "butt" : "round"; ctx.lineJoin = "round";
-  tracePath(ctx, pts, k, ox, oy); ctx.stroke(); ctx.restore();
+  const runs = pressureRuns(s, pts);
+  if (!runs) { tracePath(ctx, pts, k, ox, oy); ctx.stroke(); ctx.restore(); return; }
+  for (const run of runs) {
+    ctx.lineWidth = run.w * k; ctx.beginPath(); ctx.moveTo((run.segs[0].a[0] - ox) * k, (run.segs[0].a[1] - oy) * k);
+    for (const g of run.segs) { if (g.c) ctx.quadraticCurveTo((g.c[0] - ox) * k, (g.c[1] - oy) * k, (g.b[0] - ox) * k, (g.b[1] - oy) * k); else ctx.lineTo((g.b[0] - ox) * k, (g.b[1] - oy) * k); }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+// ---- Apple Pencil hover: a dot shows where the pen (or a ring where the eraser) will land ----
+let hoverDot = null;
+function showHover(p, q) {
+  const v = views[p]; if (!v || boxMode) return hideHover();
+  if (!hoverDot) { hoverDot = document.createElement("div"); hoverDot.className = "hoverdot"; }
+  if (hoverDot.parentElement !== v.el) v.el.appendChild(hoverDot);
+  const er = tool === "eraser", hl = tool === "hl", d = Math.max(4, (er ? 10 : hl ? 9 : width + 1.5) * zoom);
+  hoverDot.className = "hoverdot" + (er ? " er" : "");
+  Object.assign(hoverDot.style, { display: "block", width: d + "px", height: d + "px", left: q[0] * zoom - d / 2 + "px", top: q[1] * zoom - d / 2 + "px", background: er ? "transparent" : hl ? "rgba(242,210,27,.45)" : colour });
+}
+function hideHover() { if (hoverDot) hoverDot.style.display = "none"; }
+// ---- two-finger tap undoes, three-finger tap redoes (fingers still scroll and pinch as normal) ----
+const multiTouch = { max: 0, t0: 0, moved: false, start: null, last: 0 };
+$("#pages").addEventListener("touchstart", e => {
+  const fingers = [...e.touches].filter(t => t.touchType !== "stylus");
+  if (fingers.length !== e.touches.length) { multiTouch.max = 0; return; }
+  if (fingers.length === 1 || !multiTouch.max) { multiTouch.max = 0; multiTouch.t0 = performance.now(); multiTouch.moved = false; multiTouch.start = new Map(); }
+  for (const t of fingers) if (!multiTouch.start.has(t.identifier)) multiTouch.start.set(t.identifier, [t.clientX, t.clientY]);
+  multiTouch.max = Math.max(multiTouch.max, fingers.length);
+  if (fingers.length > 1) multiTouch.last = performance.now();
+}, { passive: true });
+$("#pages").addEventListener("touchmove", e => {
+  if (!multiTouch.start) return;
+  for (const t of e.touches) { const s = multiTouch.start.get(t.identifier); if (s && Math.hypot(t.clientX - s[0], t.clientY - s[1]) > 12) multiTouch.moved = true; }
+}, { passive: true });
+$("#pages").addEventListener("touchend", e => {
+  if (multiTouch.max > 1) multiTouch.last = performance.now();
+  if (e.touches.length || !multiTouch.start) return;
+  const quick = performance.now() - multiTouch.t0 < 350, n = multiTouch.max;
+  multiTouch.start = null; multiTouch.max = 0;
+  if (!quick || multiTouch.moved || boxMode || !doc) return;
+  if (n === 2) { undo(); toast("Undo", 900); }
+  else if (n === 3) { redo(); toast("Redo", 900); }
+}, { passive: true });
+// ---- light pressure: the pen's width varies a little (about ±12%) with how hard you press ----
+function strokePressure(s) { return s._live ? s._pr : s.pr; }
+// the same smoothed curve as tracePath, cut into pieces with a width each, merged into runs of equal width
+function pressureRuns(s, pts) {
+  const pr = strokePressure(s);
+  if (s.t !== "pen" || !pr || pr.length !== pts.length || pts.length < 3) return null;
+  const n = pts.length, mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+  const sm = pr.map((_, i) => { let t = 0, c = 0; for (let j = Math.max(0, i - 2); j <= Math.min(n - 1, i + 2); j++) { t += pr[j]; c++; } return t / c; });
+  const q = s.w * 0.04, wOf = i => Math.round(s.w * (0.88 + 0.24 * clamp(sm[i], 0, 1)) / q) * q;
+  const segs = [];
+  for (let i = 1; i < n - 1; i++) segs.push({ a: i === 1 ? pts[0] : mid(pts[i - 1], pts[i]), c: pts[i], b: mid(pts[i], pts[i + 1]), w: wOf(i) });
+  segs.push({ a: mid(pts[n - 2], pts[n - 1]), c: null, b: pts[n - 1], w: wOf(n - 1) });
+  const runs = [];
+  for (const g of segs) { const last = runs[runs.length - 1]; if (last && Math.abs(last.w - g.w) < 1e-6) last.segs.push(g); else runs.push({ w: g.w, segs: [g] }); }
+  return runs;
 }
 function drawInk(p) {
   const v = views[p]; if (!v) return; const ctx = v.ink.getContext("2d"); const k = zoom * dpr;
@@ -643,9 +700,10 @@ function bindInk(p, v) {
     }
     st = { id: e.pointerId, type: e.pointerType, start: p0, t0: performance.now(), moved: false, stroke: null, erased: [] };
     if (e.pointerType !== "touch") { v.ink.setPointerCapture(e.pointerId); e.preventDefault(); }
-    if (e.pointerType === "pen") beginDraw(st, p0);
+    if (e.pointerType === "pen") { hideHover(); beginDraw(st, p0, e); }
   });
   v.ink.addEventListener("pointermove", e => {
+    if (!st && e.pointerType === "pen" && !e.buttons) { showHover(p, pos(e)); return; }   // Pencil hovering above the screen
     if (!st || e.pointerId !== st.id) return;
     if (st.select) { setSel(st.select, st.anchor, offsetAt(st.select, e.clientX, e.clientY)); return; }
     const q = pos(e);
@@ -659,14 +717,21 @@ function bindInk(p, v) {
     if (st.erasing) { for (const ev of evs) eraseAt(p, pos(ev), st.erased); return; }
     if (!st.stroke) return;
     const live = st.stroke._live;
-    if (e.shiftKey) st.stroke._live = [live[0], q];
-    else for (const ev of evs) live.push(pos(ev));
+    const pr = st.stroke._pr;
+    if (e.shiftKey) { st.stroke._live = [live[0], q]; if (pr) st.stroke._pr = [pr[0], e.pressure]; }
+    else for (const ev of evs) { live.push(pos(ev)); if (pr) pr.push(ev.pressure); }
     drawInk(p);
   });
-  const finish = () => { const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1])); delete s._live; return s; };
+  const finish = () => {
+    const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1]));
+    // keep pressure only if it really varied (a real pen, not a mouse reporting a flat 0.5)
+    if (s._pr && s._pr.length === s.pts.length && Math.max(...s._pr) - Math.min(...s._pr) > 0.03) s.pr = s._pr.map(x => Math.round(x * 100) / 100);
+    delete s._pr; delete s._live; return s;
+  };
   const end = e => {
     if (!st || e.pointerId !== st.id) return;
     if (st.select) { st = null; return; }
+    if (st.type === "touch" && performance.now() - multiTouch.last < 600) { st = null; return; }   // part of a two/three-finger tap
     const tapped = !st.moved && performance.now() - st.t0 < 500;
     if (tapped) {
       const r = hitRegion(p, st.start[0], st.start[1]);
@@ -683,12 +748,14 @@ function bindInk(p, v) {
     st = null;
   };
   v.ink.addEventListener("pointerup", end);
+  v.ink.addEventListener("pointerleave", e => { if (e.pointerType === "pen") hideHover(); });
   v.ink.addEventListener("pointercancel", () => { if (st && st.stroke) { const arr = doc.strokes[p]; const i = arr.indexOf(st.stroke); if (i >= 0) { if (st.stroke._live.length < 3) arr.splice(i, 1); else { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); } } drawInk(p); } st = null; });
-  function beginDraw(s, p0) {
+  function beginDraw(s, p0, e) {
     if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
     if (tool === "eraser") { s.erasing = true; eraseAt(p, p0, s.erased); return; }
     doc.strokes[p] = doc.strokes[p] || [];
     s.stroke = tool === "hl" ? { id: rid8(), t: "hl", c: "#f2d21b", w: 9, pts: [], _live: [p0] } : { id: rid8(), t: "pen", c: colour, w: width, pts: [], _live: [p0] };
+    if (tool !== "hl" && s.type === "pen" && e) s.stroke._pr = [e.pressure];
     doc.strokes[p].push(s.stroke);
   }
 }
@@ -1023,8 +1090,16 @@ async function exportPDF() {
       const S = (doc.strokes[p] || []).slice().sort((a, b) => (a.t === "hl" ? 0 : 1) - (b.t === "hl" ? 0 : 1));
       for (const s of S) {
         let pts = dispPts(p, s); if (!pts.length) continue;
+        const runs = pressureRuns(s, pts), f2 = q => `${q[0].toFixed(2)} ${q[1].toFixed(2)}`;
+        if (runs) {
+          for (const run of runs) {
+            const d = "M" + f2(run.segs[0].a) + run.segs.map(g => g.c ? ` Q${f2(g.c)} ${f2(g.b)}` : ` L${f2(g.b)}`).join("");
+            page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: run.w, borderLineCap: LineCapStyle.Round });
+          }
+          continue;
+        }
         if (pts.length === 1) pts = [pts[0], [pts[0][0] + 0.05, pts[0][1]]];
-        const d = "M" + pts.map(q => `${q[0].toFixed(2)} ${q[1].toFixed(2)}`).join(" L");
+        const d = "M" + pts.map(f2).join(" L");
         page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: s.w, borderOpacity: s.t === "hl" ? 0.35 : 1, borderLineCap: s.t === "hl" ? LineCapStyle.Butt : LineCapStyle.Round });
       }
     }

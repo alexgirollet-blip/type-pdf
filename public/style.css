@@ -220,3 +220,5 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 .crumbs .crumb{font-weight:700;color:var(--fg);padding:4px 6px;border-radius:6px}
 .crumbs .crumb.over{background:var(--soft);outline:2px solid var(--accent-2)}
 .recent li .fopen{border:0!important;background:none!important;border-radius:10px!important}
+.page .hoverdot{position:absolute;display:none;border-radius:50%;pointer-events:none;z-index:7;opacity:.55}
+.page .hoverdot.er{border:1.5px solid #555;opacity:.8}
