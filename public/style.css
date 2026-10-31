@@ -72,6 +72,11 @@ button{font:inherit;cursor:pointer}
 
 /* ---- pages ---- */
 .pages{flex:1;overflow:auto;padding:20px 12px 80px;display:flex;flex-direction:column;align-items:center;gap:18px;-webkit-overflow-scrolling:touch}
+.pages.book{display:grid;grid-template-columns:repeat(2,max-content);justify-content:center;align-items:start;gap:18px}
+.page .rh{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;background:#fff;border:2px solid #2f7d74;border-radius:50%;z-index:6;touch-action:none;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+.page .rh::after{content:"";position:absolute;inset:-8px}
+.page .rh.nw,.page .rh.se{cursor:nwse-resize}
+.page .rh.ne,.page .rh.sw{cursor:nesw-resize}
 .page{position:relative;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.35);flex:none;color:var(--ink)}
 .page canvas.pg{position:absolute;left:0;top:0}
 .page canvas.ink{position:absolute;left:0;top:0;touch-action:pan-x pan-y pinch-zoom;cursor:crosshair}

@@ -237,6 +237,63 @@ async function detectPage(i, prev) {
   return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, gaps: (prev && prev.gaps) || {} };
 }
 
+// ---------------- corner handles on the answer you're typing in: drag to resize on the go ----------------
+let handFor = null;   // {p, r}
+function showHandles(p, r) { handFor = { p, r }; placeHandles(); }
+function hideHandles() { handFor = null; $$(".rh").forEach(h => h.hidden = true); }
+function placeHandles() {
+  if (!handFor) return;
+  const { p, r } = handFor, v = views[p]; if (!v || boxMode) { $$(".rh").forEach(h => h.hidden = true); return; }
+  let hs = $$(".rh");
+  if (!hs.length) {
+    hs = ["nw", "ne", "sw", "se"].map(c => { const h = document.createElement("div"); h.className = "rh " + c; h.dataset.c = c; h.title = "Drag to resize this answer space"; h.addEventListener("pointerdown", handleDrag); return h; });
+  }
+  // sit on the corners of the highlighted box you see
+  const ta = r._el, L = ta.offsetLeft, T = ta.offsetTop, W = ta.offsetWidth, H = ta.offsetHeight;
+  for (const h of hs) {
+    if (h.parentElement !== v.el) v.el.appendChild(h);
+    const c = h.dataset.c; h.hidden = false;
+    h.style.left = (c[1] === "w" ? L : L + W) + "px";
+    h.style.top = (c[0] === "n" ? T : T + H) + "px";
+  }
+}
+function handleDrag(e) {
+  if (!handFor) return;
+  e.preventDefault(); e.stopPropagation();          // keeps the text box focused
+  const { p, r } = handFor, v = views[p], ta = r._el, c = e.currentTarget.dataset.c;
+  e.currentTarget.setPointerCapture(e.pointerId);
+  const b = v.el.getBoundingClientRect(), x0 = e.clientX, y0 = e.clientY;
+  setGap(p, r, 0);
+  const o = { x0: r.x0, x1: r.x1, y0: r.y0, y1: r.y1 };
+  const P = doc.pages[p];
+  const mv = ev => {
+    const dx = (ev.clientX - x0) / zoom, dy = (ev.clientY - y0) / zoom;
+    let nx0 = o.x0, nx1 = o.x1, ny0 = o.y0, ny1 = o.y1;
+    if (c[1] === "w") nx0 = clamp(o.x0 + dx, 0, o.x1 - 12); else nx1 = clamp(o.x1 + dx, o.x0 + 12, P.w);
+    if (c[0] === "n") ny0 = clamp(o.y0 + dy, 0, o.y1 - 8); else ny1 = clamp(o.y1 + dy, o.y0 + 8, P.h);
+    setRegionRect(p, r, nx0, ny0, nx1, ny1);
+    applyFieldNoGap(p, r, fitOf(r)); layoutPage(p); placeHandles();
+  };
+  const up = ev => {
+    window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); window.removeEventListener("pointercancel", up);
+    delete doc.fit[r.id]; queueFit(p, r); pageChanged(p);
+    if (document.activeElement !== ta) ta.focus({ preventScroll: true });
+    requestAnimationFrame(placeHandles);
+  };
+  window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+}
+// ---------------- book view: two pages side by side ----------------
+let bookView = false;
+try { bookView = localStorage.getItem("bookView") === "1"; } catch (e) {}
+function applyBook() { $("#pages").classList.toggle("book", bookView); $("#bookBtn").classList.toggle("on", bookView); }
+applyBook();
+$("#bookBtn").onclick = () => {
+  if (!doc) return;
+  const keep = currentPage(); bookView = !bookView; applyBook();
+  try { localStorage.setItem("bookView", bookView ? "1" : "0"); } catch (e) {}
+  setZoom(fitWidthZoom());
+  requestAnimationFrame(() => { const v = views[keep]; if (v) $("#pages").scrollTop = v.el.offsetTop - 12; pageIndicator(); saveView(); });
+};
 // ---------------- remembering exactly where you were ----------------
 function saveView() {
   if (!doc || $("#editor").hidden) return;
@@ -329,8 +386,8 @@ function makeField(p, r) {
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
   ta.addEventListener("input", () => { if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
-  ta.addEventListener("focus", () => showFlagFloat(p, r));
-  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) hideFlagFloat(); }, 150));
+  ta.addEventListener("focus", () => { showFlagFloat(p, r); showHandles(p, r); });
+  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150));
   v.el.insertBefore(ta, v.ink);
   r._el = ta;
 }
@@ -416,6 +473,7 @@ function fitRegion(p, r) {
   applyField(p, r, f);
   if (r.kind === "cell") centreCell(r);
   if (changed) scheduleSave();
+  if (handFor && handFor.r === r) placeHandles();
 }
 function applyFieldNoGap(p, r, f) { const P = doc.pages[p]; const g = (P.gaps || {})[r.id]; if (g) { P.gaps[r.id] = 0; applyField(p, r, f); P.gaps[r.id] = g; } else applyField(p, r, f); if (r.kind === "cell") r._el.style.paddingTop = "0"; }
 function centreCell(r) { const ta = r._el; ta.style.paddingTop = "0"; const h = (r.y1 - r.y0); const c = contentH(r); const pad = Math.max(0, (h - c) / 2); ta.style.paddingTop = pad * zoom + "px"; ta.style.height = (h - pad) * zoom + "px"; }
@@ -450,6 +508,7 @@ function layoutPage(p) {
   if (v.visible) composite(p);
   if (boxMode) drawBoxes(p);
   if (flagFor && flagFor.p === p) placeFlagFloat();
+  if (handFor && handFor.p === p) placeHandles();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
@@ -486,7 +545,11 @@ function composite(p) {
   for (const g of gapList(p)) { const r = P.regions.find(q => q.id === g.rid); for (const y of gapRules(p, r, g)) { ctx.beginPath(); ctx.moveTo(r.x0 * zoom * dpr, y * zoom * dpr); ctx.lineTo(r.x1 * zoom * dpr, y * zoom * dpr); ctx.stroke(); } }
   ctx.restore();
 }
-function fitWidthZoom() { const host = $("#pages"); const maxW = Math.max(...doc.pages.map(P => P.w)); return clamp((host.clientWidth - 28) / maxW, 0.3, 2.2); }
+function fitWidthZoom() {
+  const host = $("#pages"), maxW = Math.max(...doc.pages.map(P => P.w));
+  const two = bookView && doc.pages.length > 1;
+  return clamp((host.clientWidth - 28 - (two ? 18 : 0)) / (maxW * (two ? 2 : 1)), 0.3, 2.2);
+}
 function setZoom(z) {
   zoom = clamp(z, 0.3, 4); fitZoom = fitWidthZoom();
   const host = $("#pages"); const frac = host.scrollTop / Math.max(1, host.scrollHeight);
@@ -504,7 +567,8 @@ $("#pages").addEventListener("wheel", e => { if (e.ctrlKey && doc) { e.preventDe
 function pageIndicator() {
   const host = $("#pages"); const mid = host.scrollTop + host.clientHeight / 3;
   let cur = 0; views.forEach((v, p) => { if (v.el.offsetTop <= mid) cur = p; });
-  $("#pageInd").textContent = `Page ${cur + 1} of ${views.length}`;
+  if (bookView && views.length > 1) { const a = cur - (cur % 2); $("#pageInd").textContent = a + 1 < views.length ? `Pages ${a + 1}–${a + 2} of ${views.length}` : `Page ${a + 1} of ${views.length}`; }
+  else $("#pageInd").textContent = `Page ${cur + 1} of ${views.length}`;
 }
 
 // ---------------- ink ----------------
