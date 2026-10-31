@@ -26,6 +26,9 @@ button{font:inherit;cursor:pointer}
 .drop span{color:var(--muted)}
 .drop.over{background:var(--soft)}
 .privacy{margin:0;color:var(--muted);font-size:14px}
+.tip{margin:-4px 0 0;color:var(--muted);font-size:13px;opacity:.85}
+.tip span{display:inline-block;font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border:1px solid var(--line);border-radius:4px;padding:0 5px;margin-right:4px}
+.tip b{font-weight:600;color:inherit}
 .home h2{font-size:16px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .recent{list-style:none;margin:0;padding:0;display:grid;gap:8px}
 .recent li{display:flex;gap:12px;align-items:center;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
