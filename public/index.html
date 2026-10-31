@@ -55,7 +55,7 @@
       <summary>How it works</summary>
       <ul>
         <li><b>Type:</b> click any dotted line, ruled line, empty table cell or answer box and type. Text sits on the lines, shrinks if you write a lot, and the page grows if it still doesn't fit.</li>
-        <li><b>Write:</b> drag with the pen tool (mouse, trackpad, Apple Pencil or a mirrored iPad). A short tap on an answer space starts typing instead. Fingers scroll; pinch to zoom.</li>
+        <li><b>Tools:</b> <b>Text</b> only types (click any answer space; it never draws). <b>Pen</b> only draws (mouse, trackpad, Apple Pencil or a mirrored iPad). <b>Smart</b> does both: tap an answer space to type, drag to draw. Laptops start on Text; iPads, and devices where an Apple Pencil has been used, start on Pen. Fingers scroll; pinch to zoom.</li>
         <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo, three fingers to redo.</li>
         <li><b>Live sync:</b> sign in on two devices (say a laptop and an iPad) and open the same paper. Typing and ink appear on the other one straight away.</li>
         <li><b>Flags:</b> click into an answer and press ⚑ Flag to mark it to come back to, e.g. to draw it on the iPad or because it's hard. The ⚑ button in the bar lists them.</li>
@@ -78,7 +78,9 @@
     <button class="pill" id="syncPill" data-state="local">Saved on this device</button>
     <span class="sep"></span>
     <div class="grp" role="group" aria-label="Tools">
-      <button class="tool on" data-tool="pen" title="Pen">Pen</button>
+      <button class="tool" data-tool="text" title="Text: click or tap answer spaces to type. Never draws.">Text</button>
+      <button class="tool on" data-tool="pen" title="Pen: only draws, never types">Pen</button>
+      <button class="tool" data-tool="smart" title="Smart: tap an answer space to type, drag to draw">Smart</button>
       <button class="tool" data-tool="hl" title="Highlighter">Highlight</button>
       <button class="tool" data-tool="eraser" title="Eraser">Eraser</button>
       <button class="tool" data-tool="boxes" title="Edit answer spaces">Boxes</button>

@@ -181,6 +181,7 @@ async function openDoc(d, fresh = false) {
   setZoom(v && v.zr ? fitWidthZoom() * v.zr : fitWidthZoom());
   updateCount(); timerInit(); renderFlags(); fontMenu();
   if (v) restoreView(v);
+  if (!v || !v.tv || !v.tool || v.tool === "boxes") { setTool(deviceDefaultTool()); toolAuto = true; }
   if (fresh || need.length) scheduleSave();
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
   if (window.Sync) Sync.live();
@@ -300,11 +301,11 @@ function saveView() {
   const host = $("#pages"); let p = 0; views.forEach((v, i) => { if (v.el.offsetTop <= host.scrollTop + 4) p = i; });
   const off = views[p] ? (host.scrollTop - views[p].el.offsetTop) / zoom : 0;
   const a = document.activeElement; const foc = a && a.classList && a.classList.contains("ans") ? { rid: a.dataset.rid, s: a.selectionStart, e: a.selectionEnd } : null;
-  try { localStorage.setItem("view:" + doc.id, JSON.stringify({ zr: zoom / fitWidthZoom(), p, off, tool, colour, width, foc, hints: $("#pages").classList.contains("hints") })); } catch (e) {}
+  try { localStorage.setItem("view:" + doc.id, JSON.stringify({ zr: zoom / fitWidthZoom(), p, off, tool, tv: 2, toolAuto, colour, width, foc, hints: $("#pages").classList.contains("hints") })); } catch (e) {}
 }
 function loadView() { try { return JSON.parse(localStorage.getItem("view:" + doc.id) || "null"); } catch (e) { return null; } }
 function restoreView(v) {
-  if (v.tool && v.tool !== "boxes") setTool(v.tool);
+  if (v.tv && v.tool && v.tool !== "boxes") { setTool(v.tool); toolAuto = !!v.toolAuto; }   // views saved before the Text/Pen/Smart split fall back to the device default
   if (v.colour) { colour = v.colour; $$(".sw").forEach(x => x.classList.toggle("on", x.dataset.c === colour)); }
   if (v.width) { width = v.width; $$(".sz").forEach(x => x.classList.toggle("on", +x.dataset.w === width)); }
   if (v.hints) { $("#pages").classList.add("hints"); $("#hintBtn").classList.add("on"); }
@@ -370,7 +371,7 @@ function buildViews() {
     const v = { el, pg, ink, bm: null, bmZoom: 0, visible: false, gapEls: [] };
     views.push(v);
     P.regions.forEach(r => makeField(p, r));
-    bindInk(p, v);
+    bindInk(p, v); toolClass(v);
     io.observe(el);
   });
   host.onscroll = pageIndicator;
@@ -681,10 +682,19 @@ function bindInk(p, v) {
   v.ink.addEventListener("pointerdown", e => {
     if (boxMode) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    if (e.pointerType === "pen") sawPen();
     const p0 = pos(e);
-    // inside the answer you're typing in: click places the cursor, drag selects text, like a normal text box
-    const a = document.activeElement;
-    if (a && a.classList.contains("ans") && e.pointerType !== "touch" && inRect(a, e.clientX, e.clientY)) {
+    // Text and Smart: a click inside the answer you're typing in places the cursor, drag selects text.
+    // Text also goes straight into any answer space you click. Pen, Highlight and Eraser never touch text.
+    const textish = tool === "text" || tool === "smart";
+    let a = document.activeElement;
+    if (!(a && a.classList.contains("ans"))) a = null;
+    if (a && !inRect(a, e.clientX, e.clientY)) a = null;
+    if (!a && tool === "text" && e.pointerType !== "touch") { const r = hitRegion(p, p0[0], p0[1]); if (r && r._el) { r._el.focus({ preventScroll: true }); a = r._el; } }
+    if (tool === "text" && e.pointerType !== "touch" && !a) {    // Text never draws: clicking empty paper just leaves the box
+      e.preventDefault(); const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); st = null; return;
+    }
+    if (textish && a && e.pointerType !== "touch") {
       e.preventDefault(); v.ink.setPointerCapture(e.pointerId);
       const off = offsetAt(a, e.clientX, e.clientY);
       // count quick repeated clicks ourselves (pointer events don't carry a click count)
@@ -700,17 +710,18 @@ function bindInk(p, v) {
     }
     st = { id: e.pointerId, type: e.pointerType, start: p0, t0: performance.now(), moved: false, stroke: null, erased: [] };
     if (e.pointerType !== "touch") { v.ink.setPointerCapture(e.pointerId); e.preventDefault(); }
-    if (e.pointerType === "pen") { hideHover(); beginDraw(st, p0, e); }
+    if (tool === "text") return;                                   // a finger in Text: scroll, or tap a space to type
+    if (e.pointerType === "pen" || (tool === "pen" && e.pointerType === "mouse")) { hideHover(); beginDraw(st, p0, e); }
   });
   v.ink.addEventListener("pointermove", e => {
-    if (!st && e.pointerType === "pen" && !e.buttons) { showHover(p, pos(e)); return; }   // Pencil hovering above the screen
+    if (!st && e.pointerType === "pen" && !e.buttons) { if (tool !== "text") showHover(p, pos(e)); return; }   // Pencil hovering above the screen
     if (!st || e.pointerId !== st.id) return;
     if (st.select) { setSel(st.select, st.anchor, offsetAt(st.select, e.clientX, e.clientY)); return; }
     const q = pos(e);
     if (!st.moved && Math.hypot(q[0] - st.start[0], q[1] - st.start[1]) * zoom > 4) {
       st.moved = true;
       if (st.type === "touch") { st = null; return; }       // a finger scrolls the page
-      if (!st.stroke && !st.erasing) beginDraw(st, st.start);
+      if (!st.stroke && !st.erasing && tool !== "text") beginDraw(st, st.start);
     }
     if (!st.moved && st.type !== "pen") return;
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
@@ -733,7 +744,10 @@ function bindInk(p, v) {
     if (st.select) { st = null; return; }
     if (st.type === "touch" && performance.now() - multiTouch.last < 600) { st = null; return; }   // part of a two/three-finger tap
     const tapped = !st.moved && performance.now() - st.t0 < 500;
-    if (tapped) {
+    const drawOnly = tool === "pen" || tool === "hl" || tool === "eraser";
+    if (tapped && drawOnly && st.stroke && st.stroke.t === "hl") { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
+    if (tapped && drawOnly && !st.stroke && !(st.erased && st.erased.length)) { st = null; return; }   // a finger tap with a drawing tool does nothing
+    if (tapped && !drawOnly) {
       const r = hitRegion(p, st.start[0], st.start[1]);
       if (st.stroke && !r) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); st = null; return; }   // a deliberate dot
       if (st.stroke) { const arr = doc.strokes[p]; arr.splice(arr.indexOf(st.stroke), 1); drawInk(p); st.stroke = null; }
@@ -802,11 +816,25 @@ function setTool(t) {
   if (t === "boxes") { setBoxMode(!boxMode); return; }
   if (boxMode) setBoxMode(false);
   tool = t; $$(".tool").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
-  views.forEach(v => v.el.classList.toggle("tool-eraser", t === "eraser"));
+  views.forEach(toolClass);
+  if (t !== "text" && t !== "smart") hideHandles();
+  if (t === "text") hideHover();
   saveView();
 }
-$$(".tool").forEach(b => b.onclick = () => setTool(b.dataset.tool));
-$$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); setTool("pen"); });
+function toolClass(v) { v.el.classList.toggle("tool-eraser", tool === "eraser"); v.el.classList.toggle("tool-text", tool === "text"); }
+$$(".tool").forEach(b => b.onclick = () => { toolAuto = false; setTool(b.dataset.tool); });
+$$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); if (tool !== "pen" && tool !== "smart") { toolAuto = false; setTool("pen"); } });
+// ---- which tool to start on: Pen on an iPad or anywhere an Apple Pencil has been used, Text on a laptop ----
+let toolAuto = false;   // true while the tool is the automatic choice (the user hasn't picked one)
+function deviceDefaultTool() {
+  let pen = false; try { pen = localStorage.getItem("hasPen") === "1"; } catch (e) {}
+  const touchFirst = matchMedia("(pointer: coarse)").matches || (navigator.maxTouchPoints > 1 && /Macintosh|iPad/.test(navigator.userAgent));
+  return pen || touchFirst ? "pen" : "text";
+}
+function sawPen() {
+  try { localStorage.setItem("hasPen", "1"); } catch (e) {}
+  if (toolAuto && tool === "text") { setTool("pen"); toast("Apple Pencil found: switched to Pen. Pick Text or Smart in the toolbar any time."); }
+}
 $$(".sz").forEach(b => b.onclick = () => { width = +b.dataset.w; $$(".sz").forEach(x => x.classList.toggle("on", x === b)); setTool("pen"); });
 $("#hintBtn").onclick = e => { const on = $("#pages").classList.toggle("hints"); e.currentTarget.classList.toggle("on", on); saveView(); };
 $("#homeBtn").onclick = () => showHome();
