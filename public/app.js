@@ -410,7 +410,22 @@ function fieldKeys(e, p, r, ta) {
 function orderedRegions() { const out = []; doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
 function focusNext(r, dir) {
   const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
-  const ta = n[1]._el; ta.focus({ preventScroll: true }); ta.scrollIntoView({ block: "center", behavior: "smooth" }); const L = ta.value.length; ta.setSelectionRange(L, L);
+  const ta = n[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L);
+  // glide to the next space (rather than jumping) so you can see everything you pass on the way
+  const host = $("#pages"), hb = host.getBoundingClientRect(), tb = ta.getBoundingClientRect();
+  const target = clamp(host.scrollTop + tb.top - hb.top - host.clientHeight * 0.35, 0, host.scrollHeight - host.clientHeight);
+  glideTo(host, target);
+}
+let glideRaf = 0;
+function glideTo(host, target) {
+  cancelAnimationFrame(glideRaf);
+  const from = host.scrollTop, d = target - from; if (Math.abs(d) < 2) return;
+  const dur = clamp(250 + Math.sqrt(Math.abs(d)) * 18, 300, 1100), t0 = performance.now();
+  const ease = t => t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  const stop = () => { cancelAnimationFrame(glideRaf); host.removeEventListener("wheel", stop); host.removeEventListener("touchstart", stop); };
+  host.addEventListener("wheel", stop, { passive: true }); host.addEventListener("touchstart", stop, { passive: true });   // you can take over at any time
+  const step = now => { const t = Math.min(1, (now - t0) / dur); host.scrollTop = from + d * ease(t); if (t < 1) glideRaf = requestAnimationFrame(step); else stop(); };
+  glideRaf = requestAnimationFrame(step);
 }
 
 // ---------------- fitting typed text ----------------
