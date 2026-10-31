@@ -77,7 +77,7 @@ button{font:inherit;cursor:pointer}
 .page canvas.ink{position:absolute;left:0;top:0;touch-action:pan-x pan-y pinch-zoom;cursor:crosshair}
 .page.tool-eraser canvas.ink{cursor:cell}
 .page .ans{position:absolute;margin:0;border:0;padding:0;background:transparent;resize:none;overflow:hidden;color:var(--ink);
-  font-family:"PaperSans",sans-serif;white-space:pre-wrap;overflow-wrap:break-word;outline:none;border-radius:2px;caret-color:#1b4d47}
+  font-family:var(--ans-font,"PaperSans"),sans-serif;white-space:pre-wrap;overflow-wrap:break-word;outline:none;border-radius:2px;caret-color:#1b4d47}
 .page .ans.code{font-family:"PaperMono",monospace;tab-size:4}
 .page .ans.cell{text-align:center}
 .page .ans:focus{background:rgba(47,125,116,.08);box-shadow:0 0 0 1px rgba(47,125,116,.55)}
@@ -139,3 +139,68 @@ button{font:inherit;cursor:pointer}
 .dlg .info{font-size:14px;margin:10px 0 0;font-variant-numeric:tabular-nums}
 .dlg .err{color:var(--danger);font-size:14px;margin:0;min-height:1em}
 .linkbtn{border:0!important;background:none!important;color:var(--accent)!important;padding:4px 0!important;justify-self:start;text-decoration:underline}
+
+/* ---- home library ---- */
+.home.over{outline:3px dashed var(--accent-2);outline-offset:-10px}
+.openrow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch}
+.bigbtn{display:inline-grid;place-items:center;padding:12px 18px;border-radius:10px;border:1px solid var(--line);background:var(--paper);color:var(--fg);font-weight:600;cursor:pointer;font-size:15px}
+.bigbtn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.openrow .linkrow{flex:1;min-width:240px}
+.storage{display:grid;gap:6px;font-size:13.5px;color:var(--muted)}
+.sbar{height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.sbar i{display:block;height:100%;background:var(--accent-2);border-radius:4px}
+.storage[data-level=high] .sbar i{background:#d99a1e}
+.storage[data-level=full] .sbar i{background:var(--danger)}
+.lib{display:grid;gap:10px}
+.libbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.libbar input,.libbar select,.libbar button,.emptybin{font:inherit;font-size:14px;padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--fg)}
+.libbar input{min-width:160px}
+.crumbs{display:flex;flex-wrap:wrap;align-items:center;gap:2px;color:var(--muted);font-size:15px}
+.libbar .crumb{border:0;background:none;color:var(--accent);font:inherit;font-weight:600;padding:4px 6px;border-radius:6px}
+.crumb:last-child{color:var(--fg)}
+.crumb.over,.folder.over{background:var(--soft);outline:2px solid var(--accent-2)}
+.recent li.folder{padding:0 8px 0 0}
+.fopen{flex:1;min-width:0;display:flex;gap:10px;align-items:center;border:0;background:none;color:var(--fg);font:inherit;text-align:left;padding:10px 12px;cursor:pointer}
+.ficon{width:22px;height:22px;fill:var(--soft);stroke:var(--accent);stroke-width:1.6;flex:none}
+.recent .nm{cursor:pointer}
+.recent .more{width:36px;padding:6px 0!important}
+.recent .star{border:0!important;background:none!important;font-size:20px;color:var(--muted);padding:0 2px!important}
+.recent .star.on{color:#d99a1e}
+.recent li.dragging{opacity:.5}
+.prog{display:block;height:3px;background:var(--line);border-radius:2px;margin-top:6px;max-width:220px;overflow:hidden}
+.prog i{display:block;height:100%;background:var(--accent-2)}
+.recent button.danger,#emptyBin{border-color:var(--danger)!important;color:var(--danger)!important;background:transparent}
+.empty{color:var(--muted);margin:4px 0}
+.menu{position:fixed;z-index:80;background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.25);display:grid;padding:4px;min-width:200px}
+.menu button{border:0;background:none;color:var(--fg);font:inherit;text-align:left;padding:9px 12px;border-radius:6px;cursor:pointer}
+.menu button:hover,.menu button:focus-visible{background:var(--soft)}
+.movelist{display:grid;max-height:50vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.movelist button{border:0!important;border-bottom:1px solid var(--line)!important;border-radius:0!important;text-align:left}
+.movelist button:disabled{opacity:.4}
+.pastezone{min-height:90px;border:2px dashed var(--accent-2);border-radius:10px;padding:12px;margin-top:10px;outline:none;background:var(--bg)}
+.dlg.wide{width:min(720px,calc(100vw - 32px))}
+.dlg input#nameIn{width:100%}
+.adm{font-style:normal;font-size:11px;background:var(--accent);color:#fff;border-radius:4px;padding:1px 5px;margin-left:4px}
+.users{display:grid;gap:10px;margin-top:12px;max-height:55vh;overflow:auto}
+.urow{border:1px solid var(--line);border-radius:10px;padding:10px 12px;display:grid;gap:8px}
+.uhead{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:baseline}
+.uhead small{color:var(--muted)}
+.uact{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.uact select,label.inline select{font:inherit;padding:4px 8px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);margin-left:6px}
+label.inline{display:block;margin-top:10px;font-size:14px}
+.ufiles{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.ufiles li{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:14px;border-top:1px solid var(--line);padding-top:4px}
+.ufiles small{display:block;color:var(--muted)}
+
+/* ---- editor: flags and font ---- */
+.fontsel{font:inherit;font-size:13px;max-width:190px;padding:5px 6px;border-radius:7px;border:1px solid var(--btnline);background:var(--btn);color:var(--barfg);min-height:32px}
+#flagsBtn.has{color:#ffcf8a;border-color:#8a6a2a}
+.flagfloat{position:absolute;z-index:6;font:600 11px var(--ui);padding:2px 7px;border-radius:5px;border:1px solid #c87a14;background:#fff7ea;color:#9a5a00;cursor:pointer;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.flagfloat.on{background:#e07a1f;color:#fff}
+.page .flagmark{position:absolute;width:14px;height:16px;border:0;padding:0;cursor:pointer;background:none;z-index:5}
+.page .flagmark::before{content:"⚑";color:#e07a1f;font-size:15px;line-height:16px}
+.flagspop{display:grid;gap:4px;max-height:60vh;overflow:auto;width:300px}
+.flagspop button{display:grid;text-align:left;gap:2px}
+.flagspop small{color:#aab6b1}
+.flagspop p{margin:4px 0 0;font-size:13px;color:#c5d0cc}
+@media (max-width:760px){.fontsel{max-width:120px}}
