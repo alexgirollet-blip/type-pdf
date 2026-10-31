@@ -1,6 +1,7 @@
 name = "type-pdf"
 main = "src/worker.js"
 compatibility_date = "2025-09-01"
+keep_vars = true   # keep variables set in the dashboard when GitHub deploys
 
 # The site itself (HTML, JS, fonts, pdf.js). Requests to /api/* go to the Worker first.
 [assets]
@@ -17,12 +18,25 @@ class_name = "AuthStore"
 name = "USERS"
 class_name = "UserStore"
 
+[[durable_objects.bindings]]
+name = "PDFS"
+class_name = "PdfStore"
+
+# Migrations only ever add classes; never remove or rename one, or its stored data is lost.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["AuthStore", "UserStore"]
 
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["PdfStore"]
+
 [observability]
 enabled = true
 
+# Optional, to show the real storage your whole Cloudflare account uses (set in the dashboard, not here):
+#   CF_ACCOUNT_ID  (secret) – your account ID
+#   CF_API_TOKEN   (secret) – an API token with "Account Analytics: Read"
+# Add both as *secrets* so deploys from GitHub never overwrite them.
 # No routes or domains are set here on purpose: attach your own domain in the
 # Cloudflare dashboard (Worker → Settings → Domains & Routes).

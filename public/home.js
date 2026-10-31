@@ -193,7 +193,11 @@ async function renderStorage() {
   const el = $("#storage"); let used = 0, limit = 0, label = "";
   if (signedIn()) {
     const info = await Sync.refreshInfo() || {};
-    if (info.admin) { used = info.globalUsed || 0; limit = info.globalLimit || 0; label = `Site storage (everyone): ${fmtBytes(used)} of ${fmtBytes(limit)} used · ${fmtBytes(Math.max(0, limit - used))} left · you're using ${fmtBytes(Home.used || info.used || 0)}, no limit`; }
+    if (info.admin) {
+      limit = info.globalLimit || 0;
+      if (info.cf && info.cf.used != null) { used = info.cf.used; label = `Cloudflare account (all your Workers): ${fmtBytes(used)} of ${fmtBytes(limit)} used · ${fmtBytes(Math.max(0, limit - used))} left · TypePDF users: ${fmtBytes(info.globalUsed || 0)} · you: ${fmtBytes(Home.used || info.used || 0)}, no limit`; }
+      else { used = info.globalUsed || 0; label = `TypePDF users: ${fmtBytes(used)} of the account's ${fmtBytes(limit)} · you: ${fmtBytes(Home.used || info.used || 0)}, no limit · other Workers' storage isn't counted (connect it in Admin)`; }
+    }
     else { used = Home.used || info.used || 0; limit = info.quota > 0 ? info.quota : 0; label = `Your storage: ${fmtBytes(used)} of ${fmtBytes(limit)} used · ${fmtBytes(Math.max(0, limit - used))} left`; }
   } else if (navigator.storage && navigator.storage.estimate) {
     const est = await navigator.storage.estimate().catch(() => ({}));
@@ -281,9 +285,13 @@ window.openAdmin = async function openAdmin() {
 $("#adminClose").onclick = () => $("#adminDlg").close();
 function quotaSelect(choices, value) { return `<select>${choices.map(c => `<option value="${c}"${c === value ? " selected" : ""}>${fmtBytes(c)}</option>`).join("")}</select>`; }
 function renderAdmin(o) {
-  const frac = o.globalLimit ? o.globalUsed / o.globalLimit : 0;
   const body = $("#adminBody");
-  body.innerHTML = `<div class="storage" data-level="${frac > 0.95 ? "full" : frac > 0.8 ? "high" : "ok"}"><div class="sbar"><i style="width:${(Math.min(1, frac) * 100).toFixed(1)}%"></i></div><span>Everyone: ${fmtBytes(o.globalUsed)} of ${fmtBytes(o.globalLimit)} used · ${fmtBytes(Math.max(0, o.globalLimit - o.globalUsed))} left</span></div>
+  const cf = o.cf || {}, real = cf.used != null ? cf.used : null, shown = real != null ? real : o.globalUsed, f2 = o.globalLimit ? shown / o.globalLimit : 0;
+  const cfNote = real != null ? `Cloudflare reports ${fmtBytes(real)} used across your whole account${cf.date ? " (as of " + cf.date + ")" : ""}, including any other Workers.`
+    : cf.configured ? `Couldn't read your Cloudflare usage${cf.error ? ": " + esc(cf.error) : ""}. Check the API token has "Account Analytics: Read".`
+    : `This only counts TypePDF. To see the real storage left on your Cloudflare account (shared with your other Workers), add two secrets to this Worker in the Cloudflare dashboard: <b>CF_ACCOUNT_ID</b> and <b>CF_API_TOKEN</b> (a token with "Account Analytics: Read"). Steps are in the README.`;
+  body.innerHTML = `<div class="storage" data-level="${f2 > 0.95 ? "full" : f2 > 0.8 ? "high" : "ok"}"><div class="sbar"><i style="width:${(Math.min(1, f2) * 100).toFixed(1)}%"></i></div><span>${real != null ? "Whole account" : "TypePDF"}: ${fmtBytes(shown)} of ${fmtBytes(o.globalLimit)} used · ${fmtBytes(Math.max(0, o.globalLimit - shown))} left · TypePDF users: ${fmtBytes(o.globalUsed)}</span></div>
+    <p class="note">${cfNote}</p>
     <label class="inline">New accounts get ${quotaSelect(o.choices, o.defaultQuota)}</label>
     <div class="users"></div>`;
   $("label.inline select", body).onchange = async ev => { await Sync.admin.setDefault(+ev.target.value).catch(e => toast(e.message)); toast("Default updated."); openAdmin(); };

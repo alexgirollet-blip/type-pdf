@@ -5,7 +5,10 @@ import { DurableObject } from "cloudflare:workers";
 
 const MB = 1024 * 1024;
 const MAX_PDF = 40 * MB;                 // largest single PDF
-const GLOBAL_LIMIT = 5 * 1024 * MB;      // Cloudflare free plan: 5 GB of Durable Object storage in total
+// Cloudflare's free plan allows 5 GB of Durable Object storage per Cloudflare *account*, shared by every
+// Worker in that account (Pages static files, KV, D1 and R2 have separate allowances). Each single
+// Durable Object is also capped at 1 GB on the free plan, so every PDF gets its own small object.
+const GLOBAL_LIMIT = 5 * 1024 * MB;
 const GLOBAL_SAFETY = 150 * MB;          // keep a margin so the store never hits the hard limit
 const DEFAULT_QUOTA = 250 * MB;
 const QUOTA_CHOICES = [100, 250, 500, 1024, 2048].map(n => n * MB);
@@ -22,9 +25,34 @@ function tokenFrom(req) {
   if (h.startsWith("Bearer ")) return h.slice(7);
   return new URL(req.url).searchParams.get("token") || "";
 }
+function pdfStub(env, u, hash) { return env.PDFS.get(env.PDFS.idFromName(u + ":" + hash)); }
 function authStub(env) { return env.AUTH.get(env.AUTH.idFromName("auth")); }
 function userStub(env, u) { return env.USERS.get(env.USERS.idFromName("u:" + u)); }
 async function call(stub, path, body, method = "POST") { return stub.fetch(new Request("https://do" + path, { method, body: body === undefined ? undefined : JSON.stringify(body) })); }
+
+// ---- real storage used by the whole Cloudflare account (optional; needs CF_ACCOUNT_ID + CF_API_TOKEN) ----
+let cfCache = { at: 0, value: null, error: null };
+async function cloudflareUsage(env) {
+  if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return { configured: false };
+  if (Date.now() - cfCache.at < 10 * 60e3) return { configured: true, ...cfCache };
+  const since = new Date(Date.now() - 4 * 864e5).toISOString().slice(0, 10);
+  const q = (withNs) => `query($a:String!,$d:Date!){viewer{accounts(filter:{accountTag:$a}){durableObjectsStorageGroups(filter:{date_geq:$d},limit:1000){max{storedBytes} dimensions{date${withNs ? " namespaceId" : ""}}}}}}`;
+  try {
+    let groups = null, err = null;
+    for (const withNs of [true, false]) {
+      const r = await fetch("https://api.cloudflare.com/client/v4/graphql", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + env.CF_API_TOKEN }, body: JSON.stringify({ query: q(withNs), variables: { a: env.CF_ACCOUNT_ID, d: since } }) });
+      const j = await r.json().catch(() => ({}));
+      if (j.errors && j.errors.length) { err = j.errors[0].message; continue; }
+      groups = j.data?.viewer?.accounts?.[0]?.durableObjectsStorageGroups || []; break;
+    }
+    if (!groups) throw new Error(err || "no data");
+    // newest day, summed across every Durable Object namespace in the account
+    const latest = groups.map(g => g.dimensions.date).sort().pop();
+    const value = latest ? groups.filter(g => g.dimensions.date === latest).reduce((s, g) => s + (g.max?.storedBytes || 0), 0) : 0;
+    cfCache = { at: Date.now(), value, date: latest || null, error: null };
+  } catch (e) { cfCache = { at: Date.now() - 8 * 60e3, value: cfCache.value, error: String(e.message || e) }; }
+  return { configured: true, ...cfCache };
+}
 
 export default {
   async fetch(req, env) {
@@ -52,19 +80,25 @@ async function api(req, env, url) {
   if (!who.user) return bad("Your session has ended. Sign in again.", 401);
   const user = who.user;
 
+  // storage the whole Cloudflare account really uses, when the admin has connected it
+  const cf = await cloudflareUsage(env);
+  if (cf.configured && cf.value != null) who.cfUsed = cf.value;
+  if (who.admin) who.cf = { configured: cf.configured, used: cf.value ?? null, date: cf.date || null, error: cf.error || null };
+  const knownUsed = Math.max(who.globalUsed || 0, who.cfUsed || 0);
+
   if (path === "/api/auth/me") return json(who);
   if (path === "/api/auth/logout" || path === "/api/auth/password" || path === "/api/auth/delete") {
     const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
     if (path === "/api/auth/delete" && who.admin) return bad("The admin account can't be deleted here.", 400);
     const res = await call(auth, path.slice(9), { ...body, token, user, ip });
-    if (path === "/api/auth/delete" && res.ok) await call(userStub(env, user), "/wipe", {});
+    if (path === "/api/auth/delete" && res.ok) await call(userStub(env, user), "/wipe?u=" + user, {});
     return res;
   }
 
   // ---- admin: the first account created ----
   if (path.startsWith("/api/admin/")) {
     if (!who.admin) return bad("Only the admin can do that.", 403);
-    if (path === "/api/admin/overview") return call(auth, "/admin/overview", {});
+    if (path === "/api/admin/overview") { const o = await (await call(auth, "/admin/overview", {})).json(); return json({ ...o, cf: who.cf }); }
     if (path === "/api/admin/quota" || path === "/api/admin/default") {
       const b = await req.json().catch(() => ({}));
       if (!QUOTA_CHOICES.includes(+b.quota)) return bad("Pick one of the listed sizes.");
@@ -73,12 +107,12 @@ async function api(req, env, url) {
     let m = path.match(/^\/api\/admin\/user\/([a-z0-9_.-]{3,24})(?:\/docs(?:\/([a-f0-9]{8,64}))?)?$/);
     if (m) {
       const target = m[1], stub = userStub(env, target);
-      if (path.endsWith("/docs") && req.method === "GET") return stub.fetch(new Request("https://do/docs?all=1", { headers: { "x-user": target, "x-quota": "-1" } }));
+      if (path.endsWith("/docs") && req.method === "GET") return stub.fetch(new Request("https://do/docs?all=1", { headers: { "x-user": target } }));
       if (m[2] && req.method === "DELETE") return stub.fetch(new Request(`https://do/docs/${m[2]}?purge=1`, { method: "DELETE", headers: { "x-user": target } }));
       if (!path.includes("/docs") && req.method === "DELETE") {
         if (target === user) return bad("You can't delete your own admin account.");
         const r = await call(auth, "/admin/delete-user", { user: target });
-        if (r.ok) await call(stub, "/wipe", {});
+        if (r.ok) await call(stub, "/wipe?u=" + target, {});
         return r;
       }
     }
@@ -105,7 +139,7 @@ async function api(req, env, url) {
   const headers = new Headers(req.headers);
   headers.set("x-user", user);
   headers.set("x-quota", who.admin ? "-1" : String(who.quota));
-  headers.set("x-global-free", String(Math.max(0, GLOBAL_LIMIT - GLOBAL_SAFETY - who.globalUsed)));
+  headers.set("x-global-free", String(Math.max(0, GLOBAL_LIMIT - GLOBAL_SAFETY - knownUsed)));
   return store.fetch(new Request("https://do" + path.slice(4) + url.search, { method: req.method, headers, body: req.body, duplex: "half" }));
 }
 
@@ -220,7 +254,8 @@ export class UserStore extends DurableObject {
       CREATE TABLE IF NOT EXISTS kv (doc TEXT, k TEXT, v TEXT, seq INTEGER, PRIMARY KEY (doc, k));
       CREATE INDEX IF NOT EXISTS kv_seq ON kv (doc, seq);
       CREATE TABLE IF NOT EXISTS pdf (doc TEXT, i INTEGER, data BLOB, PRIMARY KEY (doc, i));
-      CREATE TABLE IF NOT EXISTS lib (k TEXT PRIMARY KEY, v TEXT, ver INTEGER);`);
+      CREATE TABLE IF NOT EXISTS lib (k TEXT PRIMARY KEY, v TEXT, ver INTEGER);
+      CREATE TABLE IF NOT EXISTS pdfs (hash TEXT PRIMARY KEY, size INTEGER, created INTEGER);`);
     addColumn(this.sql, "docs", "pdf", "TEXT");          // hash of the PDF (copies of a paper share one PDF)
     addColumn(this.sql, "docs", "folder", "TEXT");
     addColumn(this.sql, "docs", "star", "INTEGER DEFAULT 0");
@@ -236,10 +271,14 @@ export class UserStore extends DurableObject {
     else if (pdf) this.sql.exec("UPDATE docs SET pdf = ? WHERE id = ? AND pdf IS NULL", pdf, id);
     this.syncPdfFlag(id);
   }
-  pdfSize(hash) { const r = this.sql.exec("SELECT COALESCE(SUM(length(data)), 0) AS s, COUNT(*) AS n FROM pdf WHERE doc = ?", hash).toArray()[0]; return r.n ? r.s : 0; }
+  // PDFs uploaded since PDFs moved to their own objects are listed in `pdfs`; older ones are still in the `pdf` table
+  pdfSize(hash) {
+    const x = this.sql.exec("SELECT size FROM pdfs WHERE hash = ?", hash).toArray()[0]; if (x) return x.size;
+    const r = this.sql.exec("SELECT COALESCE(SUM(length(data)), 0) AS s, COUNT(*) AS n FROM pdf WHERE doc = ?", hash).toArray()[0]; return r.n ? r.s : 0;
+  }
   syncPdfFlag(id) { const d = this.docRow(id); if (!d || !d.pdf) return; const s = this.pdfSize(d.pdf); this.sql.exec("UPDATE docs SET haspdf = ?, size = ? WHERE id = ?", s ? 1 : 0, s, id); }
   used() {
-    const pdfs = this.sql.exec("SELECT COALESCE(SUM(length(data)), 0) AS s FROM pdf").toArray()[0].s;
+    const pdfs = this.sql.exec("SELECT COALESCE(SUM(length(data)), 0) AS s FROM pdf").toArray()[0].s + this.sql.exec("SELECT COALESCE(SUM(size), 0) AS s FROM pdfs").toArray()[0].s;
     const kv = this.sql.exec("SELECT COALESCE(SUM(length(v)), 0) + COALESCE(SUM(length(k)), 0) AS s FROM kv").toArray()[0].s;
     return pdfs + kv;
   }
@@ -247,13 +286,26 @@ export class UserStore extends DurableObject {
   purgeDoc(id) {
     const d = this.docRow(id); if (!d) return;
     this.sql.exec("DELETE FROM kv WHERE doc = ?", id); this.sql.exec("DELETE FROM docs WHERE id = ?", id);
-    if (d.pdf && !this.sql.exec("SELECT 1 FROM docs WHERE pdf = ?", d.pdf).toArray().length) this.sql.exec("DELETE FROM pdf WHERE doc = ?", d.pdf);
+    if (d.pdf && !this.sql.exec("SELECT 1 FROM docs WHERE pdf = ?", d.pdf).toArray().length) this.dropPdf(d.pdf);
     this.ctx.getWebSockets("doc:" + id).forEach(ws => { try { ws.send(JSON.stringify({ t: "deleted" })); ws.close(4002, "deleted"); } catch {} });
+  }
+  dropPdf(hash) {
+    this.sql.exec("DELETE FROM pdf WHERE doc = ?", hash);
+    if (this.sql.exec("SELECT 1 FROM pdfs WHERE hash = ?", hash).toArray().length) {
+      this.sql.exec("DELETE FROM pdfs WHERE hash = ?", hash);
+      if (this.user) call(pdfStub(this.env, this.user, hash), "/delete", {}).catch(() => {});
+    }
   }
   async fetch(req) {
     const url = new URL(req.url), path = url.pathname, user = req.headers.get("x-user") || "";
+    if (user) this.user = user;
     const quota = +(req.headers.get("x-quota") || DEFAULT_QUOTA), globalFree = +(req.headers.get("x-global-free") || GLOBAL_LIMIT);
-    if (path === "/wipe") { this.ctx.getWebSockets().forEach(ws => { try { ws.close(4001, "account deleted"); } catch {} }); await this.ctx.storage.deleteAll(); return json({ ok: true }); }
+    if (path === "/wipe") {
+      this.ctx.getWebSockets().forEach(ws => { try { ws.close(4001, "account deleted"); } catch {} });
+      const u = user || this.user || new URL(req.url).searchParams.get("u");
+      if (u) for (const r of this.sql.exec("SELECT hash FROM pdfs").toArray()) await call(pdfStub(this.env, u, r.hash), "/delete", {}).catch(() => {});
+      await this.ctx.storage.deleteAll(); return json({ ok: true });
+    }
     if (path === "/sync") {
       if (req.headers.get("upgrade") !== "websocket") return bad("Expected a WebSocket", 426);
       const doc = url.searchParams.get("doc") || "";
@@ -320,6 +372,10 @@ export class UserStore extends DurableObject {
       const size = this.pdfSize(hash);
       if (!size) return bad("No PDF stored for this paper", 404);
       if (req.method === "HEAD") return new Response(null, { headers: { "content-length": String(size) } });
+      if (this.sql.exec("SELECT 1 FROM pdfs WHERE hash = ?", hash).toArray().length) {
+        const r = await pdfStub(this.env, user || this.user, hash).fetch(new Request("https://do/get"));
+        return new Response(r.body, { headers: { "content-type": "application/pdf", "cache-control": "private, max-age=31536000, immutable" } });
+      }
       const parts = this.sql.exec("SELECT data FROM pdf WHERE doc = ? ORDER BY i", hash).toArray().map(r => new Uint8Array(r.data));
       const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
       return new Response(out, { headers: { "content-type": "application/pdf", "cache-control": "private, max-age=31536000, immutable" } });
@@ -332,8 +388,9 @@ export class UserStore extends DurableObject {
         const used = this.used();
         if (quota >= 0 && used + buf.byteLength > quota) return bad(`Your account is full (${Math.round(quota / MB)} MB). Delete some papers or ask the admin for more space.`, 413);
         if (buf.byteLength > globalFree) return bad("The site's storage is full. Ask the admin to free some space.", 507);
-        const u8 = new Uint8Array(buf);
-        for (let i = 0, k = 0; i < u8.length; i += CHUNK, k++) this.sql.exec("INSERT OR REPLACE INTO pdf VALUES (?, ?, ?)", hash, k, u8.slice(i, i + CHUNK));
+        const r = await pdfStub(this.env, user, hash).fetch(new Request("https://do/put", { method: "PUT", body: buf }));
+        if (!r.ok) return bad("Couldn't store the PDF. Try again.", 500);
+        this.sql.exec("INSERT OR REPLACE INTO pdfs VALUES (?, ?, ?)", hash, buf.byteLength, Date.now());
       }
       if (docId && HEX.test(docId)) { this.ensureDoc(docId, decodeURIComponent(url.searchParams.get("name") || "Untitled").slice(0, 200), hash); this.sql.exec("UPDATE docs SET pdf = COALESCE(pdf, ?) WHERE id = ?", hash, docId); this.syncPdfFlag(docId); }
       this.sql.exec("UPDATE docs SET haspdf = 1, size = ? WHERE pdf = ?", buf.byteLength, hash);
@@ -387,4 +444,27 @@ export class UserStore extends DurableObject {
   }
   async webSocketClose(ws) { const { doc, user } = ws.deserializeAttachment() || {}; try { ws.close(); } catch {} if (doc) { this.presence(doc); this.report(user); } }
   async webSocketError(ws) { const { doc } = ws.deserializeAttachment() || {}; if (doc) this.presence(doc); }
+}
+
+// ===================== one small store per PDF =====================
+// Keeps each account's store small (the free plan caps a single Durable Object at 1 GB).
+export class PdfStore extends DurableObject {
+  constructor(ctx, env) { super(ctx, env); this.sql = ctx.storage.sql; this.sql.exec("CREATE TABLE IF NOT EXISTS pdf (i INTEGER PRIMARY KEY, data BLOB)"); }
+  async fetch(req) {
+    const path = new URL(req.url).pathname;
+    if (path === "/put") {
+      const u8 = new Uint8Array(await req.arrayBuffer());
+      this.sql.exec("DELETE FROM pdf");
+      for (let i = 0, k = 0; i < u8.length; i += CHUNK, k++) this.sql.exec("INSERT INTO pdf VALUES (?, ?)", k, u8.slice(i, i + CHUNK));
+      return json({ ok: true, size: u8.length });
+    }
+    if (path === "/get") {
+      const parts = this.sql.exec("SELECT data FROM pdf ORDER BY i").toArray().map(r => new Uint8Array(r.data));
+      if (!parts.length) return bad("Missing", 404);
+      const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0)); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+      return new Response(out, { headers: { "content-type": "application/pdf" } });
+    }
+    if (path === "/delete") { await this.ctx.storage.deleteAll(); return json({ ok: true }); }
+    return bad("Not found", 404);
+  }
 }
