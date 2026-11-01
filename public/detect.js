@@ -192,7 +192,7 @@ const Detect = (() => {
   // small closed outlines (a square, or a round/pill shape) with nothing inside, not part of the printed text,
   // that come in a group of the same size lined up in a row or a column
   const BOX_CHAR = /^[\u25A1\u25A2\u2610\u274F\u2751\u2B1C\u25CB\u25EF\u26AA]$|^[\uE000-\uF8FF]$/;
-  function choices(G, items) {
+  function choices(G, items, dbg) {
     const { g, w, h } = G, lab = new Int32Array(w * h), stack = new Int32Array(w * h);
     const found = [];
     let id = 0;
@@ -209,13 +209,15 @@ const Detect = (() => {
         }
       }
       const bw = (x1 - x0 + 1) / S, bh = (y1 - y0 + 1) / S;
-      if (bh < 7 || bh > 28 || bw < 7 || bw > 64 || bw / bh < 0.7 || bw / bh > 3.6) continue;
+      // small capsules (AQA prints a 3–4 pt one inside each answer box) must be clearly wider than tall
+      const why = m => { if (dbg && bw > 4 && bw < 40 && bh > 2 && bh < 30) dbg.push([m, +(x0 / S).toFixed(1), +(y0 / S).toFixed(1), +bw.toFixed(1), +bh.toFixed(1)]); };
+      if (bh < 2.5 || bh > 28 || bw < 5 || bw > 64 || bw / bh < (bh < 7 ? 1.6 : 0.7) || bw / bh > 4.2) { why("size"); continue; }
       const per = 2 * (x1 - x0 + y1 - y0 + 2), thick = n / per;
-      if (thick < 0.5 || thick > 5) continue;
+      if (thick < 0.5 || thick > 5) { why("thick " + thick.toFixed(2)); continue; }
       // a closed outline: ink on all four sides, on the middle row and column
       const my = (y0 + y1) >> 1, mx = (x0 + x1) >> 1, bx = Math.max(2, Math.round((x1 - x0) * 0.3)), by = Math.max(2, Math.round((y1 - y0) * 0.3));
       const has = (ax, ay, bx2, by2) => { for (let y = ay; y <= by2; y++) for (let x = ax; x <= bx2; x++) if (lab[y * w + x] === id) return true; return false; };
-      if (!has(x0, my - 1, x0 + bx, my + 1) || !has(x1 - bx, my - 1, x1, my + 1) || !has(mx - 1, y0, mx + 1, y0 + by) || !has(mx - 1, y1 - by, mx + 1, y1)) continue;
+      if (!has(x0, my - 1, x0 + bx, my + 1) || !has(x1 - bx, my - 1, x1, my + 1) || !has(mx - 1, y0, mx + 1, y0 + by) || !has(mx - 1, y1 - by, mx + 1, y1)) { why("ring"); continue; }
       const cx = Math.max(1, Math.round((x1 - x0) * 0.12)), cy = Math.max(1, Math.round((y1 - y0) * 0.12));
       const square = has(x0, y0, x0 + cx, y0 + cy) && has(x1 - cx, y1 - cy, x1, y1);
       // nothing inside (a letter printed in the middle of an oval is allowed: it names the option)
@@ -231,10 +233,23 @@ const Detect = (() => {
         if (over.every(it => BOX_CHAR.test(it.str.trim()))) { /* a tick box drawn with a font */ }
         else if (over.length === 1 && /^[A-F]$/.test(over[0].str.trim()) && over[0].x >= box.x0 && over[0].x1 <= box.x1 + 1 &&
           box.y1 - box.y0 > over[0].fh * 1.15 && box.x1 - box.x0 > (over[0].x1 - over[0].x) * 1.8) letter = over[0].str.trim();   // bigger than the letter itself
-        else continue;
+        else { why("text"); continue; }
       }
-      if (!letter && area && inside > area * 0.03) continue;
+      if (!letter && area && inside > area * 0.03) { why("inside"); continue; }
       if (letter) box.opt = letter;
+      // inside a printed answer box (AQA): the whole box is what you click, the capsule is what gets filled in
+      if (bh < 7) {
+        const cxp = (x0 + x1) >> 1, cyp = (y0 + y1) >> 1, lim = 16 * S, dk = (x, y) => x >= 0 && y >= 0 && x < w && y < h && g[y * w + x] < DARK && lab[y * w + x] !== id;
+        let L = x0 - 1, R = x1 + 1, T = y0 - 1, B = y1 + 1;
+        while (L > x0 - lim && !dk(L, cyp)) L--; while (R < x1 + lim && !dk(R, cyp)) R++;
+        while (T > y0 - lim && !dk(cxp, T)) T--; while (B < y1 + lim && !dk(cxp, B)) B++;
+        if (L > x0 - lim && R < x1 + lim && T > y0 - lim && B < y1 + lim) {
+          const o = { x0: (L + 1) / S, y0: (T + 1) / S, x1: R / S, y1: B / S }, W2 = o.x1 - o.x0, H2 = o.y1 - o.y0;
+          box.mark = [(box.x0 - o.x0) / W2, (box.y0 - o.y0) / H2, (box.x1 - o.x0) / W2, (box.y1 - o.y0) / H2].map(v => +v.toFixed(3));   // where the capsule sits in the box (fractions)
+          Object.assign(box, o, { shape: "oval" });
+        }
+      }
+      if (bh < 7 && !box.mark) { why("tiny alone"); continue; }                               // a tiny capsule on its own could be anything
       found.push(box);
     }
     // keep shapes with a partner of the same size, lined up in a row or a column
@@ -251,7 +266,8 @@ const Detect = (() => {
       const left = row.filter(it => it.x1 <= c.x0 + 1).sort((a, b) => a.x - b.x).map(it => it.str).join(" ").trim();
       c.opt = (right ? right.slice(0, 60) : left.slice(-60)).replace(/\s+/g, " ").trim();
     }
-    return out;
+    // a lone circle in a diagram has nothing written beside it; an answer always does
+    return out.filter(c => c.mark || c.opt);
   }
 
   const CODE_RE = /\b(write|complete|rewrite|amend|modify|give)\b[^.]{0,80}\b(pseudo-?code|code|function|procedure|sub-?routine|algorithm|program|sql|statement|query|method|class|css|html|javascript|python)\b/i;
@@ -385,7 +401,7 @@ const Detect = (() => {
     const ch = choices(G, items);
     for (const c of ch) {
       for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if (r.kind !== "lines" && r.x0 < c.x1 && r.x1 > c.x0 && r.y0 < c.y1 && r.y1 > c.y0 && (r.x1 - r.x0) < 40 && (r.y1 - r.y0) < 36) regions.splice(i, 1); }
-      regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: c.shape, opt: c.opt || "" });
+      regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: c.shape, opt: c.opt || "", ...(c.mark ? { mark: c.mark } : {}) });
     }
 
     // geometry common to all kinds: top/bottom in pt
