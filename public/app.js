@@ -61,14 +61,19 @@ function scheduleSave() {
   clearTimeout(saveT);
   saveT = setTimeout(saveNow, 500);
 }
+// papers are only kept by signed-in people (in their account, with this browser as a cache);
+// without an account, or in someone else's shared paper, nothing is written to this device
+const canSave = () => !!(window.Sync && Sync.user && doc && !doc.shared);
+const hasWork = () => !!doc && (Object.keys(doc.text || {}).length > 0 || Object.values(doc.strokes || {}).some(a => a && a.length));
 async function saveNow() {
   clearTimeout(saveT);
   if (!doc) return;
   doc.updated = Date.now();
+  if (!canSave()) { const m = JSON.stringify(metaOf()); if (m !== doc._lastMeta) { doc._lastMeta = m; emit("meta"); } return; }
   try {
     await DB.put(doc);
     const old = await DB.getMeta(doc.id).catch(() => null) || {};
-    await DB.putMeta({ ...old, id: doc.id, ...metaOf(), pdf: doc.pdf, updated: doc.updated, opened: doc.opened, size: docSize(doc), local: true });
+    await DB.putMeta({ ...old, id: doc.id, ...metaOf(), pdf: doc.pdf, updated: doc.updated, opened: doc.opened, size: docSize(doc), local: true, owner: Sync.info && Sync.info.user });
   } catch (e) { toast("Couldn't save in this browser (storage full or blocked). Export a backup."); }
   const m = JSON.stringify(metaOf());
   if (m !== doc._lastMeta) { doc._lastMeta = m; emit("meta"); }
@@ -77,7 +82,8 @@ async function saveNow() {
 function emit(key) { if (window.Sync && doc) Sync.changed(key); }
 
 // ---------------- home ----------------
-async function showHome() {
+async function showHome(force) {
+  if (doc && !doc.shared && !canSave() && hasWork() && force !== true && !confirm("This paper isn't saved, because you're not signed in. Leave it anyway? (Export the PDF first if you want to keep it.)")) return;
   if (doc) { saveView(); await saveNow(); }
   if (window.Sync) Sync.detach();
   hideFlagFloat();
@@ -118,6 +124,7 @@ async function openLink(url) {
 async function openFile(f) {
   try {
     if ($("#pasteDlg").open) $("#pasteDlg").close();
+    if (doc && !doc.shared && !canSave() && hasWork() && !confirm("The paper you have open isn't saved, because you're not signed in. Open the new one anyway?")) return;
     if (doc) { saveView(); await saveNow(); }
     const buf = await f.arrayBuffer();
     const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024)));
@@ -127,10 +134,12 @@ async function openFile(f) {
     const restored = await fromExport(buf);
     if (restored) return openRestored(restored);
     const id = await sha(buf);
-    const existing = await DB.get(id).catch(() => null);
-    if (existing) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
+    const signed = !!(window.Sync && Sync.user);
+    const existing = signed ? await DB.get(id).catch(() => null) : null;
+    const em = existing ? await DB.getMeta(id).catch(() => null) : null;
+    if (existing && (!em || !em.owner || !Sync.info || em.owner === Sync.info.user)) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
     const d = newDoc(id, id, f.name.replace(/\.pdf$/i, "") || "Untitled", buf);
-    await DB.putMeta({ id, name: d.name, pdf: id, folder: null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
+    if (signed) await DB.putMeta({ id, name: d.name, pdf: id, folder: null, updated: Date.now(), created: Date.now(), local: true, owner: Sync.info && Sync.info.user }).catch(() => {});
     await openDoc(d, true);
   } catch (e) { console.error(e); busy(false); toast("Couldn't open that file: " + (e.message || e)); }
 }
@@ -168,7 +177,7 @@ async function openDoc(d, fresh = false) {
   undoS.length = redoS.length = 0; views = [];
   pdf = await pdfjsLib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)), isEvalSupported: false }).promise;
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
-  if (window.Sync && Sync.user) { busy(true, "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
+  if (window.Sync && (Sync.user || doc.shared)) { busy(true, doc.shared ? "Joining…" : "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
   const need = [];
   for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions) need.push(i);
   for (let k = 0; k < need.length; k++) {
@@ -186,6 +195,7 @@ async function openDoc(d, fresh = false) {
   const v = loadView();
   setZoom(v && v.zr ? fitWidthZoom() * v.zr : fitWidthZoom());
   updateCount(); timerInit(); renderFlags(); fontMenu();
+  sharedUI();
   if (v) restoreView(v);
   if (!v || !v.tv || !v.tool || v.tool === "boxes") { setTool(deviceDefaultTool()); toolAuto = true; }
   if (fresh || need.length) scheduleSave();
@@ -308,6 +318,105 @@ async function ensureOcr() {
   } catch (e) { toast("Couldn't read the question numbers from this paper's images: " + (e.message || e), 5000); }
   busy(false);
 }
+
+// ---------------- shared papers: joining, who's here, locks, and the owner's Share panel ----------------
+const PALETTE = ["#d1495b", "#2e86ab", "#e09f3e", "#6a4c93", "#3a7d44", "#c45ab3", "#1b998b", "#8f5c38"];
+const colourFor = id => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
+async function joinShared(code, name) {
+  busy(true, "Joining…");
+  try {
+    const j = await Sync.share.join(code, name);
+    if (j.own) { busy(false); toast("That's your own paper, so it's opened from your library."); const m = (Home.entries || []).find(e => e.id === j.doc); return openStored(j.doc, m); }
+    await openSharedFrom(j);
+  } catch (e) { busy(false); toast(e.message, 5000); }
+}
+async function openSharedFrom(j) {
+  busy(true, "Opening the shared paper…");
+  if (doc) await showHome(true);
+  const bytes = await Sync.share.pdf(j.pass);
+  const d = newDoc(j.doc, j.pdf, j.name || "Shared paper", bytes);
+  d.shared = { pass: j.pass, role: j.role, pid: j.pid, me: j.me, exp: Date.now() + 11.5 * 3600e3 };
+  await openDoc(d);
+  toast(j.role === "view" ? `You've joined "${d.name}" to view it.` : `You've joined "${d.name}". Everyone's changes appear live.`, 4000);
+}
+function sharedUI() {
+  const sh = doc && doc.shared, view = sh && sh.role === "view";
+  $("#shareBtn").hidden = !(window.Sync && Sync.user && doc && !sh);
+  $("#editor").classList.toggle("viewonly", !!view);
+  $$(".tool,.sw,.sz,#undo,#redo,#fontSel,#timerBtn,#flagsBtn").forEach(b => { b.disabled = !!view; });
+  if (view) { setTool("text"); toast("View only: you can see changes live but not edit.", 3500); }
+}
+window.onPeople = (people, mySid) => {
+  if (!doc) return;
+  // the bar: everyone else who's here
+  const bar = $("#peopleBar"); bar.innerHTML = "";
+  const others = people.filter(p => p.sid !== mySid);
+  const seen = new Set();
+  for (const p of others) {
+    const key = p.pid === "owner" ? "owner" : p.pid; if (seen.has(key)) continue; seen.add(key);
+    const b = document.createElement("span"); b.className = "avatar"; b.style.background = colourFor(key);
+    const nm = p.pid === "owner" && !doc.shared ? "You (another device)" : p.name + (p.role === "view" ? " (viewing)" : p.role === "owner" ? " (owner)" : "");
+    b.textContent = (p.name || "?").trim().slice(0, 1).toUpperCase(); b.title = nm; bar.appendChild(b);
+  }
+  // boxes someone else is typing in: locked, outlined in their colour with their name
+  const held = new Map(others.filter(p => p.focus).map(p => [p.focus, p]));
+  doc.pages.forEach((P, pi) => P.regions.forEach(r => {
+    const ta = r._el; if (!ta) return;
+    const h = held.get(r.id), was = ta.classList.contains("locked");
+    if (h) {
+      const key = h.pid === "owner" ? "owner" : h.pid, name = h.pid === "owner" && !doc.shared ? "You (another device)" : h.name;
+      ta.classList.add("locked"); ta.readOnly = true; ta.dataset.lockedBy = name; ta.style.setProperty("--lock", colourFor(key));
+      let tag = r._lockTag; if (!tag) { tag = r._lockTag = document.createElement("span"); tag.className = "locktag"; }
+      if (tag.parentElement !== views[pi].el) views[pi].el.appendChild(tag);
+      tag.textContent = name + " is typing"; tag.style.background = colourFor(key); tag.style.left = ta.style.left; tag.style.top = (parseFloat(ta.style.top) - 16) + "px";
+      if (document.activeElement === ta) ta.blur();
+    } else if (was) {
+      ta.classList.remove("locked"); ta.readOnly = !!(doc.shared && doc.shared.role === "view"); delete ta.dataset.lockedBy; if (r._lockTag) { r._lockTag.remove(); r._lockTag = null; }
+    }
+  }));
+  if ($("#shareDlg").open) refreshPeople();
+};
+window.onLocked = (rid, by) => { const r = findRegion(rid); if (r && r._el && document.activeElement === r._el) r._el.blur(); toast(`${by} is typing there right now.`); };
+// the owner's Share panel
+const fmtCode = c => c ? c.slice(0, 4) + "-" + c.slice(4) : "…";
+async function openShare() {
+  $("#shareErr").textContent = ""; $("#codeEdit").textContent = $("#codeView").textContent = "…"; $("#shareDlg").showModal();
+  try { const c = await Sync.share.codes(doc.id); $("#codeEdit").textContent = fmtCode(c.edit); $("#codeView").textContent = fmtCode(c.view); } catch (e) { $("#shareErr").textContent = e.message; }
+  refreshPeople();
+}
+async function refreshPeople() {
+  const ul = $("#sharePeople");
+  try {
+    const { people } = await Sync.share.people(doc.id);
+    const list = people.filter(p => !p.removed);
+    ul.innerHTML = list.length ? "" : '<li class="note">Nobody has joined yet.</li>';
+    for (const p of list) {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="avatar"></span><span class="pname"></span><span class="pmeta"></span><button type="button" class="danger">Remove</button>`;
+      $(".avatar", li).style.background = colourFor(p.pid); $(".avatar", li).textContent = (p.name || "?").slice(0, 1).toUpperCase();
+      $(".pname", li).textContent = p.name + (p.email ? "" : " (guest)");
+      $(".pmeta", li).textContent = (p.role === "view" ? "View only" : "Can edit") + (p.online ? " · here now" : "");
+      $("button", li).onclick = async () => { try { await Sync.share.remove(doc.id, p.pid); toast(`${p.name} was removed.${p.email ? "" : " To stop them joining again, make new codes."}`, 5000); refreshPeople(); } catch (e) { $("#shareErr").textContent = e.message; } };
+      ul.appendChild(li);
+    }
+  } catch (e) { $("#shareErr").textContent = e.message; }
+}
+$("#shareBtn").onclick = openShare;
+$("#shareClose").onclick = () => $("#shareDlg").close();
+$("#shareReset").onclick = async () => {
+  if (!confirm("Make new codes? The current codes stop working for anyone new.")) return;
+  try { const c = await Sync.share.reset(doc.id); $("#codeEdit").textContent = fmtCode(c.edit); $("#codeView").textContent = fmtCode(c.view); toast("New codes made. The old ones no longer work."); } catch (e) { $("#shareErr").textContent = e.message; }
+};
+$$("#shareDlg [data-copy]").forEach(b => b.onclick = async () => { const t = $("#" + b.dataset.copy).textContent; try { await navigator.clipboard.writeText(t); toast("Code copied."); } catch (e) { fallbackCopy(t); } });
+$("#joinForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const code = $("#joinCode").value.toUpperCase().replace(/[^A-Z0-9]/g, ""), name = $("#joinName").value.trim();
+  if (code.length !== 8) { toast("Share codes are 8 letters and numbers, like ABCD-2345."); return; }
+  if (!(window.Sync && Sync.user) && !name) { toast("Type your name so the others know who you are."); $("#joinName").focus(); return; }
+  try { localStorage.setItem("joinName", name); } catch (err) {}
+  joinShared(code, name);
+});
+try { $("#joinName").value = localStorage.getItem("joinName") || ""; } catch (e) {}
 
 // ---------------- corner handles on the answer you're typing in: drag to resize on the go ----------------
 let handFor = null;   // {p, r}
@@ -459,8 +568,12 @@ function makeField(p, r) {
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
   ta.addEventListener("input", () => { if (!r.code && !r.codeSet && looksLikeCode(ta.value)) { setCode(p, r, true, false); toast("This looks like code, so this space is now in code mode: no capitals or corrections, Tab indents. Press </> Code to switch back.", 5000); } if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
-  ta.addEventListener("focus", () => { showFlagFloat(p, r); showHandles(p, r); });
-  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150));
+  ta.addEventListener("focus", () => {
+    if (ta.classList.contains("locked")) { const by = ta.dataset.lockedBy || "Someone"; ta.blur(); toast(`${by} is typing here right now.`); return; }
+    showFlagFloat(p, r); showHandles(p, r); if (window.Sync) Sync.focus(r.id);
+  });
+  ta.addEventListener("blur", () => { if (window.Sync) Sync.focus(null); setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150); });
+  if (doc.shared && doc.shared.role === "view") { ta.readOnly = true; ta.tabIndex = -1; }
   v.el.insertBefore(ta, v.ink);
   r._el = ta;
 }
@@ -808,6 +921,7 @@ function bindInk(p, v) {
   const pos = e => { const b = v.ink.getBoundingClientRect(); return [(e.clientX - b.left) / zoom, (e.clientY - b.top) / zoom]; };
   v.ink.addEventListener("pointerdown", e => {
     if (boxMode) return;
+    if (doc.shared && doc.shared.role === "view") return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (e.pointerType === "pen") sawPen();
     if (tool === "select") { selDown(p, e); return; }
@@ -1641,7 +1755,12 @@ async function openBackup(buf) {
   } catch (e) { toast("Couldn't open that backup: " + e.message); }
 }
 
-window.addEventListener("beforeunload", () => { if (doc) { saveView(); DB.put(doc); } });
+window.addEventListener("beforeunload", e => {
+  if (!doc) return;
+  saveView();
+  if (canSave()) DB.put(doc);
+  else if (!doc.shared && hasWork()) { e.preventDefault(); e.returnValue = ""; }    // nothing is saved without an account: ask before leaving
+});
 // ---------------- flags: mark an answer space to come back to ----------------
 let flagFor = null;   // {p, r} of the focused answer space
 function showFlagFloat(p, r) { flagFor = { p, r }; placeFlagFloat(); }

@@ -30,9 +30,19 @@
         <button type="submit">Open link</button>
       </form>
     </div>
-    <p class="privacy">Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers are kept in your account and sync live between your devices.</p>
+    <form class="joinrow" id="joinForm">
+      <span>Join a shared paper</span>
+      <input id="joinCode" placeholder="Code, e.g. ABCD-2345" aria-label="Share code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12">
+      <input id="joinName" placeholder="Your name" aria-label="Your name" autocomplete="nickname" maxlength="40">
+      <button type="submit">Join</button>
+    </form>
+    <p class="privacy" id="privacyNote">Without an account you can open a paper, fill it in and export it, but nothing is saved. Signed in, your papers are kept in your account and sync live between your devices.</p>
     <p class="tip" id="tip"><span>Tip</span> <b>Tab</b> glides to the next question, so you never miss one. <b>Shift+Tab</b> jumps back.</p>
     <div class="storage" id="storage" hidden><div class="sbar" id="storageBar"><i></i></div><span id="storageTxt"></span></div>
+    <section id="sharedWrap" class="lib" hidden>
+      <div class="libbar"><span class="crumb">Shared with me</span></div>
+      <ul id="sharedList" class="recent"></ul>
+    </section>
     <section id="recentWrap" class="lib">
       <div class="libbar">
         <nav class="crumbs" id="crumbs" aria-label="Folder"></nav>
@@ -77,7 +87,9 @@
   <div class="bar" id="bar">
     <button class="ib" id="homeBtn" title="All papers" aria-label="All papers"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7M6 10v10h12V10"/></svg></button>
     <span class="docname" id="docName"></span>
-    <button class="pill" id="syncPill" data-state="local">Saved on this device</button>
+    <button class="pill" id="syncPill" data-state="local">Not saved</button>
+    <span class="peoplebar" id="peopleBar"></span>
+    <button id="shareBtn" hidden title="Share this paper so others can work on it with you, live">Share</button>
     <span class="sep"></span>
     <div class="grp" role="group" aria-label="Tools">
       <button class="tool" data-tool="text" title="Text: click or tap answer spaces to type. Never draws.">Text</button>
@@ -151,35 +163,32 @@
 </div>
 
 <!-- ============ DIALOGS ============ -->
-<dialog id="authDlg" class="dlg">
-  <form id="authForm" method="dialog">
-    <h2 id="auTitle">Sign in</h2>
-    <label>Username <input id="auUser" autocomplete="username" required minlength="3" maxlength="24" autocapitalize="off" spellcheck="false"></label>
-    <label>Password <input id="auPass" type="password" autocomplete="current-password" required minlength="8"></label>
-    <p class="note" id="auHint" hidden>3–24 letters, numbers, dots, dashes or underscores. At least 8 characters for the password. There's no email, so keep your password somewhere safe. The site's admin can see your papers' names and how much space they use.</p>
-    <p class="err" id="authErr" role="alert"></p>
-    <div class="row"><button class="primary" id="auGo" type="submit">Sign in</button><button type="button" id="auClose">Cancel</button></div>
-    <button type="button" class="linkbtn" id="auSwitch">New here? Create an account</button>
-  </form>
-</dialog>
+
 
 <dialog id="acctDlg" class="dlg">
   <h2>Account</h2>
-  <form id="pwForm">
-    <h3>Change password</h3>
-    <label>Current password <input id="pwOld" type="password" autocomplete="current-password" required></label>
-    <label>New password <input id="pwNew" type="password" autocomplete="new-password" required minlength="8"></label>
-    <div class="row"><button class="primary" type="submit">Change password</button></div>
-  </form>
+  <p class="note">You're signed in with your GirolletServer account <b id="acEmail"></b>. Your name and password are managed there.</p>
   <form id="delForm">
-    <h3>Delete account</h3>
-    <p class="note">Removes your account and every paper stored in it. Papers saved on this device stay here.</p>
-    <label>Password <input id="delPw" type="password" autocomplete="current-password" required></label>
+    <h3>Delete my TypePDF papers</h3>
+    <p class="note">Deletes every paper stored in your TypePDF account. Your GirolletServer account stays as it is.</p>
     <label>Type <b>delete</b> to confirm <input id="delConfirm" autocomplete="off"></label>
-    <div class="row"><button class="danger" type="submit">Delete my account</button></div>
+    <div class="row"><button class="danger" type="submit">Delete my papers</button></div>
   </form>
   <p class="err" id="acctErr" role="alert"></p>
   <div class="row"><button type="button" id="acClose">Close</button></div>
+</dialog>
+<dialog id="shareDlg" class="dlg">
+  <h2>Share this paper</h2>
+  <p class="note">Anyone with a code can join from the TypePDF home page. No account needed; they just type their name. Changes are saved in your account.</p>
+  <div class="codes">
+    <div class="code"><span>Can edit</span><b id="codeEdit">…</b><button type="button" data-copy="codeEdit">Copy</button></div>
+    <div class="code"><span>View only</span><b id="codeView">…</b><button type="button" data-copy="codeView">Copy</button></div>
+  </div>
+  <h3>People</h3>
+  <ul class="people" id="sharePeople"><li class="note">Nobody has joined yet.</li></ul>
+  <p class="err" id="shareErr" role="alert"></p>
+  <div class="row"><button type="button" id="shareReset" class="danger">New codes</button><span class="grow"></span><button type="button" id="shareClose">Close</button></div>
+  <p class="note">New codes stop the old ones working for anyone new. People already in stay until you remove them.</p>
 </dialog>
 
 <dialog id="aiDlg" class="dlg">

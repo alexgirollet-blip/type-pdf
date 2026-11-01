@@ -244,3 +244,23 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 .page .selbox .selh::after{content:"";position:absolute;inset:-10px}
 .page .selbox .selh.nw{left:0;top:0;cursor:nwse-resize}.page .selbox .selh.ne{left:100%;top:0;cursor:nesw-resize}
 .page .selbox .selh.sw{left:0;top:100%;cursor:nesw-resize}.page .selbox .selh.se{left:100%;top:100%;cursor:nwse-resize}
+
+/* ---- joining and sharing ---- */
+.joinrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:8px 10px}
+.joinrow span{font-weight:600;font-size:14px;margin-right:4px}
+.joinrow input{flex:1 1 140px;min-width:0;font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:#fff}
+.joinrow #joinCode{text-transform:uppercase;letter-spacing:.08em;font-family:"PaperMono",ui-monospace,monospace}
+.joinrow button{padding:7px 14px}
+.peoplebar{display:inline-flex;gap:3px;align-items:center}
+.avatar{display:inline-flex;width:24px;height:24px;border-radius:50%;align-items:center;justify-content:center;color:#fff;font:700 12px var(--ui);box-shadow:0 0 0 2px rgba(255,255,255,.8)}
+.page .ans.locked{background:color-mix(in srgb,var(--lock) 9%,transparent)!important;box-shadow:0 0 0 1.5px var(--lock)!important;cursor:not-allowed}
+.page .locktag{position:absolute;z-index:7;font:600 10.5px var(--ui);color:#fff;padding:1px 6px;border-radius:4px 4px 4px 0;pointer-events:none;white-space:nowrap}
+#shareDlg .codes{display:grid;gap:8px;margin:10px 0}
+#shareDlg .code{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+#shareDlg .code span{width:80px;color:var(--muted);font-size:13px}
+#shareDlg .code b{flex:1;font:700 20px "PaperMono",ui-monospace,monospace;letter-spacing:.12em}
+#shareDlg .people{list-style:none;padding:0;margin:6px 0;display:grid;gap:6px;max-height:240px;overflow:auto}
+#shareDlg .people li{display:flex;align-items:center;gap:8px}
+#shareDlg .people .pname{font-weight:600}
+#shareDlg .people .pmeta{flex:1;color:var(--muted);font-size:13px}
+#editor.viewonly .ans{cursor:default}

@@ -23,7 +23,7 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Paste PDF button** for devices without a keyboard shortcut (e.g. an iPad).
 - Timer, "show answer spaces", Tab to jump between spaces, and backup files to move papers between devices without an account.
 
-Signed out, everything stays in the browser and the PDF is never uploaded.
+Signed out, nothing is saved and the PDF is never uploaded.
 
 ## How it's built
 
@@ -32,11 +32,13 @@ Signed out, everything stays in the browser and the PDF is never uploaded.
   - `AuthStore` (Durable Object, SQLite): accounts (PBKDF2-hashed passwords), sessions, rate limits.
   - `UserStore` (one Durable Object per account, SQLite): papers, every synced change, and the PDFs (stored in 1 MB chunks). Live sync runs over hibernating WebSockets.
 
-### Accounts, admin and storage
+### Accounts, sharing, admin and storage
 
-- The **first account created is the admin**. The admin has no storage limit, sees how much of Cloudflare's free 5 GB everyone is using, sets each user's allowance (100 MB – 2 GB, 250 MB by default), can list and delete any user's papers, and can delete accounts. Users are told the admin can see their papers' names and sizes.
-- Other accounts get the default allowance until the admin changes it. Single PDFs are limited to 40 MB.
-- The free plan's 5 GB of Durable Object storage is per **Cloudflare account**, shared by every Worker in it (Pages static files, KV, D1 and R2 have their own separate allowances). Each PDF is stored in its own small Durable Object, because a single object is capped at 1 GB on the free plan.
+- **Accounts come from the GirolletServer hub.** "Sign in" sends people to the hub, which sends them back with a short-lived signed pass. Hub admins are TypePDF admins; anyone removed from the hub is signed out and their papers are deleted 30 days later. Set two variables on this Worker (Settings → Variables and Secrets): `HUB_URL` (text: the hub's address) and `HUB_SSO_SECRET` (secret: the same value as `TYPEPDF_SSO_SECRET` on the hub).
+- **Without an account** you can open, fill in and export a paper, but nothing is saved.
+- **Sharing:** the Share button gives each paper an edit code and a view-only code. Anyone can join from the home page with a code (guests just type a name). Everyone sees changes live; an answer space someone is typing in is locked for the others. The owner can see who joined, remove people, and make new codes.
+- Each account's allowance is set by an admin (100 MB – 2 GB, 250 MB by default); admins have no limit. Single PDFs are limited to 40 MB.
+- The free plan's 5 GB of Durable Object storage is per **Cloudflare account**, shared by every Worker in it. Each PDF is stored in its own small Durable Object, because a single object is capped at 1 GB on the free plan.
 
 ### Showing the real storage left (optional)
 
