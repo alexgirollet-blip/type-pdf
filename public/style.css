@@ -306,12 +306,13 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .ans-bg .page .ans.filled{background:color-mix(in srgb,var(--ans-bg) 70%,transparent)}
 .ans-bold .page .ans{font-weight:700}
 /* multiple choice: a button over each printed box or oval; chosen ones get a tick or are filled in */
-.page .choice{position:absolute;z-index:4;margin:0;padding:0;border:0;background:transparent;cursor:pointer;border-radius:3px;display:grid;place-items:center;line-height:1;color:var(--ink);font-family:system-ui,sans-serif}
-.page .choice.oval{border-radius:50%}
+.page .choice{position:absolute;z-index:4;margin:0;padding:0;border:0;background:transparent;cursor:pointer!important;border-radius:3px;display:grid;place-items:center;line-height:1;color:var(--ink);font-family:system-ui,sans-serif}
+.page .choice.oval:not(.inbox){border-radius:50%}
 .page .choice:hover{background:rgba(47,125,116,.12);box-shadow:0 0 0 1.5px rgba(47,125,116,.6)}
 .page .choice:focus-visible{outline:2px solid var(--accent-2);outline-offset:1px}
 .page .choice.box.on::after{content:"✓";font-weight:700;transform:translateY(-4%)}
-.page .choice.oval.on::after{content:"";position:absolute;inset:16%;border-radius:50%;background:var(--ink)}
+.page .choice .dot{position:absolute;border-radius:50%;background:var(--ink);display:none;pointer-events:none}
+.page .choice.on .dot{display:block}
 .hints .page .choice{box-shadow:0 0 0 1px rgba(47,125,116,.4)}
 .boxmode .page .choice{pointer-events:none}
 #editor.viewonly .page .choice{cursor:default}

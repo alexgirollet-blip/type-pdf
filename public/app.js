@@ -522,7 +522,7 @@ function findRegion(id) { for (const P of doc.pages) { const r = P && P.regions.
 // ---------------- question markers: a box over each printed question number and part ----------------
 // found from the text (with font sizes) of every page together, since the numbering runs across pages.
 // Only pages without markers get them, so markers someone has fixed in the Boxes tool are kept.
-const CV = 1;   // version of the multiple-choice finder
+const CV = 2;   // version of the multiple-choice finder (pages looked at by an older one are looked at again)
 // multiple-choice boxes and ovals on pages detected before they were looked for: render each page once and look
 async function findChoices() {
   const need = doc.pages.map((P, p) => P && P.cv !== CV ? p : -1).filter(p => p >= 0);
@@ -540,7 +540,7 @@ async function findChoices() {
         if (P.regions.some(r => r.kind === "choice" && r.x0 < ch.x1 && r.x1 > ch.x0 && r.y0 < ch.y1 && r.y1 > ch.y0)) continue;
         // a tiny empty cell found on the same spot was really this box
         P.regions = P.regions.filter(r => !(r.kind !== "lines" && !doc.text[r.id] && r.x0 < ch.x1 && r.x1 > ch.x0 && r.y0 < ch.y1 && r.y1 > ch.y0 && r.x1 - r.x0 < 40 && r.y1 - r.y0 < 36));
-        P.regions.push({ id: `${p}:c${rid8()}`, kind: "choice", x0: +ch.x0.toFixed(1), y0: +ch.y0.toFixed(1), x1: +ch.x1.toFixed(1), y1: +ch.y1.toFixed(1), shape: ch.shape, opt: ch.opt || "", cut: +ch.y1.toFixed(1) + 3 });
+        P.regions.push({ id: `${p}:c${rid8()}`, kind: "choice", x0: +ch.x0.toFixed(1), y0: +ch.y0.toFixed(1), x1: +ch.x1.toFixed(1), y1: +ch.y1.toFixed(1), shape: ch.shape, opt: ch.opt || "", ...(ch.mark ? { mark: ch.mark } : {}), cut: +ch.y1.toFixed(1) + 3 });
       }
     } catch (e) { console.warn(e); }
     P.cv = CV; if (canEdit()) emit("page:" + p);
@@ -659,11 +659,12 @@ function makeField(p, r) {
   const v = views[p];
   if (r.kind === "choice") {
     const b = document.createElement("button"); b.type = "button";
-    b.className = "choice " + (r.shape === "oval" ? "oval" : "box"); b.dataset.rid = r.id;
+    b.className = "choice " + (r.shape === "oval" ? "oval" : "box") + (Array.isArray(r.mark) ? " inbox" : ""); b.dataset.rid = r.id;
     b.title = r.opt ? "Choose: " + r.opt : "Choose this answer"; b.setAttribute("aria-label", b.title);
     b.addEventListener("pointerdown", e => { if (e.pointerType === "pen") sawPen(); e.stopPropagation(); });
     b.addEventListener("click", e => { e.preventDefault(); toggleChoice(p, r); });
     if (doc.shared && doc.shared.role === "view") b.disabled = true;
+    if (r.shape === "oval") { const d = document.createElement("i"); d.className = "dot"; const m = choiceMark(r); Object.assign(d.style, { left: m[0] * 100 + "%", top: m[1] * 100 + "%", width: (m[2] - m[0]) * 100 + "%", height: (m[3] - m[1]) * 100 + "%" }); b.appendChild(d); }
     v.el.appendChild(b); r._el = b; paintChoice(r);
     return;
   }
@@ -740,6 +741,8 @@ function toggleChoice(p, r) {
   if (doc.text[r.id]) delete doc.text[r.id]; else doc.text[r.id] = "x";
   paintChoice(r); updateCount(); scheduleSave(); emit("text:" + r.id);
 }
+// the part of a choice that's filled in: the capsule inside AQA's answer box, or the oval itself (slightly inset)
+function choiceMark(r) { return Array.isArray(r.mark) && r.mark.length === 4 ? r.mark : [0.16, 0.16, 0.84, 0.84]; }
 function paintChoice(r) { const b = r._el; if (!b) return; const on = !!doc.text[r.id]; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); }
 function focusNext(r, dir) {
   const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
@@ -1861,7 +1864,7 @@ async function exportPDF() {
         const raw = doc.text[r.id]; if (!raw || !raw.trim()) continue;
         if (r.kind === "choice") {                                       // a chosen box gets a tick, a chosen oval is filled in
           const R = regionRect(p, r), w = R.x1 - R.x0, h = R.y1 - R.y0;
-          if (r.shape === "oval") page.drawEllipse({ x: tx((R.x0 + R.x1) / 2), y: ty((R.y0 + R.y1) / 2), xScale: w / 2 - Math.min(w, h) * 0.16, yScale: h / 2 - Math.min(w, h) * 0.16, color: ansCol });
+          if (r.shape === "oval") { const m = choiceMark(r), mx0 = R.x0 + w * m[0], mx1 = R.x0 + w * m[2], my0 = R.y0 + h * m[1], my1 = R.y0 + h * m[3]; page.drawEllipse({ x: tx((mx0 + mx1) / 2), y: ty((my0 + my1) / 2), xScale: (mx1 - mx0) / 2, yScale: (my1 - my0) / 2, color: ansCol }); }
           else page.drawSvgPath(`M${R.x0 + w * 0.2} ${R.y0 + h * 0.55} L${R.x0 + w * 0.42} ${R.y0 + h * 0.8} L${R.x0 + w * 0.85} ${R.y0 + h * 0.18}`, { x: tx(0), y: ty(0), borderColor: ansCol, borderWidth: Math.max(1, h * 0.12), borderLineCap: LineCapStyle.Round });
           continue;
         }
