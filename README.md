@@ -8,7 +8,9 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Typed text sits on the printed lines.** Long answers shrink a little, then fit two lines per printed line, and only then extend the page with extra writing lines. The page is never split through printed text.
 - **Text, Pen and Smart tools**: Text only types, Pen only draws, Smart does both (tap to type, drag to draw). Laptops start on Text; iPads and devices where an Apple Pencil has been used start on Pen.
 - **Select and move drawings**: draw a box round any ink (mouse, finger or Pencil) and drag it anywhere, even to another page; Delete removes it and arrow keys nudge it. Undo works, and moves sync live.
-- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, three-finger tap redoes. Mirroring a laptop screen to an iPad also works.
+- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, and three-finger tap swaps between the pen and the eraser (on an iPad or wherever an Apple Pencil has been used; four fingers redo there, three fingers redo elsewhere). Mirroring a laptop screen to an iPad also works.
+- **Go to a question**: the Go to… button (or G, ⌘/Ctrl+G, or tapping the page number) jumps to any question or part by typing it (3, 4b, 4b(ii)) or picking it from a list that shows which questions are answered, started or flagged. It also jumps to a page (p5) or the next empty answer space (N). Typed and drawn answers both count.
+- **Read the question first**: Tab, and every jump, scrolls so the question's wording stays in view above the answer space instead of hiding it at the top of the screen.
 - **Live sync with an account.** Sign in on two devices and open the same paper; typing and ink appear on the other device as you go. Offline changes are kept and sent when the connection returns.
 - **Picks up where you left off**: page, zoom, tool, colour and the answer you were typing in.
 - **Open PDFs any way you like**: choose a file, drag and drop, paste a file with ⌘/Ctrl+V, or paste a link.
@@ -21,7 +23,7 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Bin**: deleted papers stay in the bin for 30 days and can be restored.
 - **Storage**: each paper shows its size; a bar shows how much space you've used.
 - **Paste PDF button** for devices without a keyboard shortcut (e.g. an iPad).
-- Timer, "show answer spaces", Tab to jump between spaces, and backup files to move papers between devices without an account.
+- Timer, "show answer spaces", Tab to glide between spaces, and backup files to move papers between devices without an account.
 
 Signed out, nothing is saved and the PDF is never uploaded.
 

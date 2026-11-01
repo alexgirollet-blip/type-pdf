@@ -66,8 +66,9 @@
       <ul>
         <li><b>Type:</b> click any dotted line, ruled line, empty table cell or answer box and type. Text sits on the lines, shrinks if you write a lot, and the page grows if it still doesn't fit.</li>
         <li><b>Tools:</b> <b>Text</b> only types (click any answer space; it never draws). <b>Pen</b> only draws (mouse, trackpad, Apple Pencil or a mirrored iPad). <b>Smart</b> does both: tap an answer space to type, drag to draw. Laptops start on Text; iPads, and devices where an Apple Pencil has been used, start on Pen. Fingers scroll; pinch to zoom.</li>
-        <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo, three fingers to redo.</li>
+        <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo. Tap with three fingers to swap between the pen and the eraser (four fingers redo).</li>
         <li><b>Live sync:</b> sign in on two devices (say a laptop and an iPad) and open the same paper. Typing and ink appear on the other one straight away.</li>
+        <li><b>Go to…:</b> jump straight to any question (type <b>3</b>, <b>4b</b> or <b>4b(ii)</b>) or page (<b>p5</b>), see at a glance which questions are answered, started or flagged, and hop to the <b>next empty answer</b>. Tapping the page number in the corner opens it too. Tab and jumps leave the question's wording in view above the box.</li>
         <li><b>Flags:</b> click into an answer and press ⚑ Flag to mark it to come back to, e.g. to draw it on the iPad or because it's hard. The ⚑ button in the bar lists them.</li>
         <li><b>Folders:</b> make folders (and folders inside folders), drag papers onto them, star papers to keep them at the top, and make a blank new attempt of any paper. Deleted papers stay in the Bin for 30 days.</li>
         <li><b>Move drawings:</b> with <b>Select</b>, drag a box round some drawing (mouse, finger or Pencil), then drag inside the dashed box to move it, even onto another page, or drag a corner to resize it (it keeps its shape and line thickness scales too). Delete removes it; arrow keys nudge it. With Select, scroll with two fingers.</li>
@@ -76,7 +77,7 @@
         <li><b>Two pages at once:</b> the ▯▯ button next to zoom shows pages side by side, like a book.</li>
         <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed.</li>
         <li><b>Export PDF</b> keeps the original paper sharp and adds your writing on top. <b>Export for AI</b> gives typed answers as JSON plus a small PDF of only your handwritten work, which costs far fewer tokens to mark.</li>
-        <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab glides to the next answer space · Shift+Tab jumps back · double-click a word, triple-click a paragraph · Esc leaves a box.</li>
+        <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab glides to the next answer space · Shift+Tab jumps back · double-click a word, triple-click a paragraph · Esc leaves a box · G or ⌘/Ctrl+G go to a question · N next empty answer.</li>
       </ul>
     </details>
   </div>
@@ -123,6 +124,7 @@
     </div>
     <select id="fontSel" class="fontsel" aria-label="Answer font" title="Font for typed answers"></select>
     <span class="grow"></span>
+    <button id="jumpBtn" title="Jump to a question or page, or the next empty answer (G)">Go to…</button>
     <button id="flagsBtn" title="Flagged answer spaces">⚑ Flags</button>
     <button class="timer" id="timerBtn" title="Timer">⏱ <span id="timerTxt">Timer</span></button>
     <span class="count" id="count" title="Answer spaces with something typed in them"></span>
@@ -156,10 +158,19 @@
   </div>
 
   <div class="pop flagspop" id="flagsPop" hidden></div>
+  <div class="pop jumppop" id="jumpPop" hidden>
+    <form id="jumpForm" class="row">
+      <input id="jumpIn" placeholder="Question (3, 4b(ii)) or page (p5)" aria-label="Question or page to jump to" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+      <button type="submit" class="primary">Go</button>
+    </form>
+    <button type="button" id="nextBtn" title="The next answer space with nothing written in it yet (N)">Next empty answer ↓</button>
+    <div class="jumplist" id="jumpList"></div>
+    <div class="jumpkey"><i class="done"></i> answered <i class="part"></i> started <i></i> not yet <i class="flag"></i> flagged</div>
+  </div>
   <div class="pages" id="pages"></div>
   <button class="flagfloat" id="flagFloat" hidden>⚑ Flag</button>
   <button class="flagfloat codefloat" id="codeFloat" hidden>&lt;/&gt; Code</button>
-  <div class="pageind" id="pageInd"></div>
+  <button class="pageind" id="pageInd" title="Jump to a question or page"></button>
 </div>
 
 <!-- ============ DIALOGS ============ -->

@@ -197,6 +197,7 @@ async function openDoc(d, fresh = false) {
   updateCount(); timerInit(); renderFlags(); fontMenu();
   sharedUI();
   if (v) restoreView(v);
+  requestAnimationFrame(pageIndicator);
   if (!v || !v.tv || !v.tool || v.tool === "boxes") { setTool(deviceDefaultTool()); toolAuto = true; }
   if (fresh || need.length) scheduleSave();
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
@@ -632,10 +633,30 @@ function focusNext(r, dir) {
   const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
   const ta = n[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L);
   // glide to the next space (rather than jumping) so you can see everything you pass on the way
-  const host = $("#pages"), hb = host.getBoundingClientRect(), tb = ta.getBoundingClientRect();
-  const target = clamp(host.scrollTop + tb.top - hb.top - host.clientHeight * 0.35, 0, host.scrollHeight - host.clientHeight);
+  const host = $("#pages"), target = readableScroll(n[0], n[1]);
   if (dir > 0) glideTo(host, target);                 // Tab glides forward
   else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }   // Shift+Tab jumps straight back
+}
+// where to scroll so an answer space can be typed in with its question still readable above it: the printed
+// wording between the previous answer space and this one starts near the top of the screen, and the box sits
+// below it (but never so low that the box itself is pushed off the bottom)
+function questionTop(p, r) {
+  const P = doc.pages[p];
+  const prev = P.regions.filter(q => q !== r && q.y1 <= r.y0 + 1 && q.x0 < r.x1 && q.x1 > r.x0).reduce((m, q) => Math.max(m, q.y1), 0);
+  const its = (P.items || []).filter(it => it.y > prev + 1 && it.y < r.y0 + 4 && it.s && it.s.trim() && !/^\.+$/.test(it.s.trim()));
+  let top = its.length ? Math.min(...its.map(it => it.y)) - 12 : r.y0 - 40;   // item y is the baseline
+  return clamp(top, Math.max(0, r.y0 - 260), r.y0 - 20);
+}
+// a page's top, in the scroll position of the pages pane
+function pageTop(p) { const host = $("#pages"); return host.scrollTop + views[p].el.getBoundingClientRect().top - host.getBoundingClientRect().top; }
+function readableScroll(p, r) {
+  const host = $("#pages"), H = host.clientHeight, base = pageTop(p);
+  const boxTop = base + disp(p, r.y0) * zoom, boxH = (regionRect(p, r).y1 - regionRect(p, r).y0) * zoom;
+  let t = base + disp(p, questionTop(p, r)) * zoom - H * 0.12;           // the question near the top
+  t = Math.max(t, boxTop - H * 0.6);                                      // the box no lower than 60% down
+  t = Math.max(t, boxTop + Math.min(boxH, H * 0.3) - H * 0.92);           // at least a bit of the box is on screen
+  t = Math.min(t, boxTop - H * 0.25);                                     // and always well below the top edge
+  return clamp(t, 0, host.scrollHeight - H);
 }
 let glideRaf = 0;
 function glideTo(host, target) {
@@ -865,7 +886,8 @@ function showHover(p, q) {
   Object.assign(hoverDot.style, { display: "block", width: d + "px", height: d + "px", left: q[0] * zoom - d / 2 + "px", top: q[1] * zoom - d / 2 + "px", background: er ? "transparent" : hl ? "rgba(242,210,27,.45)" : colour });
 }
 function hideHover() { if (hoverDot) hoverDot.style.display = "none"; }
-// ---- two-finger tap undoes, three-finger tap redoes (fingers still scroll and pinch as normal) ----
+// ---- two-finger tap undoes; three-finger tap redoes, or on an iPad / with an Apple Pencil swaps pen ⇄ eraser
+// (four fingers redo there). Fingers still scroll and pinch as normal ----
 const multiTouch = { max: 0, t0: 0, moved: false, start: null, last: 0 };
 $("#pages").addEventListener("touchstart", e => {
   const fingers = [...e.touches].filter(t => t.touchType !== "stylus");
@@ -886,8 +908,27 @@ $("#pages").addEventListener("touchend", e => {
   multiTouch.start = null; multiTouch.max = 0;
   if (!quick || multiTouch.moved || boxMode || !doc) return;
   if (n === 2) { undo(); toast("Undo", 900); }
-  else if (n === 3) { redo(); toast("Redo", 900); }
+  else if (n === 3 && penDevice()) swapEraser();               // iPad / Apple Pencil: three fingers swap pen ⇄ eraser
+  else if (n === 3 || (n === 4 && penDevice())) { redo(); toast("Redo", 900); }
 }, { passive: true });
+// an iPad, or any device where an Apple Pencil has been used
+function penDevice() {
+  let pen = false; try { pen = localStorage.getItem("hasPen") === "1"; } catch (e) {}
+  return pen || /iPad/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+}
+let drawTool = "pen";   // the tool the eraser hands back to
+function swapEraser() {
+  if (doc.shared && doc.shared.role === "view") return;
+  toolAuto = false;
+  if (tool === "eraser") setTool(drawTool);
+  else { if (tool === "pen" || tool === "hl" || tool === "smart") drawTool = tool; setTool("eraser"); }
+  toolFlash(tool === "eraser" ? "Eraser" : tool === "hl" ? "Highlighter" : tool === "smart" ? "Smart" : "Pen");
+}
+let toolFlashT;
+function toolFlash(txt) {
+  let el = $(".toolflash"); if (!el) { el = document.createElement("div"); el.className = "toolflash"; el.setAttribute("role", "status"); document.body.appendChild(el); }
+  el.textContent = txt; el.classList.add("show"); clearTimeout(toolFlashT); toolFlashT = setTimeout(() => el.classList.remove("show"), 700);
+}
 // ---- light pressure: the pen's width varies a little (about ±12%) with how hard you press ----
 function strokePressure(s) { return s._live ? s._pr : s.pr; }
 // the same smoothed curve as tracePath, cut into pieces with a width each, merged into runs of equal width
@@ -1302,6 +1343,7 @@ function setTool(t) {
   if (t === "boxes") { setBoxMode(!boxMode); return; }
   if (boxMode) setBoxMode(false);
   tool = t; $$(".tool").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
+  if (t === "pen" || t === "hl" || t === "smart") drawTool = t;
   views.forEach(toolClass);
   if (t !== "select") clearInkSel();
   if (t === "select") { const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); hideHover(); }
@@ -1334,9 +1376,12 @@ document.addEventListener("keydown", e => {
   if (mod && e.key.toLowerCase() === "y" && !typing) { e.preventDefault(); redo(); return; }
   if (mod && (e.key === "=" || e.key === "+" || e.key === "-")) { e.preventDefault(); setZoom(zoom * (e.key === "-" ? 1 / 1.2 : 1.2)); return; }
   if (mod && e.key === "0") { e.preventDefault(); setZoom(fitWidthZoom()); return; }
+  if (mod && e.key.toLowerCase() === "g") { e.preventDefault(); openJump(); return; }
   if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); toast(window.Sync && Sync.user ? "Saved and synced to your account." : "Saved in this browser. Sign in to sync it to your other devices."); return; }
   if (typing || mod || e.altKey) return;
   const k = e.key.toLowerCase();
+  if (k === "g" && !boxMode) { e.preventDefault(); openJump(); return; }
+  if (k === "n" && !boxMode) { e.preventDefault(); nextEmpty(); return; }
   if (e.key.length === 1 && /[\p{L}\p{N}]/u.test(e.key) && !boxMode) { toast("Click or tap an answer space first, then type."); return; }
   if (k === "tab") { e.preventDefault(); const all = orderedRegions(); const first = all.find(([p, r]) => !doc.text[r.id]) || all[0]; if (first) focusNext(first[1], 0); }
   else if ((k === "delete" || k === "backspace") && boxMode && sel) { e.preventDefault(); deleteSel(); }
@@ -1816,6 +1861,138 @@ $("#flagsBtn").onclick = e => {
   const r = e.currentTarget.getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = Math.max(8, Math.min(window.innerWidth - 300, r.left - 120)) + "px"; pop.hidden = false;
 };
 document.addEventListener("pointerdown", e => { const pop = $("#flagsPop"); if (pop && !pop.hidden && !pop.contains(e.target) && !$("#flagsBtn").contains(e.target)) pop.hidden = true; });
+
+// ---------------- jump to a question or page, and to the next empty answer space ----------------
+// an answer space counts as answered when something is typed in it or any ink has been drawn inside it
+function inkedRegions() {
+  const out = new Set();
+  doc.pages.forEach((P, p) => {
+    const S = doc.strokes[p] || []; if (!S.length || !P) return;
+    const rects = P.regions.map(r => [r.id, regionRect(p, r)]);
+    for (const s of S) {
+      if (s.t === "hl") continue;                                    // highlighting the question isn't an answer
+      const pts = dispPts(p, s), step = Math.max(1, Math.floor(pts.length / 12));
+      for (let i = 0; i < pts.length; i += step) { const q = pts[i]; for (const [id, R] of rects) if (!out.has(id) && q[0] >= R.x0 - 2 && q[0] <= R.x1 + 2 && q[1] >= R.y0 - 4 && q[1] <= R.y1 + 4) out.add(id); }
+    }
+  });
+  return out;
+}
+const isAnswered = (r, inked) => !!((doc.text[r.id] || "").trim() || inked.has(r.id));
+const normQ = s => String(s).toLowerCase().replace(/^\s*(question|q)\s*/, "").replace(/[\s().,]/g, "");
+// every question label in reading order, with the answer spaces that belong to it
+function questionMap() {
+  const idx = labelIndex(), inked = inkedRegions(), byLabel = new Map();
+  for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.label.replace(/\(.*$/, ""), p: e.p, y: e.y, regions: [] });
+  for (const [p, r] of orderedRegions()) { const lab = labelAt(idx, p, r.y0 + 6); const e = byLabel.get(lab); if (e) e.regions.push([p, r]); }
+  const list = [...byLabel.values()];
+  for (const e of list) { const n = e.regions.filter(([, r]) => isAnswered(r, inked)).length; e.done = n; e.flag = e.regions.some(([, r]) => doc.flags && doc.flags[r.id]); e.state = !e.regions.length ? "" : n === e.regions.length ? "done" : n ? "part" : ""; }
+  return list;
+}
+function flashRegions(list) {
+  for (const [, r] of list) { const ta = r._el; if (!ta) continue; ta.classList.remove("jumpflash"); void ta.offsetWidth; ta.classList.add("jumpflash"); setTimeout(() => ta.classList.remove("jumpflash"), 1600); }
+}
+// scroll so a point on a page sits near the top of the screen (glides when it's close by)
+function scrollToPoint(p, y, frac = 0.18) {
+  const host = $("#pages"), v = views[p]; if (!v) return;
+  const target = clamp(pageTop(p) + disp(p, y) * zoom - host.clientHeight * frac, 0, host.scrollHeight - host.clientHeight);
+  if (Math.abs(target - host.scrollTop) < host.clientHeight * 6) glideTo(host, target); else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }
+}
+// typing straight in only makes sense with a keyboard tool; with the pen the space just lights up
+function canFocusOnJump() { return (tool === "text" || tool === "smart") && !matchMedia("(pointer: coarse)").matches && !(doc.shared && doc.shared.role === "view"); }
+function goToQuestion(e) {
+  if (!e) return;
+  hideJump();
+  scrollToPoint(e.p, e.y);
+  flashRegions(e.regions);
+  const first = e.regions.find(([, r]) => !(doc.text[r.id] || "").trim()) || e.regions[0];
+  if (first && canFocusOnJump()) { const ta = first[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
+  lastJump = e.label;
+}
+function goToPage(n) {
+  const p = clamp(n - 1, 0, views.length - 1); hideJump();
+  const host = $("#pages"); cancelAnimationFrame(glideRaf); host.scrollTop = pageTop(p) - 12;
+  toast(`Page ${p + 1} of ${views.length}`, 1200);
+}
+let lastJump = "";
+function jumpTo(text) {
+  const t = text.trim(); if (!t) return;
+  const pm = t.match(/^p(?:age|g)?\.?\s*(\d+)$/i);
+  if (pm) return goToPage(+pm[1]);
+  const want = normQ(t), list = questionMap();
+  const hit = list.find(e => normQ(e.label) === want) || list.find(e => normQ(e.label).startsWith(want));
+  if (hit) return goToQuestion(hit);
+  if (/^\d+$/.test(t) && !list.length) return goToPage(+t);    // no question numbers on this paper: a number means a page
+  toast(list.length ? `There's no question ${t} on this paper. Type p${t} to go to page ${t}.` : "No question numbers were found on this paper. Type p and a page number, e.g. p3.", 4000);
+}
+function hideJump() { $("#jumpPop").hidden = true; }
+function openJump(anchorEl) {
+  if (!doc) return;
+  const pop = $("#jumpPop"), list = $("#jumpList");
+  if (!pop.hidden) { hideJump(); return; }
+  const qs = questionMap(), cur = currentPage();
+  list.innerHTML = "";
+  if (qs.length) {
+    // one row per question number, with its parts as chips
+    const groups = []; for (const e of qs) { const g = groups[groups.length - 1]; if (g && g.q === e.q) g.items.push(e); else groups.push({ q: e.q, items: [e] }); }
+    for (const g of groups) {
+      const row = document.createElement("div"); row.className = "jrow";
+      const all = g.items.flatMap(e => e.regions), n = all.length, done = g.items.reduce((s, e) => s + e.done, 0);
+      const head = document.createElement("button"); head.type = "button"; head.className = "jq " + (n && done === n ? "done" : done ? "part" : "") + (g.items.some(e => e.flag) ? " flag" : "") + (g.items.some(e => e.label === lastJump) ? " last" : "");
+      head.innerHTML = `<b>Q${g.q}</b><small>${n ? `${done}/${n}` : "–"} · p${g.items[0].p + 1}</small>`;
+      head.title = `Question ${g.q}, page ${g.items[0].p + 1}` + (n ? `: ${done} of ${n} answer spaces answered` : "");
+      head.onclick = () => goToQuestion(g.items.find(e => e.regions.length) || g.items[0]);
+      row.appendChild(head);
+      for (const e of g.items) {
+        if (e.label === g.q || !e.regions.length) continue;
+        const c = document.createElement("button"); c.type = "button"; c.className = "jc " + e.state + (e.flag ? " flag" : "") + (e.label === lastJump ? " last" : "");
+        c.textContent = e.label.slice(g.q.length).replace(/\)\(/g, " ").replace(/[()]/g, "");
+        c.title = `${e.label}: ${e.done} of ${e.regions.length} answered` + (e.flag ? " · flagged" : "");
+        c.onclick = () => goToQuestion(e);
+        row.appendChild(c);
+      }
+      list.appendChild(row);
+    }
+  } else {
+    const m = document.createElement("p"); m.className = "note"; m.textContent = "No question numbers were found on this paper, so jump by page:"; list.appendChild(m);
+  }
+  // pages, always
+  const pr = document.createElement("div"); pr.className = "jpages";
+  views.forEach((v, i) => { const b = document.createElement("button"); b.type = "button"; b.textContent = i + 1; b.title = `Page ${i + 1}`; if (i === cur) b.className = "on"; b.onclick = () => goToPage(i + 1); pr.appendChild(b); });
+  const lab = document.createElement("small"); lab.textContent = "Pages"; list.append(lab, pr);
+  const r = (anchorEl || $("#jumpBtn")).getBoundingClientRect(), W = Math.min(340, window.innerWidth - 16);
+  pop.style.width = W + "px"; pop.hidden = false;
+  pop.style.left = clamp(r.left + r.width / 2 - W / 2, 8, window.innerWidth - W - 8) + "px";
+  if (r.top > window.innerHeight / 2) { pop.style.top = ""; pop.style.bottom = window.innerHeight - r.top + 6 + "px"; }
+  else { pop.style.bottom = ""; pop.style.top = r.bottom + 6 + "px"; }
+  $("#jumpIn").value = "";
+  if (!matchMedia("(pointer: coarse)").matches) $("#jumpIn").focus();
+  const lastEl = $(".last", list); if (lastEl) lastEl.scrollIntoView({ block: "nearest" });
+}
+$("#jumpBtn").onclick = e => openJump(e.currentTarget);
+$("#pageInd").onclick = e => openJump(e.currentTarget);
+$("#jumpForm").addEventListener("submit", e => { e.preventDefault(); jumpTo($("#jumpIn").value); });
+$("#jumpIn").addEventListener("keydown", e => { if (e.key === "Escape") { e.stopPropagation(); hideJump(); } });
+document.addEventListener("pointerdown", e => { const pop = $("#jumpPop"); if (!pop.hidden && !pop.contains(e.target) && !$("#jumpBtn").contains(e.target) && !$("#pageInd").contains(e.target)) hideJump(); });
+// the next answer space after the one you're in (or after what's on screen) with nothing written in it yet
+function nextEmpty() {
+  if (!doc) return;
+  const all = orderedRegions(), inked = inkedRegions(); if (!all.length) return;
+  const a = document.activeElement, host = $("#pages");
+  let from = a && a.classList && a.classList.contains("ans") ? all.findIndex(([, r]) => r._el === a) : -1;
+  if (from < 0) { const top = host.scrollTop + 8; from = all.findIndex(([p, r]) => pageTop(p) + disp(p, r.y0) * zoom >= top) - 1; if (from < -1) from = all.length - 1; }
+  for (let k = 1; k <= all.length; k++) {
+    const [p, r] = all[(from + k) % all.length];
+    if (isAnswered(r, inked)) continue;
+    const wrapped = from + k >= all.length;
+    { const host = $("#pages"), t = readableScroll(p, r); if (Math.abs(t - host.scrollTop) < host.clientHeight * 6) glideTo(host, t); else host.scrollTop = t; } flashRegions([[p, r]]);
+    if (canFocusOnJump()) { r._el.focus({ preventScroll: true }); }
+    const lab = labelAt(labelIndex(), p, r.y0 + 6);
+    toast((lab !== "?" ? `Q${lab} · ` : "") + `page ${p + 1}` + (wrapped ? " (back to the start)" : ""), 1600);
+    return;
+  }
+  toast("Every answer space has something in it.", 2500);
+}
+$("#nextBtn").onclick = () => { hideJump(); nextEmpty(); };
 
 // bring papers across from the earlier single-device version (same site, older storage name)
 (async () => {

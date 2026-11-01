@@ -74,7 +74,7 @@ button{font:inherit;cursor:pointer}
 .pop .chk{font-size:14px}
 
 /* ---- pages ---- */
-.pages{flex:1;overflow:auto;padding:20px 12px 80px;display:flex;flex-direction:column;align-items:center;gap:18px;-webkit-overflow-scrolling:touch}
+.pages{position:relative;flex:1;overflow:auto;padding:20px 12px 80px;display:flex;flex-direction:column;align-items:center;gap:18px;-webkit-overflow-scrolling:touch}
 .pages.book{display:grid;grid-template-columns:repeat(2,max-content);justify-content:center;align-items:start;gap:18px}
 .page .rh{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;background:#fff;border:2px solid #2f7d74;border-radius:50%;z-index:6;touch-action:none;box-shadow:0 1px 3px rgba(0,0,0,.3)}
 .page .rh::after{content:"";position:absolute;inset:-8px}
@@ -264,3 +264,32 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 #shareDlg .people .pname{font-weight:600}
 #shareDlg .people .pmeta{flex:1;color:var(--muted);font-size:13px}
 #editor.viewonly .ans{cursor:default}
+/* jump to a question / next empty space */
+button.pageind{border:0;cursor:pointer}
+button.pageind:hover{background:rgba(20,26,24,.95)}
+.jumppop{max-height:min(70vh,560px);grid-template-rows:auto 1fr auto;box-sizing:border-box}
+.jumppop form{display:flex;gap:6px}
+.jumppop input{flex:1;min-width:0;font:inherit;font-size:15px;padding:6px 8px;border-radius:6px;border:1px solid var(--btnline);background:#111;color:#fff}
+.jumplist{overflow:auto;display:grid;gap:5px;align-content:start;min-height:0}
+.jumplist .note{margin:0;font-size:13px;color:#c5d0cc}
+.jumplist>small{color:#aab6b1;font-size:12px;margin-top:4px}
+.jrow{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.jumppop .jq{display:grid;justify-items:start;gap:0;min-width:74px;text-align:left;padding:3px 8px;border-left:4px solid #59625f}
+.jumppop .jq small{font-size:11px;color:#aab6b1}
+.jumppop .jc{min-height:28px;min-width:34px;padding:3px 7px;font-size:13px;border-bottom:3px solid #59625f}
+.jumppop .jq.done{border-left-color:#3fb37a}.jumppop .jc.done{border-bottom-color:#3fb37a}
+.jumppop .jq.part{border-left-color:#e0b43a}.jumppop .jc.part{border-bottom-color:#e0b43a}
+.jumppop .flag{box-shadow:inset 0 0 0 1.5px #e07a1f}
+.jumppop .last{outline:2px solid var(--accent-2);outline-offset:1px}
+.jpages{display:flex;flex-wrap:wrap;gap:4px}
+.jumppop .jpages button{min-width:34px;min-height:30px;padding:3px 6px}
+.jumppop .jpages button.on{background:var(--accent-2);border-color:var(--accent-2);color:#fff}
+.jumpkey{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11px;color:#aab6b1;align-items:center}
+.jumpkey i{display:inline-block;width:10px;height:10px;border-radius:2px;background:#59625f;margin-right:-6px}
+.jumpkey i.done{background:#3fb37a}.jumpkey i.part{background:#e0b43a}.jumpkey i.flag{background:transparent;box-shadow:inset 0 0 0 1.5px #e07a1f}
+.page .ans.jumpflash{animation:jflash 1.6s ease-out}
+@keyframes jflash{0%,35%{background:rgba(242,190,40,.35);box-shadow:0 0 0 2px rgba(224,150,20,.9)}100%{}}
+.toolflash{position:fixed;left:50%;top:40%;transform:translate(-50%,-50%);background:rgba(20,26,24,.88);color:#fff;font:600 20px var(--ui);padding:14px 22px;border-radius:14px;z-index:65;pointer-events:none;opacity:0;transition:opacity .2s}
+.toolflash.show{opacity:1}
+
+.jumppop #nextBtn{justify-self:stretch}
