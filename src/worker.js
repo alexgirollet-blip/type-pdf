@@ -32,20 +32,34 @@ async function call(stub, path, body, method = "POST") { return stub.fetch(new R
 
 // ---- real storage used by the whole Cloudflare account (optional; needs CF_ACCOUNT_ID + CF_API_TOKEN) ----
 let cfCache = { at: 0, value: null, error: null };
+// when Cloudflare refuses the token, find out why so the admin panel can say exactly what to fix
+async function explainTokenProblem(acct, token) {
+  if (!/^[0-9a-f]{32}$/i.test(acct)) return "CF_ACCOUNT_ID doesn't look like an account ID (it should be 32 letters and numbers, from the dashboard's Account home).";
+  if (/^[0-9a-f]{37}$/i.test(token)) return "CF_API_TOKEN looks like the Global API Key. Create an API token instead (My Profile → API Tokens → Create Token) and paste that.";
+  if (/^[0-9a-f]{32}$/i.test(token)) return "CF_API_TOKEN looks like a token's ID, not the token itself. The token is the long value shown only once, right after you create it. Roll the token (or make a new one) and paste that value.";
+  const verify = async u => { try { const j = await (await fetch(u, { headers: { authorization: "Bearer " + token } })).json(); return j && j.success && j.result && j.result.status; } catch (e) { return null; } };
+  const st = await verify("https://api.cloudflare.com/client/v4/user/tokens/verify") || await verify(`https://api.cloudflare.com/client/v4/accounts/${acct}/tokens/verify`);
+  if (!st) return "Cloudflare doesn't recognise CF_API_TOKEN. Paste the token value again (shown once after creating it), as a Secret, with nothing else around it.";
+  if (st !== "active") return `The API token is ${st}. Activate it, or create a new one.`;
+  return "The token works but can't read analytics for this account. Edit it: Permissions → Account · Account Analytics · Read, and Account Resources → include this account (check CF_ACCOUNT_ID matches).";
+}
 async function cloudflareUsage(env) {
   if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return { configured: false };
   if (Date.now() - cfCache.at < 10 * 60e3) return { configured: true, ...cfCache };
+  // forgive copy-paste slips: spaces, line breaks, quotes, or "Bearer " pasted in front
+  const token = String(env.CF_API_TOKEN).trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "").trim();
+  const acct = String(env.CF_ACCOUNT_ID).trim().replace(/^["']|["']$/g, "").trim();
   const since = new Date(Date.now() - 4 * 864e5).toISOString().slice(0, 10);
   const q = (withNs) => `query($a:String!,$d:Date!){viewer{accounts(filter:{accountTag:$a}){durableObjectsStorageGroups(filter:{date_geq:$d},limit:1000){max{storedBytes} dimensions{date${withNs ? " namespaceId" : ""}}}}}}`;
   try {
     let groups = null, err = null;
     for (const withNs of [true, false]) {
-      const r = await fetch("https://api.cloudflare.com/client/v4/graphql", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + env.CF_API_TOKEN }, body: JSON.stringify({ query: q(withNs), variables: { a: env.CF_ACCOUNT_ID, d: since } }) });
+      const r = await fetch("https://api.cloudflare.com/client/v4/graphql", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + token }, body: JSON.stringify({ query: q(withNs), variables: { a: acct, d: since } }) });
       const j = await r.json().catch(() => ({}));
       if (j.errors && j.errors.length) { err = j.errors[0].message; continue; }
       groups = j.data?.viewer?.accounts?.[0]?.durableObjectsStorageGroups || []; break;
     }
-    if (!groups) throw new Error(err || "no data");
+    if (!groups) throw new Error(/auth/i.test(err || "") ? await explainTokenProblem(acct, token) : err || "no data");
     // newest day, summed across every Durable Object namespace in the account
     const latest = groups.map(g => g.dimensions.date).sort().pop();
     const value = latest ? groups.filter(g => g.dimensions.date === latest).reduce((s, g) => s + (g.max?.storedBytes || 0), 0) : 0;

@@ -302,7 +302,7 @@ function renderAdmin(o) {
   const body = $("#adminBody");
   const cf = o.cf || {}, real = cf.used != null ? cf.used : null, shown = real != null ? real : o.globalUsed, f2 = o.globalLimit ? shown / o.globalLimit : 0;
   const cfNote = real != null ? `Cloudflare reports ${fmtBytes(real)} used across your whole account${cf.date ? " (as of " + cf.date + ")" : ""}, including any other Workers.`
-    : cf.configured ? `Couldn't read your Cloudflare usage${cf.error ? ": " + esc(cf.error) : ""}. Check the API token has "Account Analytics: Read".`
+    : cf.configured ? `Couldn't read your Cloudflare usage. ${cf.error ? esc(cf.error) : "Check the API token has \"Account Analytics: Read\"."} (After changing a secret, it can take up to 2 minutes to retry.)`
     : `This only counts TypePDF. To see the real storage left on your Cloudflare account (shared with your other Workers), add two secrets to this Worker in the Cloudflare dashboard: <b>CF_ACCOUNT_ID</b> and <b>CF_API_TOKEN</b> (a token with "Account Analytics: Read"). Steps are in the README.`;
   body.innerHTML = `<div class="storage" data-level="${f2 > 0.95 ? "full" : f2 > 0.8 ? "high" : "ok"}"><div class="sbar"><i style="width:${(Math.min(1, f2) * 100).toFixed(1)}%"></i></div><span>${real != null ? "Whole account" : "TypePDF"}: ${fmtBytes(shown)} of ${fmtBytes(o.globalLimit)} used · ${fmtBytes(Math.max(0, o.globalLimit - shown))} left · TypePDF users: ${fmtBytes(o.globalUsed)}</span></div>
     <p class="note">${cfNote}</p>
