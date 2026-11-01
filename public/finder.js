@@ -4,7 +4,7 @@
 "use strict";
 (() => {
   const F = { subjects: null, res: null, sel: {}, sort: "new", loading: false };
-  const GROUPS = [["board", "Exam board"], ["paper", "Paper"], ["year", "Year"], ["series", "Series"], ["kind", "Type"]];
+  const GROUPS = [["level", "Level"], ["board", "Exam board"], ["paper", "Paper"], ["year", "Year"], ["series", "Series"], ["kind", "Type"]];
   const el = id => document.getElementById(id);
   const note = (t, err) => { const n = el("pfNote"); n.textContent = t || ""; n.classList.toggle("err", !!err); };
   try { Object.assign(F, JSON.parse(localStorage.getItem("pfPrefs") || "{}"), { subjects: null, res: null, loading: false }); } catch (e) {}
@@ -78,7 +78,7 @@
     const ul = el("pfList"); ul.innerHTML = "";
     for (const x of list.slice(0, 120)) {
       const li = document.createElement("li");
-      const head = [x.board, x.paper, [x.series, x.year].filter(Boolean).join(" ")].filter(Boolean).join(" · ") || x.title;
+      const head = [x.board, [x.level === "AS" ? "AS" : "", x.paper].filter(Boolean).join(" ") || (x.level === "AS" ? "AS" : ""), [x.series, x.year].filter(Boolean).join(" ")].filter(Boolean).join(" · ") || x.title;
       li.innerHTML = `<div class="pfinfo"><b>${esc(head)}</b><span class="pfkind k-${esc(x.kind.split(" ")[0].toLowerCase())}">${esc(x.kind)}</span><small>${esc(r.subject)} · ${esc(x.title)}</small></div>
         <a class="pfsrc" href="${esc(x.url)}" target="_blank" rel="noopener" title="Open on Physics &amp; Maths Tutor">PMT ↗</a><button type="button" class="pfopen">Add &amp; open</button>`;
       li.querySelector(".pfopen").onclick = () => openLink(x.url, x.name);
