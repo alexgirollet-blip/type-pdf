@@ -43,28 +43,72 @@ async function explainTokenProblem(acct, token) {
   if (st !== "active") return `The API token is ${st}. Activate it, or create a new one.`;
   return "The token works but can't read analytics for this account. Edit it: Permissions → Account · Account Analytics · Read, and Account Resources → include this account (check CF_ACCOUNT_ID matches).";
 }
+async function cfGql(token, query, variables) {
+  const r = await fetch("https://api.cloudflare.com/client/v4/graphql", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + token }, body: JSON.stringify({ query, variables }) });
+  const j = await r.json().catch(() => ({}));
+  if (j.errors && j.errors.length) throw new Error(j.errors[0].message || "GraphQL error");
+  if (!j.data) throw new Error("No data from Cloudflare (HTTP " + r.status + ")");
+  return j.data;
+}
+// the shape of each dataset (which "bytes" metric, whether it has namespaceId), found once by asking the API itself
+const cfShapes = {};
+async function datasetShape(token, ds, type) {
+  if (cfShapes[ds]) return cfShapes[ds];
+  const guess = { agg: "max", metric: "storedBytes", ns: true };
+  try {
+    const t = await cfGql(token, `query($n:String!){__type(name:$n){fields{name type{name ofType{name ofType{name}}}}}}`, { n: type });
+    const fields = (t.__type && t.__type.fields) || [];
+    const tn = f => f.type.name || (f.type.ofType && (f.type.ofType.name || (f.type.ofType.ofType && f.type.ofType.ofType.name)));
+    const sub = async name => { const x = await cfGql(token, `query($n:String!){__type(name:$n){fields{name}}}`, { n: name }); return ((x.__type && x.__type.fields) || []).map(f => f.name); };
+    let found = null;
+    for (const agg of ["max", "sum", "avg"]) {
+      const f = fields.find(q => q.name === agg); if (!f) continue;
+      const names = await sub(tn(f)); const m = names.find(n => n === "storedBytes") || names.find(n => /bytes/i.test(n));
+      if (m) { found = { agg, metric: m }; break; }
+    }
+    const dimF = fields.find(q => q.name === "dimensions");
+    const dims = dimF ? await sub(tn(dimF)) : [];
+    if (found && dims.includes("date")) return cfShapes[ds] = { ...found, ns: dims.includes("namespaceId") };
+  } catch (e) { if (/auth/i.test(e.message)) throw e; }
+  return guess;
+}
+// bytes stored now: the latest reported size of each namespace (Cloudflare doesn't report every day), added up
+async function datasetBytes(token, acct, since, ds, type) {
+  const sh = await datasetShape(token, ds, type);
+  const q = `query($a:String!,$d:Date!){viewer{accounts(filter:{accountTag:$a}){${ds}(filter:{date_geq:$d},limit:5000){${sh.agg}{${sh.metric}} dimensions{date${sh.ns ? " namespaceId" : ""}}}}}}`;
+  const data = await cfGql(token, q, { a: acct, d: since });
+  const groups = (data.viewer && data.viewer.accounts && data.viewer.accounts[0] && data.viewer.accounts[0][ds]) || [];
+  const latest = new Map();   // namespace (or "all") -> {date, bytes}
+  for (const g of groups) {
+    const date = g.dimensions && g.dimensions.date, key = (sh.ns && g.dimensions.namespaceId) || "all", b = Number((g[sh.agg] || {})[sh.metric]) || 0;
+    if (!date) continue;
+    const cur = latest.get(key);
+    if (!cur || date > cur.date) latest.set(key, { date, bytes: b });
+    else if (date === cur.date) cur.bytes = sh.ns ? Math.max(cur.bytes, b) : cur.bytes + b;
+  }
+  let value = 0, date = null;
+  for (const v of latest.values()) { value += v.bytes; if (!date || v.date > date) date = v.date; }
+  return { value, date };
+}
 async function cloudflareUsage(env) {
   if (!env.CF_ACCOUNT_ID || !env.CF_API_TOKEN) return { configured: false };
   if (Date.now() - cfCache.at < 10 * 60e3) return { configured: true, ...cfCache };
   // forgive copy-paste slips: spaces, line breaks, quotes, or "Bearer " pasted in front
   const token = String(env.CF_API_TOKEN).trim().replace(/^["']|["']$/g, "").replace(/^Bearer\s+/i, "").trim();
   const acct = String(env.CF_ACCOUNT_ID).trim().replace(/^["']|["']$/g, "").trim();
-  const since = new Date(Date.now() - 4 * 864e5).toISOString().slice(0, 10);
-  const q = (withNs) => `query($a:String!,$d:Date!){viewer{accounts(filter:{accountTag:$a}){durableObjectsStorageGroups(filter:{date_geq:$d},limit:1000){max{storedBytes} dimensions{date${withNs ? " namespaceId" : ""}}}}}}`;
+  const since = new Date(Date.now() - 10 * 864e5).toISOString().slice(0, 10);
   try {
-    let groups = null, err = null;
-    for (const withNs of [true, false]) {
-      const r = await fetch("https://api.cloudflare.com/client/v4/graphql", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + token }, body: JSON.stringify({ query: q(withNs), variables: { a: acct, d: since } }) });
-      const j = await r.json().catch(() => ({}));
-      if (j.errors && j.errors.length) { err = j.errors[0].message; continue; }
-      groups = j.data?.viewer?.accounts?.[0]?.durableObjectsStorageGroups || []; break;
+    // Cloudflare reports key-value Durable Objects and SQLite Durable Objects (what TypePDF uses) in two datasets
+    const parts = [];
+    for (const [ds, type] of [["durableObjectsSqlStorageGroups", "AccountDurableObjectsSqlStorageGroups"], ["durableObjectsStorageGroups", "AccountDurableObjectsStorageGroups"]]) {
+      try { parts.push(await datasetBytes(token, acct, since, ds, type)); }
+      catch (e) { if (/auth/i.test(e.message)) throw new Error(await explainTokenProblem(acct, token)); parts.push({ value: 0, date: null, err: e.message }); }
     }
-    if (!groups) throw new Error(/auth/i.test(err || "") ? await explainTokenProblem(acct, token) : err || "no data");
-    // newest day, summed across every Durable Object namespace in the account
-    const latest = groups.map(g => g.dimensions.date).sort().pop();
-    const value = latest ? groups.filter(g => g.dimensions.date === latest).reduce((s, g) => s + (g.max?.storedBytes || 0), 0) : 0;
-    cfCache = { at: Date.now(), value, date: latest || null, error: null };
-  } catch (e) { cfCache = { at: Date.now() - 8 * 60e3, value: cfCache.value, error: String(e.message || e) }; }
+    if (parts.every(x => x.err)) throw new Error(parts.map(x => x.err).join("; "));
+    const value = parts.reduce((t, x) => t + x.value, 0);
+    const date = parts.map(x => x.date).filter(Boolean).sort().pop() || null;
+    cfCache = { at: Date.now(), value, date, error: null };
+  } catch (e) { cfCache = { at: Date.now() - 8 * 60e3, value: cfCache.value, date: cfCache.date, error: String(e.message || e) }; }
   return { configured: true, ...cfCache };
 }
 
