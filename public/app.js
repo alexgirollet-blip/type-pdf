@@ -40,7 +40,9 @@ const DB = (() => {
   };
 })();
 // a copy of the document without DOM references or the PDF bytes
-function strip(d) { return JSON.parse(JSON.stringify({ ...d, bytes: undefined, pages: d.pages.map(P => P && ({ ...P, regions: P.regions.map(({ _el, ...rest }) => rest) })) })); }
+function strip(d) { return JSON.parse(JSON.stringify({ ...d, bytes: undefined, pages: d.pages.map(P => P && ({ ...P, regions: P.regions.map(cleanRegion) })) })); }
+// a region without the on-screen bits hung on it (its text box, outline, …): every key starting with "_"
+function cleanRegion(r) { const o = {}; for (const k in r) if (k[0] !== "_") o[k] = r[k]; return o; }
 async function sha(buf) { const h = await crypto.subtle.digest("SHA-256", buf); return [...new Uint8Array(h)].slice(0, 12).map(b => b.toString(16).padStart(2, "0")).join(""); }
 
 // ---------------- state ----------------
@@ -121,6 +123,9 @@ async function openFile(f) {
     const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024)));
     if (head.trimStart().startsWith("{")) return openBackup(buf);
     if (!head.includes("%PDF")) { toast("That file isn't a PDF."); return; }
+    // a PDF exported from TypePDF: reopen the original paper with its answers, all still editable
+    const restored = await fromExport(buf);
+    if (restored) return openRestored(restored);
     const id = await sha(buf);
     const existing = await DB.get(id).catch(() => null);
     if (existing) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
@@ -150,6 +155,7 @@ function migrateDoc(d) {
   if (!d.pdf) d.pdf = d.id;
   for (const arr of Object.values(d.strokes)) for (const s of arr || []) { s.id ||= rid8(); s.t ||= "pen"; delete s._live; }
   for (const [k, f] of Object.entries(d.fit)) if (typeof f !== "object") delete d.fit[k];
+  for (const P of d.pages || []) if (P && P.regions) P.regions.forEach((r, i) => { P.regions[i] = cleanRegion(r); });   // drop anything saved by mistake
   d.v = 2;
   return d;
 }
@@ -233,9 +239,74 @@ async function detectPage(i, prev) {
   await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
   let tc = null; try { tc = await page.getTextContent(); } catch (e) {}
   const res = Detect.page(c, vp, tc);
+  // a scanned / image-only page has no text to read question numbers from: read the left margin instead
+  if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
   res.regions.forEach((r, k) => r.id = `${i}:${k}`);
-  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, gaps: (prev && prev.gaps) || {} };
+  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, gaps: (prev && prev.gaps) || {} };
+}
+// ---- reading question numbers off image-only papers (Tesseract, bundled and only loaded when needed) ----
+let ocrWorkerP = null;
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("couldn't load " + src)); document.head.appendChild(s); }); }
+function ocrWorker() {
+  return ocrWorkerP || (ocrWorkerP = (async () => {
+    if (!window.Tesseract) await loadScript("lib/ocr/tesseract.min.js");
+    const base = new URL("lib/ocr/", location.href).href;
+    const w = await Tesseract.createWorker("eng", 1, { workerPath: base + "worker.min.js", corePath: base, langPath: base, gzip: true, logger: () => {} });
+    await w.setParameters({ tessedit_pageseg_mode: "11" });   // sparse text; a whitelist on mixed text merges words, so only the digit pass uses one
+    return w;
+  })().catch(e => { ocrWorkerP = null; throw e; }));
+}
+// canvas: the page rendered at Detect.S px/pt. Returns text items like the PDF text layer gives ({s, x, y = baseline, x1}, in pt)
+async function ocrMargin(canvas, vp) {
+  const S = Detect.S, W = Math.min(canvas.width, Math.round(170 * S));
+  const k = 1.5, c = document.createElement("canvas"); c.width = Math.round(W * k); c.height = Math.round(canvas.height * k);
+  const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(canvas, 0, 0, W, canvas.height, 0, 0, c.width, c.height);
+  const w = await ocrWorker();
+  const words = (data, f, dx = 0) => { const o = []; for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const wd of l.words || []) o.push({ t: (wd.text || "").trim(), c: wd.confidence, x: wd.bbox.x0 * f + dx, y: wd.bbox.y1 * f, x1: wd.bbox.x1 * f + dx }); return o; };
+  await w.setParameters({ tessedit_pageseg_mode: "11", tessedit_char_whitelist: "" });
+  const all = words((await w.recognize(c, {}, { blocks: true, text: false })).data, 1 / (S * k));
+  c.width = 0;
+  // second look at the column where question numbers sit: each blob of ink there is cut out with a white border
+  // and read as one number (a lone bold digit on a blank strip is easily missed otherwise)
+  const nums = [], x0 = 25, x1 = 68;
+  const px = canvas.getContext("2d").getImageData(Math.round(x0 * S), 0, Math.round((x1 - x0) * S), canvas.height), PW = px.width;
+  const rowInk = y => { let n = 0; for (let x = 0; x < PW; x++) if (px.data[(y * PW + x) * 4] < 120) n++; return n; };
+  const bands = []; let start = -1, gap = 0;
+  for (let y = 0; y < px.height; y++) { if (rowInk(y)) { if (start < 0) start = y; gap = 0; } else if (start >= 0 && ++gap > 3) { bands.push([start, y - gap]); start = -1; } }
+  await w.setParameters({ tessedit_pageseg_mode: "8", tessedit_char_whitelist: "0123456789" });
+  for (const [a, b] of bands) {
+    const h = (b - a + 1) / S; if (h < 5 || h > 30) continue;
+    let lo = PW, hi = -1; for (let y = a; y <= b; y++) for (let x = 0; x < PW; x++) if (px.data[(y * PW + x) * 4] < 120) { if (x < lo) lo = x; if (x > hi) hi = x; }
+    if (hi < 0 || (hi - lo) / S > 22) continue;                       // too wide to be a question number
+    const K = 4, pad = 24, cw = (hi - lo + 1) * K + pad * 2, ch = (b - a + 1) * K + pad * 2, c3 = document.createElement("canvas"); c3.width = cw; c3.height = ch;
+    const g3 = c3.getContext("2d"); g3.fillStyle = "#fff"; g3.fillRect(0, 0, cw, ch); g3.imageSmoothingQuality = "high";
+    g3.drawImage(canvas, Math.round(x0 * S) + lo, a, hi - lo + 1, b - a + 1, pad, pad, (hi - lo + 1) * K, (b - a + 1) * K);
+    const r = (await w.recognize(c3)).data; c3.width = 0;
+    const t = (r.text || "").trim();
+    if (/^\d{1,2}$/.test(t) && r.confidence >= 40) nums.push({ t, c: r.confidence, x: x0 + lo / S, y: (b + 1) / S, x1: x0 + (hi + 1) / S });
+  }
+  await w.setParameters({ tessedit_char_whitelist: "" });
+  const out = all.filter(o => o.t && o.c >= 60);
+  for (const n of nums) if (/^\d{1,2}$/.test(n.t) && n.c >= 50 && !out.some(o => Math.abs(o.y - n.y) < 4 && o.x < n.x1 + 2 && o.x1 > n.x - 2)) out.push(n);
+  return out.map(o => ({ s: o.t, x: +o.x.toFixed(1), y: +o.y.toFixed(1), x1: +o.x1.toFixed(1) })).sort((a, b) => a.y - b.y || a.x - b.x);
+}
+// papers opened before OCR existed: read their margins now (once), e.g. before an AI export
+async function ensureOcr() {
+  const need = doc.pages.map((P, p) => (!P.hasText && !P.ocr && !(P.items && P.items.length)) ? p : -1).filter(p => p >= 0);
+  if (!need.length) return;
+  try {
+    for (let k = 0; k < need.length; k++) {
+      const p = need[k]; busy(true, `Reading question numbers… page ${p + 1}`, k / need.length);
+      const page = await pdf.getPage(p + 1), vp2 = page.getViewport({ scale: Detect.S });   // the printed page as is (no added space)
+      const c = document.createElement("canvas"); c.width = Math.ceil(vp2.width); c.height = Math.ceil(vp2.height);
+      const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height); await page.render({ canvasContext: cx, viewport: vp2 }).promise;
+      doc.pages[p].items = await ocrMargin(c, page.getViewport({ scale: 1 })); doc.pages[p].ocr = true; c.width = 0;
+      emit("page:" + p);
+    }
+    scheduleSave();
+  } catch (e) { toast("Couldn't read the question numbers from this paper's images: " + (e.message || e), 5000); }
+  busy(false);
 }
 
 // ---------------- corner handles on the answer you're typing in: drag to resize on the go ----------------
@@ -1372,13 +1443,16 @@ async function exportPDF() {
     const okS = new Set(sans.getCharacterSet()), okM = new Set(mono.getCharacterSet());
     const clean = (t, set) => [...t].map(ch => ch === "\n" || set.has(ch.codePointAt(0)) ? ch : (ch === "\t" ? "    " : "?")).join("");
     const hex = c => { const n = parseInt(c.slice(1), 16); return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
+    // copy every page in one go: PDFs whose pages share one bundle of images/fonts then keep sharing it,
+    // instead of every page getting its own copy of everything (a 25-page scan once came out at 134 MB)
+    const copied = await out.copyPages(srcDoc, srcDoc.getPageIndices());
     for (let p = 0; p < doc.pages.length; p++) {
       busy(true, `Building your PDF… page ${p + 1} of ${doc.pages.length}`, p / doc.pages.length);
       const P = doc.pages[p], srcPage = srcDoc.getPage(p), cb = srcPage.getCropBox(), rot = (srcPage.getRotation().angle % 360 + 360) % 360;
       const G = totalGap(p), gaps = gapList(p);
       let page, tx, ty;
       if (!G && rot === 0) {
-        const [cp] = await out.copyPages(srcDoc, [p]); page = out.addPage(cp);
+        page = out.addPage(copied[p]);
         tx = x => cb.x + x; ty = y => cb.y + cb.height - y;
       } else {
         const newH = P.h + G; page = out.addPage([P.w, newH]); tx = x => x; ty = y => newH - y;
@@ -1387,7 +1461,7 @@ async function exportPDF() {
           let sTop = 0, dTop = 0;
           for (const b of bands) {
             const hS = b.at - sTop;
-            if (hS > 0.5) { const emb = await out.embedPage(srcPage, { left: cb.x, right: cb.x + cb.width, top: cb.y + cb.height - sTop, bottom: cb.y + cb.height - b.at }); page.drawPage(emb, { x: 0, y: newH - (dTop + hS), width: P.w, height: hS }); }
+            if (hS > 0.5) { const emb = await out.embedPage(copied[p], { left: cb.x, right: cb.x + cb.width, top: cb.y + cb.height - sTop, bottom: cb.y + cb.height - b.at }); page.drawPage(emb, { x: 0, y: newH - (dTop + hS), width: P.w, height: hS }); }
             dTop += hS + b.h; sTop = b.at;
           }
         } else { // rotated page: flatten it to a picture, then add everything on top
@@ -1439,6 +1513,10 @@ async function exportPDF() {
       }
     }
     out.setTitle(doc.name + " (answered)"); out.setSubject(JSON.stringify(aiJSON(false))); out.setCreator("TypePDF"); out.setProducer("TypePDF");
+    // carry the untouched paper and the answers inside, so opening this file in TypePDF brings back editable answers
+    // (instead of answers baked into the page)
+    await out.attach(new Uint8Array(doc.bytes.slice(0)), "typepdf-original.pdf", { mimeType: "application/pdf", description: "The original paper, for reopening in TypePDF" });
+    await out.attach(new TextEncoder().encode(JSON.stringify({ format: "typepdf-state", v: 2, state: strip(doc) })), "typepdf-answers.json", { mimeType: "application/json", description: "Your answers, for reopening in TypePDF" });
     const bytes = await out.save();
     download(new Blob([bytes], { type: "application/pdf" }), doc.name + " - answered.pdf");
     busy(false); toast("PDF exported.");
@@ -1517,7 +1595,7 @@ async function workingsPDF() {
   out.setTitle(doc.name + " – handwritten workings"); out.setCreator("TypePDF");
   return out.save();
 }
-$("#aiBtn").onclick = () => { $("#aiDlg").showModal(); updateAiInfo(); };
+$("#aiBtn").onclick = async () => { await ensureOcr(); $("#aiDlg").showModal(); updateAiInfo(); };
 $("#aiQ").onchange = updateAiInfo;
 function updateAiInfo() {
   const o = aiJSON($("#aiQ").checked); const txt = JSON.stringify(o);
@@ -1536,6 +1614,26 @@ function fallbackCopy(t) { const ta = document.createElement("textarea"); ta.val
 function b64(buf) { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
 function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u.buffer; }
 function downloadBackup(d) { const o = { format: "typepdf", v: 2, pdf: b64(d.bytes), state: strip(d) }; download(new Blob([JSON.stringify(o)], { type: "application/json" }), d.name + ".typepdf"); }
+async function fromExport(buf) {
+  let t = null;
+  try {
+    t = await pdfjsLib.getDocument({ data: new Uint8Array(buf.slice(0)), isEvalSupported: false }).promise;
+    const att = await t.getAttachments(); if (!att) return null;
+    const orig = att["typepdf-original.pdf"], st = att["typepdf-answers.json"];
+    if (!orig || !st) return null;
+    const o = JSON.parse(new TextDecoder().decode(st.content)); if (o.format !== "typepdf-state" || !o.state) return null;
+    const d = o.state; d.bytes = orig.content.buffer.slice(orig.content.byteOffset, orig.content.byteOffset + orig.content.byteLength);
+    d.seq = 0; d.dirty = {};
+    return d;
+  } catch (e) { return null; } finally { if (t) t.destroy(); }
+}
+async function openRestored(d) {
+  const mine = await DB.get(d.id).catch(() => null);
+  if (mine && (mine.updated || 0) > (d.updated || 0)) { toast("You already have a newer copy of this paper here, so that's what's open. The export was older."); return openDoc(mine); }
+  toast("This is a TypePDF export, so the original paper and your answers are back, all editable.", 5000);
+  if (window.Sync && Sync.user) { await DB.put(d).catch(() => {}); await DB.putMeta({ id: d.id, name: d.name, pdf: d.pdf || d.id, updated: d.updated || Date.now(), local: true, owner: Sync.info && Sync.info.user }).catch(() => {}); }
+  return openDoc(d);
+}
 async function openBackup(buf) {
   try {
     const o = JSON.parse(new TextDecoder().decode(buf)); if (!/^(typepdf|paperwork)$/.test(o.format)) throw new Error("not a TypePDF backup");

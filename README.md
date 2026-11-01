@@ -12,8 +12,8 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Live sync with an account.** Sign in on two devices and open the same paper; typing and ink appear on the other device as you go. Offline changes are kept and sent when the connection returns.
 - **Picks up where you left off**: page, zoom, tool, colour and the answer you were typing in.
 - **Open PDFs any way you like**: choose a file, drag and drop, paste a file with ⌘/Ctrl+V, or paste a link.
-- **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top.
-- **Export for AI**: typed answers as compact JSON (labelled by question, optionally with the question wording) plus a small greyscale PDF holding only the hand-drawn areas. This is far cheaper for an AI model to mark than the whole paper.
+- **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top. The exported file also carries the original paper and your answers, so opening it in TypePDF again brings everything back editable.
+- **Export for AI**: typed answers as compact JSON (labelled by question, optionally with the question wording; on scanned / image-only papers the question numbers are read from the margin with built-in OCR) plus a small greyscale PDF holding only the hand-drawn areas. This is far cheaper for an AI model to mark than the whole paper.
 - **Fix anything detection missed** with the Boxes tool: add, move, resize, delete or retype any answer space, or re-detect a page.
 - **Flags**: mark any answer space to come back to (to draw it on the iPad, or because it's hard). Flagged spaces show a marker, are listed under ⚑ in the toolbar, and appear in the AI export.
 - **Fonts**: answers start in the font closest to the paper's own (detected from the PDF), and you can pick another per paper: Arial, Times, Calibri or Cambria style, a clear sans, an easy-to-read font, handwriting, or Courier style. The exported PDF uses the same font.
@@ -73,4 +73,4 @@ npm run dev        # http://localhost:8787
 
 ## Licence
 
-Apache-2.0. Bundled libraries keep their own licences (pdf.js and pdf-lib: Apache-2.0 / MIT; fontkit: MIT; bundled fonts: see `public/fonts/LICENSES.md`).
+Apache-2.0. Bundled libraries keep their own licences (pdf.js and pdf-lib: Apache-2.0 / MIT; fontkit: MIT; Tesseract.js and its English data in `public/lib/ocr`: Apache-2.0; bundled fonts: see `public/fonts/LICENSES.md`).
