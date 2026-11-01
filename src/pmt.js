@@ -88,13 +88,15 @@ function tagsFor(url, text, where) {
   const segs = path.split("/").filter(Boolean), all = (path + " " + text + " " + where).toLowerCase();
   let board = ""; for (const sg of segs) { board = boardOf(sg); if (board) break; }
   if (!board) for (const w of where.split(/[\s·-]+/)) { board = boardOf(w); if (board) break; }
-  const pseg = segs.find(sg => /^(paper|component|unit|module)[-\s]?\d/i.test(sg)) || (where.match(/\b(paper|component|unit|module)\s?\d{1,2}[a-z]?\b/i) || [])[0] || "";
-  const paper = pseg.replace(/[-_]+/g, " ").replace(/\s+/g, " ").replace(/\b\w/, c => c.toUpperCase()).trim();
+  const pseg = segs.find(sg => /^(as[-\s]?)?(paper|component|unit|module)[-\s]?\d/i.test(sg)) || (where.match(/\b(paper|component|unit|module)\s?\d{1,2}[a-z]?\b/i) || [])[0] || "";
+  const paper = pseg.replace(/^as[-\s]?/i, "").replace(/[-_]+/g, " ").replace(/\s+/g, " ").replace(/\b\w/, c => c.toUpperCase()).trim();
+  // AS or the full A level: PMT lists both on the same pages ("AS-Paper-1", ".../AS/...", "AS Paper 1")
+  const level = segs.some(sg => /^AS([-\s_]|$)|^AS-?level/i.test(sg) && /^AS/.test(sg)) || /(^|[\s·(\-])AS([\s)\-]|$)/.test(where + " " + text + " " + file) || /(^|[\s·\/-])as[\s_-](paper|level|component|unit|module)/i.test(where + " " + path) ? "AS" : "A level";
   const year = (file.match(/\b(19[89]\d|20[0-4]\d)\b/) || text.match(/\b(19[89]\d|20[0-4]\d)\b/) || [])[1] || "";
   const kind = /\bms\b|mark ?scheme/.test(all) ? "Mark scheme" : /\ber\b|examiner/.test(all) ? "Examiner report" : /\bqp\b|question paper/.test(all) ? "Question paper" : /insert|data ?sheet|formula/.test(all) ? "Insert" : "Other";
   const sm = (file + " " + text).toLowerCase().match(/\b(june|jun|may|november|nov|october|oct|january|jan|specimen|sample|sams?)\b/);
   const series = sm ? ({ jun: "June", june: "June", may: "June", nov: "November", november: "November", oct: "October", october: "October", jan: "January", january: "January" }[sm[1]] || "Specimen") : "";
-  return { board, paper, year, kind, series, file };
+  return { level, board, paper, year, kind, series, file };
 }
 
 // search (free text, and/or a chosen subject): every PDF found, each with its tags. The words in the search that
@@ -142,9 +144,9 @@ export async function pmtSearch(q, subjectHref) {
     if (seen.has(p.url)) continue; seen.add(p.url);
     const t = tagsFor(p.url, p.text, p.where);
     const label = p.text && p.text.length > 3 && !/^(download|pdf|here)$/i.test(p.text) ? p.text : t.file;
-    results.push({ url: p.url, title: label, subject: subj, ...t, name: [t.board, subj, t.paper, t.series, t.year, t.kind !== "Other" ? t.kind : ""].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 110) || t.file });
+    results.push({ url: p.url, title: label, subject: subj, ...t, name: [t.board, subj, t.level === "AS" ? "AS" : "", t.paper, t.series, t.year, t.kind !== "Other" ? t.kind : ""].filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 110) || t.file });
   }
-  const hints = { board: boardOf(Q.topic.find(w => BOARDS.includes(w)) || ""), year: Q.year, kind: { qp: "Question paper", ms: "Mark scheme", er: "Examiner report" }[Q.type] || "", series: { jun: "June", june: "June", summer: "June", may: "June", nov: "November", november: "November", oct: "October", october: "October", jan: "January", january: "January", winter: "January", specimen: "Specimen", sample: "Specimen", sam: "Specimen", sams: "Specimen" }[Q.series] || "", paper: Q.paper };
+  const hints = { level: /\bas\b/.test(Q.raw) ? "AS" : "", board: boardOf(Q.topic.find(w => BOARDS.includes(w)) || ""), year: Q.year, kind: { qp: "Question paper", ms: "Mark scheme", er: "Examiner report" }[Q.type] || "", series: { jun: "June", june: "June", summer: "June", may: "June", nov: "November", november: "November", oct: "October", october: "October", jan: "January", january: "January", winter: "January", specimen: "Specimen", sample: "Specimen", sam: "Specimen", sams: "Specimen" }[Q.series] || "", paper: Q.paper };
   return { subject: subj, subjectHref: subject.href, results, hints, partial: fetches >= 40 };
 }
 
