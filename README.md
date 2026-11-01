@@ -4,16 +4,18 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 
 ## Features
 
-- **Finds answer spaces automatically** from the page image and the text layer, so it works on most exam papers and on scans. Labelled lines ("Name …", "Description …") become separate spaces. Code answers (SQL, pseudocode, CSS) get a monospace font where Tab indents.
+- **Finds answer spaces automatically** from the page image and the text layer, so it works on most exam papers and on scans. Thin pale-grey answer lines are found wherever they fall on the pixel grid, graph paper and page frames are ignored, and short gaps in equations (including the mass and atomic numbers in nuclear equations) become answer spaces. Labelled lines ("Name …", "Description …") become separate spaces. Code answers (SQL, pseudocode, CSS) get a monospace font where Tab indents; a **</> Code** switch beside any answer (or just typing code) turns code mode on: no auto-capitals or corrections, Tab/Shift+Tab indent, and Enter keeps the indentation.
 - **Typed text sits on the printed lines.** Long answers shrink a little, then fit two lines per printed line, and only then extend the page with extra writing lines. The page is never split through printed text.
 - **Text, Pen and Smart tools**: Text only types, Pen only draws, Smart does both (tap to type, drag to draw). Laptops start on Text; iPads and devices where an Apple Pencil has been used start on Pen.
 - **Select and move drawings**: draw a box round any ink (mouse, finger or Pencil) and drag it anywhere, even to another page; Delete removes it and arrow keys nudge it. Undo works, and moves sync live.
-- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, three-finger tap redoes. Mirroring a laptop screen to an iPad also works.
+- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, and three-finger tap swaps between the pen and the eraser (on an iPad or wherever an Apple Pencil has been used; four fingers redo there, three fingers redo elsewhere). Mirroring a laptop screen to an iPad also works.
+- **Go to a question**: the Go to… button (or G, ⌘/Ctrl+G, or tapping the page number) jumps to any question or part by typing it (3, 4b, 4b(ii)) or picking it from a list that shows which questions are answered, started or flagged. It also jumps to a page (p5) or the next empty answer space (N). Typed and drawn answers both count.
+- **Read the question first**: Tab, and every jump, scrolls so the question's wording stays in view above the answer space instead of hiding it at the top of the screen.
 - **Live sync with an account.** Sign in on two devices and open the same paper; typing and ink appear on the other device as you go. Offline changes are kept and sent when the connection returns.
 - **Picks up where you left off**: page, zoom, tool, colour and the answer you were typing in.
 - **Open PDFs any way you like**: choose a file, drag and drop, paste a file with ⌘/Ctrl+V, or paste a link.
-- **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top.
-- **Export for AI**: typed answers as compact JSON (labelled by question, optionally with the question wording) plus a small greyscale PDF holding only the hand-drawn areas. This is far cheaper for an AI model to mark than the whole paper.
+- **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top. The exported file also carries the original paper and your answers, so opening it in TypePDF again brings everything back editable.
+- **Export for AI**: typed answers as compact JSON (labelled by question, optionally with the question wording; on scanned / image-only papers the question numbers are read from the margin with built-in OCR) plus a small greyscale PDF holding only the hand-drawn areas. This is far cheaper for an AI model to mark than the whole paper.
 - **Fix anything detection missed** with the Boxes tool: add, move, resize, delete or retype any answer space, or re-detect a page.
 - **Flags**: mark any answer space to come back to (to draw it on the iPad, or because it's hard). Flagged spaces show a marker, are listed under ⚑ in the toolbar, and appear in the AI export.
 - **Fonts**: answers start in the font closest to the paper's own (detected from the PDF), and you can pick another per paper: Arial, Times, Calibri or Cambria style, a clear sans, an easy-to-read font, handwriting, or Courier style. The exported PDF uses the same font.
@@ -21,9 +23,9 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Bin**: deleted papers stay in the bin for 30 days and can be restored.
 - **Storage**: each paper shows its size; a bar shows how much space you've used.
 - **Paste PDF button** for devices without a keyboard shortcut (e.g. an iPad).
-- Timer, "show answer spaces", Tab to jump between spaces, and backup files to move papers between devices without an account.
+- Timer, "show answer spaces", Tab to glide between spaces, and backup files to move papers between devices without an account.
 
-Signed out, everything stays in the browser and the PDF is never uploaded.
+Signed out, nothing is saved and the PDF is never uploaded.
 
 ## How it's built
 
@@ -32,11 +34,13 @@ Signed out, everything stays in the browser and the PDF is never uploaded.
   - `AuthStore` (Durable Object, SQLite): accounts (PBKDF2-hashed passwords), sessions, rate limits.
   - `UserStore` (one Durable Object per account, SQLite): papers, every synced change, and the PDFs (stored in 1 MB chunks). Live sync runs over hibernating WebSockets.
 
-### Accounts, admin and storage
+### Accounts, sharing, admin and storage
 
-- The **first account created is the admin**. The admin has no storage limit, sees how much of Cloudflare's free 5 GB everyone is using, sets each user's allowance (100 MB – 2 GB, 250 MB by default), can list and delete any user's papers, and can delete accounts. Users are told the admin can see their papers' names and sizes.
-- Other accounts get the default allowance until the admin changes it. Single PDFs are limited to 40 MB.
-- The free plan's 5 GB of Durable Object storage is per **Cloudflare account**, shared by every Worker in it (Pages static files, KV, D1 and R2 have their own separate allowances). Each PDF is stored in its own small Durable Object, because a single object is capped at 1 GB on the free plan.
+- **Accounts come from the GirolletServer hub.** "Sign in" sends people to the hub, which sends them back with a short-lived signed pass. Hub admins are TypePDF admins; anyone removed from the hub is signed out and their papers are deleted 30 days later. Set two variables on this Worker (Settings → Variables and Secrets): `HUB_URL` (text: the hub's address) and `HUB_SSO_SECRET` (secret: the same value as `TYPEPDF_SSO_SECRET` on the hub).
+- **Without an account** you can open, fill in and export a paper, but nothing is saved.
+- **Sharing:** the Share button gives each paper an edit code and a view-only code. Anyone can join from the home page with a code (guests just type a name). Everyone sees changes live; an answer space someone is typing in is locked for the others. The owner can see who joined, remove people, and make new codes.
+- Each account's allowance is set by an admin (100 MB – 2 GB, 250 MB by default); admins have no limit. Single PDFs are limited to 40 MB.
+- The free plan's 5 GB of Durable Object storage is per **Cloudflare account**, shared by every Worker in it. Each PDF is stored in its own small Durable Object, because a single object is capped at 1 GB on the free plan.
 
 ### Showing the real storage left (optional)
 
@@ -73,4 +77,4 @@ npm run dev        # http://localhost:8787
 
 ## Licence
 
-Apache-2.0. Bundled libraries keep their own licences (pdf.js and pdf-lib: Apache-2.0 / MIT; fontkit: MIT; bundled fonts: see `public/fonts/LICENSES.md`).
+Apache-2.0. Bundled libraries keep their own licences (pdf.js and pdf-lib: Apache-2.0 / MIT; fontkit: MIT; Tesseract.js and its English data in `public/lib/ocr`: Apache-2.0; bundled fonts: see `public/fonts/LICENSES.md`).

@@ -40,7 +40,9 @@ const DB = (() => {
   };
 })();
 // a copy of the document without DOM references or the PDF bytes
-function strip(d) { return JSON.parse(JSON.stringify({ ...d, bytes: undefined, pages: d.pages.map(P => P && ({ ...P, regions: P.regions.map(({ _el, ...rest }) => rest) })) })); }
+function strip(d) { return JSON.parse(JSON.stringify({ ...d, bytes: undefined, pages: d.pages.map(P => P && ({ ...P, regions: P.regions.map(cleanRegion) })) })); }
+// a region without the on-screen bits hung on it (its text box, outline, …): every key starting with "_"
+function cleanRegion(r) { const o = {}; for (const k in r) if (k[0] !== "_") o[k] = r[k]; return o; }
 async function sha(buf) { const h = await crypto.subtle.digest("SHA-256", buf); return [...new Uint8Array(h)].slice(0, 12).map(b => b.toString(16).padStart(2, "0")).join(""); }
 
 // ---------------- state ----------------
@@ -59,14 +61,19 @@ function scheduleSave() {
   clearTimeout(saveT);
   saveT = setTimeout(saveNow, 500);
 }
+// papers are only kept by signed-in people (in their account, with this browser as a cache);
+// without an account, or in someone else's shared paper, nothing is written to this device
+const canSave = () => !!(window.Sync && Sync.user && doc && !doc.shared);
+const hasWork = () => !!doc && (Object.keys(doc.text || {}).length > 0 || Object.values(doc.strokes || {}).some(a => a && a.length));
 async function saveNow() {
   clearTimeout(saveT);
   if (!doc) return;
   doc.updated = Date.now();
+  if (!canSave()) { const m = JSON.stringify(metaOf()); if (m !== doc._lastMeta) { doc._lastMeta = m; emit("meta"); } return; }
   try {
     await DB.put(doc);
     const old = await DB.getMeta(doc.id).catch(() => null) || {};
-    await DB.putMeta({ ...old, id: doc.id, ...metaOf(), pdf: doc.pdf, updated: doc.updated, opened: doc.opened, size: docSize(doc), local: true });
+    await DB.putMeta({ ...old, id: doc.id, ...metaOf(), pdf: doc.pdf, updated: doc.updated, opened: doc.opened, size: docSize(doc), local: true, owner: Sync.info && Sync.info.user });
   } catch (e) { toast("Couldn't save in this browser (storage full or blocked). Export a backup."); }
   const m = JSON.stringify(metaOf());
   if (m !== doc._lastMeta) { doc._lastMeta = m; emit("meta"); }
@@ -75,7 +82,8 @@ async function saveNow() {
 function emit(key) { if (window.Sync && doc) Sync.changed(key); }
 
 // ---------------- home ----------------
-async function showHome() {
+async function showHome(force) {
+  if (doc && !doc.shared && !canSave() && hasWork() && force !== true && !confirm("This paper isn't saved, because you're not signed in. Leave it anyway? (Export the PDF first if you want to keep it.)")) return;
   if (doc) { saveView(); await saveNow(); }
   if (window.Sync) Sync.detach();
   hideFlagFloat();
@@ -116,16 +124,22 @@ async function openLink(url) {
 async function openFile(f) {
   try {
     if ($("#pasteDlg").open) $("#pasteDlg").close();
+    if (doc && !doc.shared && !canSave() && hasWork() && !confirm("The paper you have open isn't saved, because you're not signed in. Open the new one anyway?")) return;
     if (doc) { saveView(); await saveNow(); }
     const buf = await f.arrayBuffer();
     const head = new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024)));
     if (head.trimStart().startsWith("{")) return openBackup(buf);
     if (!head.includes("%PDF")) { toast("That file isn't a PDF."); return; }
+    // a PDF exported from TypePDF: reopen the original paper with its answers, all still editable
+    const restored = await fromExport(buf);
+    if (restored) return openRestored(restored);
     const id = await sha(buf);
-    const existing = await DB.get(id).catch(() => null);
-    if (existing) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
+    const signed = !!(window.Sync && Sync.user);
+    const existing = signed ? await DB.get(id).catch(() => null) : null;
+    const em = existing ? await DB.getMeta(id).catch(() => null) : null;
+    if (existing && (!em || !em.owner || !Sync.info || em.owner === Sync.info.user)) { toast("You've opened this paper before, so your answers are back. Use Duplicate on the home screen for a fresh attempt."); return openDoc(existing); }
     const d = newDoc(id, id, f.name.replace(/\.pdf$/i, "") || "Untitled", buf);
-    await DB.putMeta({ id, name: d.name, pdf: id, folder: null, updated: Date.now(), created: Date.now(), local: true }).catch(() => {});
+    if (signed) await DB.putMeta({ id, name: d.name, pdf: id, folder: null, updated: Date.now(), created: Date.now(), local: true, owner: Sync.info && Sync.info.user }).catch(() => {});
     await openDoc(d, true);
   } catch (e) { console.error(e); busy(false); toast("Couldn't open that file: " + (e.message || e)); }
 }
@@ -150,6 +164,7 @@ function migrateDoc(d) {
   if (!d.pdf) d.pdf = d.id;
   for (const arr of Object.values(d.strokes)) for (const s of arr || []) { s.id ||= rid8(); s.t ||= "pen"; delete s._live; }
   for (const [k, f] of Object.entries(d.fit)) if (typeof f !== "object") delete d.fit[k];
+  for (const P of d.pages || []) if (P && P.regions) P.regions.forEach((r, i) => { P.regions[i] = cleanRegion(r); });   // drop anything saved by mistake
   d.v = 2;
   return d;
 }
@@ -162,7 +177,7 @@ async function openDoc(d, fresh = false) {
   undoS.length = redoS.length = 0; views = [];
   pdf = await pdfjsLib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)), isEvalSupported: false }).promise;
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
-  if (window.Sync && Sync.user) { busy(true, "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
+  if (window.Sync && (Sync.user || doc.shared)) { busy(true, doc.shared ? "Joining…" : "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
   const need = [];
   for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions) need.push(i);
   for (let k = 0; k < need.length; k++) {
@@ -180,7 +195,9 @@ async function openDoc(d, fresh = false) {
   const v = loadView();
   setZoom(v && v.zr ? fitWidthZoom() * v.zr : fitWidthZoom());
   updateCount(); timerInit(); renderFlags(); fontMenu();
+  sharedUI();
   if (v) restoreView(v);
+  requestAnimationFrame(pageIndicator);
   if (!v || !v.tv || !v.tool || v.tool === "boxes") { setTool(deviceDefaultTool()); toolAuto = true; }
   if (fresh || need.length) scheduleSave();
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
@@ -233,10 +250,174 @@ async function detectPage(i, prev) {
   await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
   let tc = null; try { tc = await page.getTextContent(); } catch (e) {}
   const res = Detect.page(c, vp, tc);
+  // a scanned / image-only page has no text to read question numbers from: read the left margin instead
+  if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
   res.regions.forEach((r, k) => r.id = `${i}:${k}`);
-  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, gaps: (prev && prev.gaps) || {} };
+  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, gaps: (prev && prev.gaps) || {} };
 }
+// ---- reading question numbers off image-only papers (Tesseract, bundled and only loaded when needed) ----
+let ocrWorkerP = null;
+function loadScript(src) { return new Promise((res, rej) => { const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("couldn't load " + src)); document.head.appendChild(s); }); }
+function ocrWorker() {
+  return ocrWorkerP || (ocrWorkerP = (async () => {
+    if (!window.Tesseract) await loadScript("lib/ocr/tesseract.min.js");
+    const base = new URL("lib/ocr/", location.href).href;
+    const w = await Tesseract.createWorker("eng", 1, { workerPath: base + "worker.min.js", corePath: base, langPath: base, gzip: true, logger: () => {} });
+    await w.setParameters({ tessedit_pageseg_mode: "11" });   // sparse text; a whitelist on mixed text merges words, so only the digit pass uses one
+    return w;
+  })().catch(e => { ocrWorkerP = null; throw e; }));
+}
+// canvas: the page rendered at Detect.S px/pt. Returns text items like the PDF text layer gives ({s, x, y = baseline, x1}, in pt)
+async function ocrMargin(canvas, vp) {
+  const S = Detect.S, W = Math.min(canvas.width, Math.round(170 * S));
+  const k = 1.5, c = document.createElement("canvas"); c.width = Math.round(W * k); c.height = Math.round(canvas.height * k);
+  const g = c.getContext("2d"); g.imageSmoothingQuality = "high"; g.drawImage(canvas, 0, 0, W, canvas.height, 0, 0, c.width, c.height);
+  const w = await ocrWorker();
+  const words = (data, f, dx = 0) => { const o = []; for (const b of data.blocks || []) for (const p of b.paragraphs || []) for (const l of p.lines || []) for (const wd of l.words || []) o.push({ t: (wd.text || "").trim(), c: wd.confidence, x: wd.bbox.x0 * f + dx, y: wd.bbox.y1 * f, x1: wd.bbox.x1 * f + dx }); return o; };
+  await w.setParameters({ tessedit_pageseg_mode: "11", tessedit_char_whitelist: "" });
+  const all = words((await w.recognize(c, {}, { blocks: true, text: false })).data, 1 / (S * k));
+  c.width = 0;
+  // second look at the column where question numbers sit: each blob of ink there is cut out with a white border
+  // and read as one number (a lone bold digit on a blank strip is easily missed otherwise)
+  const nums = [], x0 = 25, x1 = 68;
+  const px = canvas.getContext("2d").getImageData(Math.round(x0 * S), 0, Math.round((x1 - x0) * S), canvas.height), PW = px.width;
+  const rowInk = y => { let n = 0; for (let x = 0; x < PW; x++) if (px.data[(y * PW + x) * 4] < 120) n++; return n; };
+  const bands = []; let start = -1, gap = 0;
+  for (let y = 0; y < px.height; y++) { if (rowInk(y)) { if (start < 0) start = y; gap = 0; } else if (start >= 0 && ++gap > 3) { bands.push([start, y - gap]); start = -1; } }
+  await w.setParameters({ tessedit_pageseg_mode: "8", tessedit_char_whitelist: "0123456789" });
+  for (const [a, b] of bands) {
+    const h = (b - a + 1) / S; if (h < 5 || h > 30) continue;
+    let lo = PW, hi = -1; for (let y = a; y <= b; y++) for (let x = 0; x < PW; x++) if (px.data[(y * PW + x) * 4] < 120) { if (x < lo) lo = x; if (x > hi) hi = x; }
+    if (hi < 0 || (hi - lo) / S > 22) continue;                       // too wide to be a question number
+    const K = 4, pad = 24, cw = (hi - lo + 1) * K + pad * 2, ch = (b - a + 1) * K + pad * 2, c3 = document.createElement("canvas"); c3.width = cw; c3.height = ch;
+    const g3 = c3.getContext("2d"); g3.fillStyle = "#fff"; g3.fillRect(0, 0, cw, ch); g3.imageSmoothingQuality = "high";
+    g3.drawImage(canvas, Math.round(x0 * S) + lo, a, hi - lo + 1, b - a + 1, pad, pad, (hi - lo + 1) * K, (b - a + 1) * K);
+    const r = (await w.recognize(c3)).data; c3.width = 0;
+    const t = (r.text || "").trim();
+    if (/^\d{1,2}$/.test(t) && r.confidence >= 40) nums.push({ t, c: r.confidence, x: x0 + lo / S, y: (b + 1) / S, x1: x0 + (hi + 1) / S });
+  }
+  await w.setParameters({ tessedit_char_whitelist: "" });
+  const out = all.filter(o => o.t && o.c >= 60);
+  for (const n of nums) if (/^\d{1,2}$/.test(n.t) && n.c >= 50 && !out.some(o => Math.abs(o.y - n.y) < 4 && o.x < n.x1 + 2 && o.x1 > n.x - 2)) out.push(n);
+  return out.map(o => ({ s: o.t, x: +o.x.toFixed(1), y: +o.y.toFixed(1), x1: +o.x1.toFixed(1) })).sort((a, b) => a.y - b.y || a.x - b.x);
+}
+// papers opened before OCR existed: read their margins now (once), e.g. before an AI export
+async function ensureOcr() {
+  const need = doc.pages.map((P, p) => (!P.hasText && !P.ocr && !(P.items && P.items.length)) ? p : -1).filter(p => p >= 0);
+  if (!need.length) return;
+  try {
+    for (let k = 0; k < need.length; k++) {
+      const p = need[k]; busy(true, `Reading question numbers… page ${p + 1}`, k / need.length);
+      const page = await pdf.getPage(p + 1), vp2 = page.getViewport({ scale: Detect.S });   // the printed page as is (no added space)
+      const c = document.createElement("canvas"); c.width = Math.ceil(vp2.width); c.height = Math.ceil(vp2.height);
+      const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height); await page.render({ canvasContext: cx, viewport: vp2 }).promise;
+      doc.pages[p].items = await ocrMargin(c, page.getViewport({ scale: 1 })); doc.pages[p].ocr = true; c.width = 0;
+      emit("page:" + p);
+    }
+    scheduleSave();
+  } catch (e) { toast("Couldn't read the question numbers from this paper's images: " + (e.message || e), 5000); }
+  busy(false);
+}
+
+// ---------------- shared papers: joining, who's here, locks, and the owner's Share panel ----------------
+const PALETTE = ["#d1495b", "#2e86ab", "#e09f3e", "#6a4c93", "#3a7d44", "#c45ab3", "#1b998b", "#8f5c38"];
+const colourFor = id => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return PALETTE[h % PALETTE.length]; };
+async function joinShared(code, name) {
+  busy(true, "Joining…");
+  try {
+    const j = await Sync.share.join(code, name);
+    if (j.own) { busy(false); toast("That's your own paper, so it's opened from your library."); const m = (Home.entries || []).find(e => e.id === j.doc); return openStored(j.doc, m); }
+    await openSharedFrom(j);
+  } catch (e) { busy(false); toast(e.message, 5000); }
+}
+async function openSharedFrom(j) {
+  busy(true, "Opening the shared paper…");
+  if (doc) await showHome(true);
+  const bytes = await Sync.share.pdf(j.pass);
+  const d = newDoc(j.doc, j.pdf, j.name || "Shared paper", bytes);
+  d.shared = { pass: j.pass, role: j.role, pid: j.pid, me: j.me, exp: Date.now() + 11.5 * 3600e3 };
+  await openDoc(d);
+  toast(j.role === "view" ? `You've joined "${d.name}" to view it.` : `You've joined "${d.name}". Everyone's changes appear live.`, 4000);
+}
+function sharedUI() {
+  const sh = doc && doc.shared, view = sh && sh.role === "view";
+  $("#shareBtn").hidden = !(window.Sync && Sync.user && doc && !sh);
+  $("#editor").classList.toggle("viewonly", !!view);
+  $$(".tool,.sw,.sz,#undo,#redo,#fontSel,#timerBtn,#flagsBtn").forEach(b => { b.disabled = !!view; });
+  if (view) { setTool("text"); toast("View only: you can see changes live but not edit.", 3500); }
+}
+window.onPeople = (people, mySid) => {
+  if (!doc) return;
+  // the bar: everyone else who's here
+  const bar = $("#peopleBar"); bar.innerHTML = "";
+  const others = people.filter(p => p.sid !== mySid);
+  const seen = new Set();
+  for (const p of others) {
+    const key = p.pid === "owner" ? "owner" : p.pid; if (seen.has(key)) continue; seen.add(key);
+    const b = document.createElement("span"); b.className = "avatar"; b.style.background = colourFor(key);
+    const nm = p.pid === "owner" && !doc.shared ? "You (another device)" : p.name + (p.role === "view" ? " (viewing)" : p.role === "owner" ? " (owner)" : "");
+    b.textContent = (p.name || "?").trim().slice(0, 1).toUpperCase(); b.title = nm; bar.appendChild(b);
+  }
+  // boxes someone else is typing in: locked, outlined in their colour with their name
+  const held = new Map(others.filter(p => p.focus).map(p => [p.focus, p]));
+  doc.pages.forEach((P, pi) => P.regions.forEach(r => {
+    const ta = r._el; if (!ta) return;
+    const h = held.get(r.id), was = ta.classList.contains("locked");
+    if (h) {
+      const key = h.pid === "owner" ? "owner" : h.pid, name = h.pid === "owner" && !doc.shared ? "You (another device)" : h.name;
+      ta.classList.add("locked"); ta.readOnly = true; ta.dataset.lockedBy = name; ta.style.setProperty("--lock", colourFor(key));
+      let tag = r._lockTag; if (!tag) { tag = r._lockTag = document.createElement("span"); tag.className = "locktag"; }
+      if (tag.parentElement !== views[pi].el) views[pi].el.appendChild(tag);
+      tag.textContent = name + " is typing"; tag.style.background = colourFor(key); tag.style.left = ta.style.left; tag.style.top = (parseFloat(ta.style.top) - 16) + "px";
+      if (document.activeElement === ta) ta.blur();
+    } else if (was) {
+      ta.classList.remove("locked"); ta.readOnly = !!(doc.shared && doc.shared.role === "view"); delete ta.dataset.lockedBy; if (r._lockTag) { r._lockTag.remove(); r._lockTag = null; }
+    }
+  }));
+  if ($("#shareDlg").open) refreshPeople();
+};
+window.onLocked = (rid, by) => { const r = findRegion(rid); if (r && r._el && document.activeElement === r._el) r._el.blur(); toast(`${by} is typing there right now.`); };
+// the owner's Share panel
+const fmtCode = c => c ? c.slice(0, 4) + "-" + c.slice(4) : "…";
+async function openShare() {
+  $("#shareErr").textContent = ""; $("#codeEdit").textContent = $("#codeView").textContent = "…"; $("#shareDlg").showModal();
+  try { const c = await Sync.share.codes(doc.id); $("#codeEdit").textContent = fmtCode(c.edit); $("#codeView").textContent = fmtCode(c.view); } catch (e) { $("#shareErr").textContent = e.message; }
+  refreshPeople();
+}
+async function refreshPeople() {
+  const ul = $("#sharePeople");
+  try {
+    const { people } = await Sync.share.people(doc.id);
+    const list = people.filter(p => !p.removed);
+    ul.innerHTML = list.length ? "" : '<li class="note">Nobody has joined yet.</li>';
+    for (const p of list) {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="avatar"></span><span class="pname"></span><span class="pmeta"></span><button type="button" class="danger">Remove</button>`;
+      $(".avatar", li).style.background = colourFor(p.pid); $(".avatar", li).textContent = (p.name || "?").slice(0, 1).toUpperCase();
+      $(".pname", li).textContent = p.name + (p.email ? "" : " (guest)");
+      $(".pmeta", li).textContent = (p.role === "view" ? "View only" : "Can edit") + (p.online ? " · here now" : "");
+      $("button", li).onclick = async () => { try { await Sync.share.remove(doc.id, p.pid); toast(`${p.name} was removed.${p.email ? "" : " To stop them joining again, make new codes."}`, 5000); refreshPeople(); } catch (e) { $("#shareErr").textContent = e.message; } };
+      ul.appendChild(li);
+    }
+  } catch (e) { $("#shareErr").textContent = e.message; }
+}
+$("#shareBtn").onclick = openShare;
+$("#shareClose").onclick = () => $("#shareDlg").close();
+$("#shareReset").onclick = async () => {
+  if (!confirm("Make new codes? The current codes stop working for anyone new.")) return;
+  try { const c = await Sync.share.reset(doc.id); $("#codeEdit").textContent = fmtCode(c.edit); $("#codeView").textContent = fmtCode(c.view); toast("New codes made. The old ones no longer work."); } catch (e) { $("#shareErr").textContent = e.message; }
+};
+$$("#shareDlg [data-copy]").forEach(b => b.onclick = async () => { const t = $("#" + b.dataset.copy).textContent; try { await navigator.clipboard.writeText(t); toast("Code copied."); } catch (e) { fallbackCopy(t); } });
+$("#joinForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const code = $("#joinCode").value.toUpperCase().replace(/[^A-Z0-9]/g, ""), name = $("#joinName").value.trim();
+  if (code.length !== 8) { toast("Share codes are 8 letters and numbers, like ABCD-2345."); return; }
+  if (!(window.Sync && Sync.user) && !name) { toast("Type your name so the others know who you are."); $("#joinName").focus(); return; }
+  try { localStorage.setItem("joinName", name); } catch (err) {}
+  joinShared(code, name);
+});
+try { $("#joinName").value = localStorage.getItem("joinName") || ""; } catch (e) {}
 
 // ---------------- corner handles on the answer you're typing in: drag to resize on the go ----------------
 let handFor = null;   // {p, r}
@@ -254,7 +435,7 @@ function placeHandles() {
   for (const h of hs) {
     if (h.parentElement !== v.el) v.el.appendChild(h);
     const c = h.dataset.c; h.hidden = false;
-    h.style.left = (c[1] === "w" ? L : L + W) + "px";
+    h.style.left = (c[1] === "w" ? L + (c === "nw" && ta.classList.contains("notch") ? r._notch || 0 : 0) : L + W) + "px";
     h.style.top = (c[0] === "n" ? T : T + H) + "px";
   }
 }
@@ -383,25 +564,42 @@ function makeField(p, r) {
   const v = views[p];
   const ta = document.createElement("textarea");
   ta.className = "ans " + r.kind + (r.code ? " code" : "");
-  ta.spellcheck = !r.code; ta.autocapitalize = r.code ? "off" : "sentences"; ta.setAttribute("autocorrect", r.code ? "off" : "on");
+  codeAttrs(ta, r.code);
   ta.dataset.rid = r.id; ta.value = doc.text[r.id] || "";
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
-  ta.addEventListener("input", () => { if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
+  ta.addEventListener("input", () => { if (!r.code && !r.codeSet && looksLikeCode(ta.value)) { setCode(p, r, true, false); toast("This looks like code, so this space is now in code mode: no capitals or corrections, Tab indents. Press </> Code to switch back.", 5000); } if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
-  ta.addEventListener("focus", () => { showFlagFloat(p, r); showHandles(p, r); });
-  ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150));
+  ta.addEventListener("focus", () => {
+    if (ta.classList.contains("locked")) { const by = ta.dataset.lockedBy || "Someone"; ta.blur(); toast(`${by} is typing here right now.`); return; }
+    showFlagFloat(p, r); showHandles(p, r); if (window.Sync) Sync.focus(r.id);
+  });
+  ta.addEventListener("blur", () => { if (window.Sync) Sync.focus(null); setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150); });
+  if (doc.shared && doc.shared.role === "view") { ta.readOnly = true; ta.tabIndex = -1; }
   v.el.insertBefore(ta, v.ink);
   r._el = ta;
 }
 
 function fieldKeys(e, p, r, ta) {
   if (e.key === "Escape") { ta.blur(); return; }
+  if (r.code && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+    // a new line keeps the indentation, and goes one step further in after ":" "{" "then" or "do"
+    e.preventDefault();
+    const s = ta.selectionStart, v = ta.value, ls = v.lastIndexOf("\n", s - 1) + 1, line = v.slice(ls, s);
+    let ind = (line.match(/^[ \t]*/) || [""])[0];
+    if (/(:|\{|\bthen|\bdo)\s*$/i.test(line)) ind += "    ";
+    ta.setRangeText("\n" + ind, s, ta.selectionEnd, "end"); ta.dispatchEvent(new Event("input")); return;
+  }
   if (e.key === "Tab") {
     if (r.code && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       const s = ta.selectionStart, en = ta.selectionEnd, v = ta.value;
       const ls = v.lastIndexOf("\n", s - 1) + 1;
-      if (e.shiftKey) { const m = v.slice(ls).match(/^ {1,4}/); if (m) ta.setRangeText("", ls, ls + m[0].length, "preserve"); }
+      if (en > s && v.slice(s, en).includes("\n")) {
+        // several lines selected: indent or outdent every one of them
+        const le = v.indexOf("\n", en - 1) < 0 ? v.length : v.indexOf("\n", en - (v[en - 1] === "\n" ? 1 : 0));
+        const lines = v.slice(ls, le).split("\n").map(l => e.shiftKey ? l.replace(/^ {1,4}|^\t/, "") : "    " + l);
+        const t = lines.join("\n"); ta.setRangeText(t, ls, le, "select");
+      } else if (e.shiftKey) { const m = v.slice(ls).match(/^ {1,4}/); if (m) ta.setRangeText("", ls, ls + m[0].length, "preserve"); }
       else ta.setRangeText("    ", s, en, "end");
       ta.dispatchEvent(new Event("input")); return;
     }
@@ -409,15 +607,56 @@ function fieldKeys(e, p, r, ta) {
   }
   if (e.key === "Enter" && r.kind === "cell" && !e.shiftKey) { e.preventDefault(); focusNext(r, 1); }
 }
+// ---- code mode: monospace, no auto-capitals, autocorrect or spellcheck, Tab indents ----
+function codeAttrs(ta, on) {
+  ta.classList.toggle("code", !!on);
+  ta.spellcheck = !on; ta.autocapitalize = on ? "off" : "sentences";
+  ta.setAttribute("autocorrect", on ? "off" : "on"); ta.setAttribute("autocomplete", "off");
+}
+function setCode(p, r, on, byHand) {
+  r.code = !!on; if (byHand) r.codeSet = true;
+  codeAttrs(r._el, r.code);
+  delete doc.fit[r.id]; queueFit(p, r); pageChanged(p); placeFlagFloat();
+  if (boxMode) updateSelTools();
+}
+// typed text that is clearly code: a line that is plainly a statement, or several code-looking lines
+function looksLikeCode(v) {
+  if (!v || v.length < 6) return false;
+  const lines = v.split("\n").filter(l => l.trim());
+  const strong = /^\s*(def |function |procedure |for \w+ ?(=|in )|while .*[<>=!]|if .*(==|!=|<=|>=|[<>]|\bthen\b)|else:|elif |endif|endwhile|next \w|print\(|return\b|var |let |const |public |private |int \w+ ?=|string \w+ ?=|SELECT\b.+\bFROM\b|INSERT INTO|UPDATE \w+ SET|DELETE FROM|CREATE TABLE|<\/?[a-z]+[ >])/;
+  if (lines.some(l => strong.test(l))) return true;
+  const codeish = /([{};]\s*$|^\s{2,}\S|\w+\[\w*\]|\w+\([^)]*\)\s*$|^\s*\w+\s*(=|\+=|-=|\+\+)\s*\S|==|!=|<=|>=|\/\/)/;
+  return lines.length >= 2 && lines.filter(l => codeish.test(l)).length >= 2;
+}
 function orderedRegions() { const out = []; doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
 function focusNext(r, dir) {
   const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
   const ta = n[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L);
   // glide to the next space (rather than jumping) so you can see everything you pass on the way
-  const host = $("#pages"), hb = host.getBoundingClientRect(), tb = ta.getBoundingClientRect();
-  const target = clamp(host.scrollTop + tb.top - hb.top - host.clientHeight * 0.35, 0, host.scrollHeight - host.clientHeight);
+  const host = $("#pages"), target = readableScroll(n[0], n[1]);
   if (dir > 0) glideTo(host, target);                 // Tab glides forward
   else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }   // Shift+Tab jumps straight back
+}
+// where to scroll so an answer space can be typed in with its question still readable above it: the printed
+// wording between the previous answer space and this one starts near the top of the screen, and the box sits
+// below it (but never so low that the box itself is pushed off the bottom)
+function questionTop(p, r) {
+  const P = doc.pages[p];
+  const prev = P.regions.filter(q => q !== r && q.y1 <= r.y0 + 1 && q.x0 < r.x1 && q.x1 > r.x0).reduce((m, q) => Math.max(m, q.y1), 0);
+  const its = (P.items || []).filter(it => it.y > prev + 1 && it.y < r.y0 + 4 && it.s && it.s.trim() && !/^\.+$/.test(it.s.trim()));
+  let top = its.length ? Math.min(...its.map(it => it.y)) - 12 : r.y0 - 40;   // item y is the baseline
+  return clamp(top, Math.max(0, r.y0 - 260), r.y0 - 20);
+}
+// a page's top, in the scroll position of the pages pane
+function pageTop(p) { const host = $("#pages"); return host.scrollTop + views[p].el.getBoundingClientRect().top - host.getBoundingClientRect().top; }
+function readableScroll(p, r) {
+  const host = $("#pages"), H = host.clientHeight, base = pageTop(p);
+  const boxTop = base + disp(p, r.y0) * zoom, boxH = (regionRect(p, r).y1 - regionRect(p, r).y0) * zoom;
+  let t = base + disp(p, questionTop(p, r)) * zoom - H * 0.12;           // the question near the top
+  t = Math.max(t, boxTop - H * 0.6);                                      // the box no lower than 60% down
+  t = Math.max(t, boxTop + Math.min(boxH, H * 0.3) - H * 0.92);           // at least a bit of the box is on screen
+  t = Math.min(t, boxTop - H * 0.25);                                     // and always well below the top edge
+  return clamp(t, 0, host.scrollHeight - H);
 }
 let glideRaf = 0;
 function glideTo(host, target) {
@@ -466,6 +705,24 @@ function applyField(p, r, f) {
   } else {
     ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = "0";
   }
+  shapeField(r, f);
+}
+// an answer whose first line starts further right (after a label like "Difference 1") gets a notched outline that
+// follows where text can actually go: clipped background plus a matching outline drawn beside it
+function shapeField(r, f) {
+  const ta = r._el, z = zoom, ind = r.kind === "lines" ? (r.indent || 0) * z : 0;
+  let sv = r._shape;
+  if (ind < 2) { ta.classList.remove("notch"); ta.style.clipPath = ""; if (sv) sv.style.display = "none"; return; }
+  const W = parseFloat(ta.style.width), H = parseFloat(ta.style.height), step = Math.min(H, f.L * z), x = ind + 1 * z;
+  const pts = [[x, 0], [W, 0], [W, H], [0, H], [0, step], [x, step]];
+  ta.classList.add("notch");
+  ta.style.clipPath = "polygon(" + pts.map(q => q[0].toFixed(1) + "px " + q[1].toFixed(1) + "px").join(",") + ")";
+  if (!sv) { sv = document.createElementNS("http://www.w3.org/2000/svg", "svg"); sv.setAttribute("class", "ansshape"); sv.innerHTML = "<path/>"; r._shape = sv; }
+  if (sv.previousSibling !== ta) ta.after(sv);
+  Object.assign(sv.style, { display: "", left: ta.style.left, top: ta.style.top, width: W + "px", height: H + "px" });
+  sv.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  sv.firstChild.setAttribute("d", "M" + pts.map(q => (q[0] + (q[0] >= W ? -0.5 : 0.5)).toFixed(1) + " " + (q[1] + (q[1] >= H ? -0.5 : 0.5)).toFixed(1)).join(" L") + " Z");
+  r._notch = x;
 }
 function contentH(r) { const ta = r._el; const prev = ta.style.height; ta.style.height = "1px"; const h = ta.scrollHeight; ta.style.height = prev; return h / zoom; }
 function availFor(r, f) {
@@ -629,7 +886,8 @@ function showHover(p, q) {
   Object.assign(hoverDot.style, { display: "block", width: d + "px", height: d + "px", left: q[0] * zoom - d / 2 + "px", top: q[1] * zoom - d / 2 + "px", background: er ? "transparent" : hl ? "rgba(242,210,27,.45)" : colour });
 }
 function hideHover() { if (hoverDot) hoverDot.style.display = "none"; }
-// ---- two-finger tap undoes, three-finger tap redoes (fingers still scroll and pinch as normal) ----
+// ---- two-finger tap undoes; three-finger tap redoes, or on an iPad / with an Apple Pencil swaps pen ⇄ eraser
+// (four fingers redo there). Fingers still scroll and pinch as normal ----
 const multiTouch = { max: 0, t0: 0, moved: false, start: null, last: 0 };
 $("#pages").addEventListener("touchstart", e => {
   const fingers = [...e.touches].filter(t => t.touchType !== "stylus");
@@ -650,8 +908,27 @@ $("#pages").addEventListener("touchend", e => {
   multiTouch.start = null; multiTouch.max = 0;
   if (!quick || multiTouch.moved || boxMode || !doc) return;
   if (n === 2) { undo(); toast("Undo", 900); }
-  else if (n === 3) { redo(); toast("Redo", 900); }
+  else if (n === 3 && penDevice()) swapEraser();               // iPad / Apple Pencil: three fingers swap pen ⇄ eraser
+  else if (n === 3 || (n === 4 && penDevice())) { redo(); toast("Redo", 900); }
 }, { passive: true });
+// an iPad, or any device where an Apple Pencil has been used
+function penDevice() {
+  let pen = false; try { pen = localStorage.getItem("hasPen") === "1"; } catch (e) {}
+  return pen || /iPad/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+}
+let drawTool = "pen";   // the tool the eraser hands back to
+function swapEraser() {
+  if (doc.shared && doc.shared.role === "view") return;
+  toolAuto = false;
+  if (tool === "eraser") setTool(drawTool);
+  else { if (tool === "pen" || tool === "hl" || tool === "smart") drawTool = tool; setTool("eraser"); }
+  toolFlash(tool === "eraser" ? "Eraser" : tool === "hl" ? "Highlighter" : tool === "smart" ? "Smart" : "Pen");
+}
+let toolFlashT;
+function toolFlash(txt) {
+  let el = $(".toolflash"); if (!el) { el = document.createElement("div"); el.className = "toolflash"; el.setAttribute("role", "status"); document.body.appendChild(el); }
+  el.textContent = txt; el.classList.add("show"); clearTimeout(toolFlashT); toolFlashT = setTimeout(() => el.classList.remove("show"), 700);
+}
 // ---- light pressure: the pen's width varies a little (about ±12%) with how hard you press ----
 function strokePressure(s) { return s._live ? s._pr : s.pr; }
 // the same smoothed curve as tracePath, cut into pieces with a width each, merged into runs of equal width
@@ -685,6 +962,7 @@ function bindInk(p, v) {
   const pos = e => { const b = v.ink.getBoundingClientRect(); return [(e.clientX - b.left) / zoom, (e.clientY - b.top) / zoom]; };
   v.ink.addEventListener("pointerdown", e => {
     if (boxMode) return;
+    if (doc.shared && doc.shared.role === "view") return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (e.pointerType === "pen") sawPen();
     if (tool === "select") { selDown(p, e); return; }
@@ -778,6 +1056,37 @@ function bindInk(p, v) {
     doc.strokes[p].push(s.stroke);
   }
 }
+// ---- a text cursor the height of the text, not of the whole ruled line ----
+// browsers draw a textarea's caret as tall as the line spacing, which on answer lines is far taller than the
+// writing. So the real caret is made invisible and this one is drawn instead, measured with a hidden copy of the text.
+const caretEl = document.createElement("div"); caretEl.className = "tcaret"; caretEl.hidden = true;
+let caretKey = "";
+function caretRect(ta, idx) {
+  const cs = getComputedStyle(ta), m = document.createElement("div");
+  for (const p of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "wordSpacing", "lineHeight", "textIndent", "textAlign", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "boxSizing", "fontKerning", "fontFeatureSettings"]) m.style[p] = cs[p];
+  Object.assign(m.style, { position: "absolute", visibility: "hidden", left: ta.offsetLeft + "px", top: ta.offsetTop - ta.scrollTop + "px", width: ta.offsetWidth + "px", margin: "0", border: "0", whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: cs.wordBreak });
+  const v = ta.value, mk = document.createElement("span");
+  m.appendChild(document.createTextNode(v.slice(0, idx))); mk.textContent = "\u200b"; m.appendChild(mk); m.appendChild(document.createTextNode(v.slice(idx)));
+  ta.parentElement.appendChild(m);
+  const pr = ta.parentElement.getBoundingClientRect(), k = mk.getBoundingClientRect();
+  m.remove();
+  return { x: k.left - pr.left, y: k.top - pr.top, h: k.height };
+}
+function updateCaret() {
+  const ta = document.activeElement;
+  if (!ta || !ta.classList || !ta.classList.contains("ans") || ta.selectionStart !== ta.selectionEnd || boxMode) { if (!caretEl.hidden) caretEl.hidden = true; caretKey = ""; return; }
+  const key = [ta.dataset.rid, ta.selectionStart, ta.value, ta.style.fontSize, ta.style.width, ta.style.left, ta.style.top, ta.style.textIndent, ta.scrollTop, zoom].join("|");
+  if (key === caretKey && !caretEl.hidden) return;
+  caretKey = key;
+  const c = caretRect(ta, ta.selectionStart), fs = parseFloat(getComputedStyle(ta).fontSize) || 12;
+  const h = Math.max(fs * 1.15, Math.min(c.h, fs * 1.4));
+  if (caretEl.parentElement !== ta.parentElement) ta.parentElement.appendChild(caretEl);
+  Object.assign(caretEl.style, { left: c.x - 0.5 + "px", top: c.y + (c.h - h) / 2 + "px", height: h + "px", width: Math.max(1.5, fs * 0.08) + "px", background: getComputedStyle(ta).color });
+  caretEl.hidden = false;
+  caretEl.classList.remove("blink"); void caretEl.offsetWidth; caretEl.classList.add("blink");   // solid while moving, then blinks
+}
+(function caretLoop() { try { updateCaret(); } catch (e) {} requestAnimationFrame(caretLoop); })();
+
 // ---- placing the text cursor where you click, even though the ink layer sits on top ----
 let clickRun = null;
 function inRect(el, x, y) { const r = el.getBoundingClientRect(); return x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2; }
@@ -844,6 +1153,10 @@ function placeInkSel() {
     const del = document.createElement("button"); del.type = "button"; del.className = "seldel"; del.textContent = "Delete"; del.title = "Delete the selected drawing (Delete key)";
     del.addEventListener("pointerdown", e => e.stopPropagation()); del.onclick = e => { e.stopPropagation(); deleteInkSel(); };
     el.appendChild(del);
+    for (const c of ["nw", "ne", "sw", "se"]) {
+      const h = document.createElement("div"); h.className = "selh " + c; h.dataset.c = c; h.title = "Drag to resize the drawing";
+      h.addEventListener("pointerdown", e => selScaleDown(e, c)); el.appendChild(h);
+    }
   }
   if (el.parentElement !== v.el) v.el.appendChild(el);
   el.style.left = (b.x0 - SEL_PAD) * zoom + "px"; el.style.top = (b.y0 - SEL_PAD) * zoom + "px";
@@ -878,10 +1191,41 @@ function applyMove(a, which) {
   for (const it of a.items) {
     const i = S.findIndex(s => s.id === it.id); if (i < 0) continue;     // gone (e.g. deleted on another device)
     const s = S[i]; s.pts = it[which];
+    if (it.w) s.w = it.w[which === "after" ? 1 : 0];             // resized: line thickness scales too
     if (src !== dst) { S.splice(i, 1); D.push(s); emit(`s:${src}:${s.id}`); }
     emit(`s:${dst}:${s.id}`);
   }
   drawInk(src); if (dst !== src) drawInk(dst); scheduleSave();
+}
+// ---- resizing the selection from a corner: scales evenly about the opposite corner, line thickness included,
+// so the writing looks exactly the same, just bigger or smaller ----
+function scaleFactor(op, cx, cy) {
+  const v = views[op.p], r = v.ink.getBoundingClientRect(), q = [(cx - r.left) / zoom, (cy - r.top) / zoom];
+  const d0 = [op.corner[0] - op.anchor[0], op.corner[1] - op.anchor[1]], d = [q[0] - op.anchor[0], q[1] - op.anchor[1]];
+  let k = (d[0] * d0[0] + d[1] * d0[1]) / Math.max(1e-6, d0[0] * d0[0] + d0[1] * d0[1]);
+  // keep it a sensible size and on the page
+  const b = op.box, P = doc.pages[op.p], Hd = pageDispH(op.p), A = op.anchor;
+  const lim = [];
+  if (b.x1 > A[0] + 0.01) lim.push((P.w - A[0]) / (b.x1 - A[0])); if (b.x0 < A[0] - 0.01) lim.push(A[0] / (A[0] - b.x0));
+  if (b.y1 > A[1] + 0.01) lim.push((Hd - A[1]) / (b.y1 - A[1])); if (b.y0 < A[1] - 0.01) lim.push(A[1] / (A[1] - b.y0));
+  const minK = Math.max(0.15, 4 / Math.max(b.x1 - b.x0, b.y1 - b.y0, 1));
+  return clamp(k, minK, Math.min(8, ...lim));
+}
+function selScaleDown(e, c) {
+  if (!inkSel || !inkSel.box || selOp) return;
+  e.preventDefault(); e.stopPropagation();
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+  const b = inkSel.box, p = inkSel.p;
+  const corner = [c[1] === "w" ? b.x0 : b.x1, c[0] === "n" ? b.y0 : b.y1], anchor = [c[1] === "w" ? b.x1 : b.x0, c[0] === "n" ? b.y1 : b.y0];
+  selOp = { kind: "scale", id: e.pointerId, p, cx: e.clientX, cy: e.clientY, x: e.clientX, y: e.clientY, corner, anchor, box: { ...b }, moved: false, k: 1, list: selStrokes().map(s => ({ s, pts: dispPts(p, s) })) };
+  window.addEventListener("pointermove", selMove); window.addEventListener("pointerup", selUp); window.addEventListener("pointercancel", cancelSelOp);
+  selOp.raf = requestAnimationFrame(selTick);
+}
+function scaleStrokes(p, ids, A, k) {
+  const list = (doc.strokes[p] || []).filter(s => ids.has(s.id)); if (!list.length) return;
+  const items = list.map(s => ({ id: s.id, before: s.pts, after: dispPts(p, s).map(pt => toAnchor(p, A[0] + (pt[0] - A[0]) * k, A[1] + (pt[1] - A[1]) * k)), w: [s.w, Math.round(s.w * k * 100) / 100] }));
+  const a = { t: "move", from: p, to: p, items };
+  pushUndo(a); applyMove(a, "after");
 }
 function nudgeInkSel(dx, dy) {
   if (!inkSel || !inkSel.box) return; const p = inkSel.p, b = inkSel.box, P = doc.pages[p];
@@ -919,7 +1263,7 @@ function selDown(p, e) {
   window.addEventListener("pointermove", selMove); window.addEventListener("pointerup", selUp); window.addEventListener("pointercancel", cancelSelOp);
   selOp.raf = requestAnimationFrame(selTick);
 }
-function selMove(e) { if (!selOp || e.pointerId !== selOp.id) return; selOp.cx = e.clientX; selOp.cy = e.clientY; if (selOp.kind === "move" && !selOp.moved && Math.hypot(e.clientX - selOp.x, e.clientY - selOp.y) > 3) { selOp.moved = true; inkSel.moving = true; drawInk(selOp.p); const el = $(".selbox"); if (el) el.style.display = "none"; } }
+function selMove(e) { if (!selOp || e.pointerId !== selOp.id) return; selOp.cx = e.clientX; selOp.cy = e.clientY; if ((selOp.kind === "move" || selOp.kind === "scale") && !selOp.moved && Math.hypot(e.clientX - selOp.x, e.clientY - selOp.y) > 3) { selOp.moved = true; inkSel.moving = true; drawInk(selOp.p); const el = $(".selbox"); if (el) el.style.display = "none"; } }
 // every frame: scroll when near the top/bottom edge, then redraw the box or the dragged drawings
 function selTick() {
   if (!selOp) return;
@@ -931,6 +1275,17 @@ function selTick() {
     const q = [clamp((selOp.cx - b.left) / zoom, 0, P.w), clamp((selOp.cy - b.top) / zoom, 0, pageDispH(selOp.p))], s0 = selOp.start;
     selOp.end = q;
     Object.assign(selOp.el.style, { left: Math.min(s0[0], q[0]) * zoom + "px", top: Math.min(s0[1], q[1]) * zoom + "px", width: Math.abs(q[0] - s0[0]) * zoom + "px", height: Math.abs(q[1] - s0[1]) * zoom + "px" });
+  } else if (selOp.kind === "scale") {
+    if (selOp.moved) {
+      const k = selOp.k = scaleFactor(selOp, selOp.cx, selOp.cy), A = selOp.anchor, v = views[selOp.p], r = v.ink.getBoundingClientRect(), ctx = overlayCtx();
+      ctx.save(); ctx.translate(r.left, r.top);
+      const tp = pts => pts.map(q => [A[0] + (q[0] - A[0]) * k, A[1] + (q[1] - A[1]) * k]);
+      for (const pass of ["hl", "pen"]) for (const it of selOp.list) if ((it.s.t === "hl") === (pass === "hl")) drawStroke(ctx, { ...it.s, w: it.s.w * k }, tp(it.pts), zoom);
+      const b = selOp.box, x0 = A[0] + (b.x0 - A[0]) * k, x1 = A[0] + (b.x1 - A[0]) * k, y0 = A[1] + (b.y0 - A[1]) * k, y1 = A[1] + (b.y1 - A[1]) * k;
+      ctx.strokeStyle = "#2f7d74"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+      ctx.strokeRect((Math.min(x0, x1) - SEL_PAD) * zoom, (Math.min(y0, y1) - SEL_PAD) * zoom, (Math.abs(x1 - x0) + SEL_PAD * 2) * zoom, (Math.abs(y1 - y0) + SEL_PAD * 2) * zoom);
+      ctx.restore();
+    }
   } else if (selOp.moved) {
     const ctx = overlayCtx(), sb = inkSel.box, w = sb.x1 - sb.x0, h = sb.y1 - sb.y0;
     const left = selOp.cx - selOp.grab[0] * zoom, top = selOp.cy - selOp.grab[1] * zoom;   // where the box's top-left is on screen
@@ -964,6 +1319,12 @@ function selUp(e) {
     inkSel = { p: op.p, ids }; placeInkSel();
     return;
   }
+  if (op.kind === "scale") {
+    if (!inkSel) return;
+    inkSel.moving = false;
+    if (op.moved && Math.abs(op.k - 1) > 0.005) { const ids = new Set(inkSel.ids); scaleStrokes(op.p, ids, op.anchor, op.k); inkSel = { p: op.p, ids }; }
+    drawInk(op.p); placeInkSel(); return;
+  }
   // move
   if (!inkSel) return;
   inkSel.moving = false;
@@ -982,6 +1343,7 @@ function setTool(t) {
   if (t === "boxes") { setBoxMode(!boxMode); return; }
   if (boxMode) setBoxMode(false);
   tool = t; $$(".tool").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
+  if (t === "pen" || t === "hl" || t === "smart") drawTool = t;
   views.forEach(toolClass);
   if (t !== "select") clearInkSel();
   if (t === "select") { const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); hideHover(); }
@@ -1014,9 +1376,12 @@ document.addEventListener("keydown", e => {
   if (mod && e.key.toLowerCase() === "y" && !typing) { e.preventDefault(); redo(); return; }
   if (mod && (e.key === "=" || e.key === "+" || e.key === "-")) { e.preventDefault(); setZoom(zoom * (e.key === "-" ? 1 / 1.2 : 1.2)); return; }
   if (mod && e.key === "0") { e.preventDefault(); setZoom(fitWidthZoom()); return; }
+  if (mod && e.key.toLowerCase() === "g") { e.preventDefault(); openJump(); return; }
   if (mod && e.key.toLowerCase() === "s") { e.preventDefault(); saveNow(); toast(window.Sync && Sync.user ? "Saved and synced to your account." : "Saved in this browser. Sign in to sync it to your other devices."); return; }
   if (typing || mod || e.altKey) return;
   const k = e.key.toLowerCase();
+  if (k === "g" && !boxMode) { e.preventDefault(); openJump(); return; }
+  if (k === "n" && !boxMode) { e.preventDefault(); nextEmpty(); return; }
   if (e.key.length === 1 && /[\p{L}\p{N}]/u.test(e.key) && !boxMode) { toast("Click or tap an answer space first, then type."); return; }
   if (k === "tab") { e.preventDefault(); const all = orderedRegions(); const first = all.find(([p, r]) => !doc.text[r.id]) || all[0]; if (first) focusNext(first[1], 0); }
   else if ((k === "delete" || k === "backspace") && boxMode && sel) { e.preventDefault(); deleteSel(); }
@@ -1079,11 +1444,11 @@ $("#redetect").onclick = async () => {
   rebuildPageFields(p); pageChanged(p); busy(false); toast(`Page ${p + 1}: ${fresh.regions.length} answer spaces.`);
 };
 function pageChanged(p) { emit("page:" + p); scheduleSave(); }
-function rebuildPageFields(p) { $$(".ans", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
-function rebuildField(p, r) { if (r._el) r._el.remove(); makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
+function rebuildPageFields(p) { $$(".ans,.ansshape", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
+function rebuildField(p, r) { if (r._el) r._el.remove(); if (r._shape) { r._shape.remove(); r._shape = null; } makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
 function deleteSel() {
   if (!sel) return; const { p, r } = sel; const P = doc.pages[p];
-  setGap(p, r, 0); P.regions.splice(P.regions.indexOf(r), 1); if (r._el) r._el.remove();
+  setGap(p, r, 0); P.regions.splice(P.regions.indexOf(r), 1); if (r._el) r._el.remove(); if (r._shape) r._shape.remove();
   if (doc.text[r.id]) toast("Box deleted. Its typed text was removed too.");
   delete doc.text[r.id]; delete doc.fit[r.id]; emit("text:" + r.id); sel = null; updateSelTools(); layoutPage(p); updateCount(); pageChanged(p);
 }
@@ -1237,13 +1602,16 @@ async function exportPDF() {
     const okS = new Set(sans.getCharacterSet()), okM = new Set(mono.getCharacterSet());
     const clean = (t, set) => [...t].map(ch => ch === "\n" || set.has(ch.codePointAt(0)) ? ch : (ch === "\t" ? "    " : "?")).join("");
     const hex = c => { const n = parseInt(c.slice(1), 16); return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
+    // copy every page in one go: PDFs whose pages share one bundle of images/fonts then keep sharing it,
+    // instead of every page getting its own copy of everything (a 25-page scan once came out at 134 MB)
+    const copied = await out.copyPages(srcDoc, srcDoc.getPageIndices());
     for (let p = 0; p < doc.pages.length; p++) {
       busy(true, `Building your PDF… page ${p + 1} of ${doc.pages.length}`, p / doc.pages.length);
       const P = doc.pages[p], srcPage = srcDoc.getPage(p), cb = srcPage.getCropBox(), rot = (srcPage.getRotation().angle % 360 + 360) % 360;
       const G = totalGap(p), gaps = gapList(p);
       let page, tx, ty;
       if (!G && rot === 0) {
-        const [cp] = await out.copyPages(srcDoc, [p]); page = out.addPage(cp);
+        page = out.addPage(copied[p]);
         tx = x => cb.x + x; ty = y => cb.y + cb.height - y;
       } else {
         const newH = P.h + G; page = out.addPage([P.w, newH]); tx = x => x; ty = y => newH - y;
@@ -1252,7 +1620,7 @@ async function exportPDF() {
           let sTop = 0, dTop = 0;
           for (const b of bands) {
             const hS = b.at - sTop;
-            if (hS > 0.5) { const emb = await out.embedPage(srcPage, { left: cb.x, right: cb.x + cb.width, top: cb.y + cb.height - sTop, bottom: cb.y + cb.height - b.at }); page.drawPage(emb, { x: 0, y: newH - (dTop + hS), width: P.w, height: hS }); }
+            if (hS > 0.5) { const emb = await out.embedPage(copied[p], { left: cb.x, right: cb.x + cb.width, top: cb.y + cb.height - sTop, bottom: cb.y + cb.height - b.at }); page.drawPage(emb, { x: 0, y: newH - (dTop + hS), width: P.w, height: hS }); }
             dTop += hS + b.h; sTop = b.at;
           }
         } else { // rotated page: flatten it to a picture, then add everything on top
@@ -1304,6 +1672,10 @@ async function exportPDF() {
       }
     }
     out.setTitle(doc.name + " (answered)"); out.setSubject(JSON.stringify(aiJSON(false))); out.setCreator("TypePDF"); out.setProducer("TypePDF");
+    // carry the untouched paper and the answers inside, so opening this file in TypePDF brings back editable answers
+    // (instead of answers baked into the page)
+    await out.attach(new Uint8Array(doc.bytes.slice(0)), "typepdf-original.pdf", { mimeType: "application/pdf", description: "The original paper, for reopening in TypePDF" });
+    await out.attach(new TextEncoder().encode(JSON.stringify({ format: "typepdf-state", v: 2, state: strip(doc) })), "typepdf-answers.json", { mimeType: "application/json", description: "Your answers, for reopening in TypePDF" });
     const bytes = await out.save();
     download(new Blob([bytes], { type: "application/pdf" }), doc.name + " - answered.pdf");
     busy(false); toast("PDF exported.");
@@ -1382,7 +1754,7 @@ async function workingsPDF() {
   out.setTitle(doc.name + " – handwritten workings"); out.setCreator("TypePDF");
   return out.save();
 }
-$("#aiBtn").onclick = () => { $("#aiDlg").showModal(); updateAiInfo(); };
+$("#aiBtn").onclick = async () => { await ensureOcr(); $("#aiDlg").showModal(); updateAiInfo(); };
 $("#aiQ").onchange = updateAiInfo;
 function updateAiInfo() {
   const o = aiJSON($("#aiQ").checked); const txt = JSON.stringify(o);
@@ -1401,6 +1773,26 @@ function fallbackCopy(t) { const ta = document.createElement("textarea"); ta.val
 function b64(buf) { const u = new Uint8Array(buf); let s = ""; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
 function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u.buffer; }
 function downloadBackup(d) { const o = { format: "typepdf", v: 2, pdf: b64(d.bytes), state: strip(d) }; download(new Blob([JSON.stringify(o)], { type: "application/json" }), d.name + ".typepdf"); }
+async function fromExport(buf) {
+  let t = null;
+  try {
+    t = await pdfjsLib.getDocument({ data: new Uint8Array(buf.slice(0)), isEvalSupported: false }).promise;
+    const att = await t.getAttachments(); if (!att) return null;
+    const orig = att["typepdf-original.pdf"], st = att["typepdf-answers.json"];
+    if (!orig || !st) return null;
+    const o = JSON.parse(new TextDecoder().decode(st.content)); if (o.format !== "typepdf-state" || !o.state) return null;
+    const d = o.state; d.bytes = orig.content.buffer.slice(orig.content.byteOffset, orig.content.byteOffset + orig.content.byteLength);
+    d.seq = 0; d.dirty = {};
+    return d;
+  } catch (e) { return null; } finally { if (t) t.destroy(); }
+}
+async function openRestored(d) {
+  const mine = await DB.get(d.id).catch(() => null);
+  if (mine && (mine.updated || 0) > (d.updated || 0)) { toast("You already have a newer copy of this paper here, so that's what's open. The export was older."); return openDoc(mine); }
+  toast("This is a TypePDF export, so the original paper and your answers are back, all editable.", 5000);
+  if (window.Sync && Sync.user) { await DB.put(d).catch(() => {}); await DB.putMeta({ id: d.id, name: d.name, pdf: d.pdf || d.id, updated: d.updated || Date.now(), local: true, owner: Sync.info && Sync.info.user }).catch(() => {}); }
+  return openDoc(d);
+}
 async function openBackup(buf) {
   try {
     const o = JSON.parse(new TextDecoder().decode(buf)); if (!/^(typepdf|paperwork)$/.test(o.format)) throw new Error("not a TypePDF backup");
@@ -1408,11 +1800,16 @@ async function openBackup(buf) {
   } catch (e) { toast("Couldn't open that backup: " + e.message); }
 }
 
-window.addEventListener("beforeunload", () => { if (doc) { saveView(); DB.put(doc); } });
+window.addEventListener("beforeunload", e => {
+  if (!doc) return;
+  saveView();
+  if (canSave()) DB.put(doc);
+  else if (!doc.shared && hasWork()) { e.preventDefault(); e.returnValue = ""; }    // nothing is saved without an account: ask before leaving
+});
 // ---------------- flags: mark an answer space to come back to ----------------
 let flagFor = null;   // {p, r} of the focused answer space
 function showFlagFloat(p, r) { flagFor = { p, r }; placeFlagFloat(); }
-function hideFlagFloat() { flagFor = null; const b = $("#flagFloat"); if (b) b.hidden = true; }
+function hideFlagFloat() { flagFor = null; const b = $("#flagFloat"); if (b) b.hidden = true; const c = $("#codeFloat"); if (c) c.hidden = true; }
 function placeFlagFloat() {
   const b = $("#flagFloat"); if (!flagFor || !b) return;
   const { p, r } = flagFor, v = views[p]; if (!v) return;
@@ -1425,6 +1822,15 @@ function placeFlagFloat() {
   const ta = r._el;
   b.style.left = (ta.offsetLeft + ta.offsetWidth + 8) + "px";
   b.style.top = (ta.offsetTop + ta.offsetHeight / 2 - b.offsetHeight / 2) + "px";
+  // the code switch sits just right of the flag
+  const c = $("#codeFloat");
+  if (c) {
+    if (c.parentElement !== v.el) v.el.appendChild(c);
+    c.hidden = r.kind === "cell"; c.classList.toggle("on", !!r.code);
+    c.textContent = r.code ? "</> Code on" : "</> Code";
+    c.title = r.code ? "Code mode is on: monospace, no capitals or corrections, Tab indents. Click to turn it off." : "Typing code? Turn on code mode: monospace, no capitals or corrections, Tab indents.";
+    c.style.left = parseFloat(b.style.left) + b.offsetWidth + 4 + "px"; c.style.top = b.style.top;
+  }
 }
 function toggleFlag(p, r) {
   doc.flags ||= {};
@@ -1433,6 +1839,8 @@ function toggleFlag(p, r) {
   toast(doc.flags[r.id] ? "Flagged. Find it again under Flags." : "Flag removed.");
 }
 $("#flagFloat").addEventListener("pointerdown", e => e.preventDefault());   // keep the cursor in the answer
+$("#codeFloat").addEventListener("pointerdown", e => e.preventDefault());
+$("#codeFloat").addEventListener("click", () => { if (!flagFor) return; const { p, r } = flagFor; setCode(p, r, !r.code, true); toast(r.code ? "Code mode on for this space." : "Code mode off for this space.", 1500); });
 $("#flagFloat").addEventListener("click", () => { if (flagFor) toggleFlag(flagFor.p, flagFor.r); placeFlagFloat(); });
 function renderFlags() {
   const n = doc ? Object.keys(doc.flags || {}).filter(id => findRegion(id)).length : 0;
@@ -1453,6 +1861,138 @@ $("#flagsBtn").onclick = e => {
   const r = e.currentTarget.getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = Math.max(8, Math.min(window.innerWidth - 300, r.left - 120)) + "px"; pop.hidden = false;
 };
 document.addEventListener("pointerdown", e => { const pop = $("#flagsPop"); if (pop && !pop.hidden && !pop.contains(e.target) && !$("#flagsBtn").contains(e.target)) pop.hidden = true; });
+
+// ---------------- jump to a question or page, and to the next empty answer space ----------------
+// an answer space counts as answered when something is typed in it or any ink has been drawn inside it
+function inkedRegions() {
+  const out = new Set();
+  doc.pages.forEach((P, p) => {
+    const S = doc.strokes[p] || []; if (!S.length || !P) return;
+    const rects = P.regions.map(r => [r.id, regionRect(p, r)]);
+    for (const s of S) {
+      if (s.t === "hl") continue;                                    // highlighting the question isn't an answer
+      const pts = dispPts(p, s), step = Math.max(1, Math.floor(pts.length / 12));
+      for (let i = 0; i < pts.length; i += step) { const q = pts[i]; for (const [id, R] of rects) if (!out.has(id) && q[0] >= R.x0 - 2 && q[0] <= R.x1 + 2 && q[1] >= R.y0 - 4 && q[1] <= R.y1 + 4) out.add(id); }
+    }
+  });
+  return out;
+}
+const isAnswered = (r, inked) => !!((doc.text[r.id] || "").trim() || inked.has(r.id));
+const normQ = s => String(s).toLowerCase().replace(/^\s*(question|q)\s*/, "").replace(/[\s().,]/g, "");
+// every question label in reading order, with the answer spaces that belong to it
+function questionMap() {
+  const idx = labelIndex(), inked = inkedRegions(), byLabel = new Map();
+  for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.label.replace(/\(.*$/, ""), p: e.p, y: e.y, regions: [] });
+  for (const [p, r] of orderedRegions()) { const lab = labelAt(idx, p, r.y0 + 6); const e = byLabel.get(lab); if (e) e.regions.push([p, r]); }
+  const list = [...byLabel.values()];
+  for (const e of list) { const n = e.regions.filter(([, r]) => isAnswered(r, inked)).length; e.done = n; e.flag = e.regions.some(([, r]) => doc.flags && doc.flags[r.id]); e.state = !e.regions.length ? "" : n === e.regions.length ? "done" : n ? "part" : ""; }
+  return list;
+}
+function flashRegions(list) {
+  for (const [, r] of list) { const ta = r._el; if (!ta) continue; ta.classList.remove("jumpflash"); void ta.offsetWidth; ta.classList.add("jumpflash"); setTimeout(() => ta.classList.remove("jumpflash"), 1600); }
+}
+// scroll so a point on a page sits near the top of the screen (glides when it's close by)
+function scrollToPoint(p, y, frac = 0.18) {
+  const host = $("#pages"), v = views[p]; if (!v) return;
+  const target = clamp(pageTop(p) + disp(p, y) * zoom - host.clientHeight * frac, 0, host.scrollHeight - host.clientHeight);
+  if (Math.abs(target - host.scrollTop) < host.clientHeight * 6) glideTo(host, target); else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }
+}
+// typing straight in only makes sense with a keyboard tool; with the pen the space just lights up
+function canFocusOnJump() { return (tool === "text" || tool === "smart") && !matchMedia("(pointer: coarse)").matches && !(doc.shared && doc.shared.role === "view"); }
+function goToQuestion(e) {
+  if (!e) return;
+  hideJump();
+  scrollToPoint(e.p, e.y);
+  flashRegions(e.regions);
+  const first = e.regions.find(([, r]) => !(doc.text[r.id] || "").trim()) || e.regions[0];
+  if (first && canFocusOnJump()) { const ta = first[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
+  lastJump = e.label;
+}
+function goToPage(n) {
+  const p = clamp(n - 1, 0, views.length - 1); hideJump();
+  const host = $("#pages"); cancelAnimationFrame(glideRaf); host.scrollTop = pageTop(p) - 12;
+  toast(`Page ${p + 1} of ${views.length}`, 1200);
+}
+let lastJump = "";
+function jumpTo(text) {
+  const t = text.trim(); if (!t) return;
+  const pm = t.match(/^p(?:age|g)?\.?\s*(\d+)$/i);
+  if (pm) return goToPage(+pm[1]);
+  const want = normQ(t), list = questionMap();
+  const hit = list.find(e => normQ(e.label) === want) || list.find(e => normQ(e.label).startsWith(want));
+  if (hit) return goToQuestion(hit);
+  if (/^\d+$/.test(t) && !list.length) return goToPage(+t);    // no question numbers on this paper: a number means a page
+  toast(list.length ? `There's no question ${t} on this paper. Type p${t} to go to page ${t}.` : "No question numbers were found on this paper. Type p and a page number, e.g. p3.", 4000);
+}
+function hideJump() { $("#jumpPop").hidden = true; }
+function openJump(anchorEl) {
+  if (!doc) return;
+  const pop = $("#jumpPop"), list = $("#jumpList");
+  if (!pop.hidden) { hideJump(); return; }
+  const qs = questionMap(), cur = currentPage();
+  list.innerHTML = "";
+  if (qs.length) {
+    // one row per question number, with its parts as chips
+    const groups = []; for (const e of qs) { const g = groups[groups.length - 1]; if (g && g.q === e.q) g.items.push(e); else groups.push({ q: e.q, items: [e] }); }
+    for (const g of groups) {
+      const row = document.createElement("div"); row.className = "jrow";
+      const all = g.items.flatMap(e => e.regions), n = all.length, done = g.items.reduce((s, e) => s + e.done, 0);
+      const head = document.createElement("button"); head.type = "button"; head.className = "jq " + (n && done === n ? "done" : done ? "part" : "") + (g.items.some(e => e.flag) ? " flag" : "") + (g.items.some(e => e.label === lastJump) ? " last" : "");
+      head.innerHTML = `<b>Q${g.q}</b><small>${n ? `${done}/${n}` : "–"} · p${g.items[0].p + 1}</small>`;
+      head.title = `Question ${g.q}, page ${g.items[0].p + 1}` + (n ? `: ${done} of ${n} answer spaces answered` : "");
+      head.onclick = () => goToQuestion(g.items.find(e => e.regions.length) || g.items[0]);
+      row.appendChild(head);
+      for (const e of g.items) {
+        if (e.label === g.q || !e.regions.length) continue;
+        const c = document.createElement("button"); c.type = "button"; c.className = "jc " + e.state + (e.flag ? " flag" : "") + (e.label === lastJump ? " last" : "");
+        c.textContent = e.label.slice(g.q.length).replace(/\)\(/g, " ").replace(/[()]/g, "");
+        c.title = `${e.label}: ${e.done} of ${e.regions.length} answered` + (e.flag ? " · flagged" : "");
+        c.onclick = () => goToQuestion(e);
+        row.appendChild(c);
+      }
+      list.appendChild(row);
+    }
+  } else {
+    const m = document.createElement("p"); m.className = "note"; m.textContent = "No question numbers were found on this paper, so jump by page:"; list.appendChild(m);
+  }
+  // pages, always
+  const pr = document.createElement("div"); pr.className = "jpages";
+  views.forEach((v, i) => { const b = document.createElement("button"); b.type = "button"; b.textContent = i + 1; b.title = `Page ${i + 1}`; if (i === cur) b.className = "on"; b.onclick = () => goToPage(i + 1); pr.appendChild(b); });
+  const lab = document.createElement("small"); lab.textContent = "Pages"; list.append(lab, pr);
+  const r = (anchorEl || $("#jumpBtn")).getBoundingClientRect(), W = Math.min(340, window.innerWidth - 16);
+  pop.style.width = W + "px"; pop.hidden = false;
+  pop.style.left = clamp(r.left + r.width / 2 - W / 2, 8, window.innerWidth - W - 8) + "px";
+  if (r.top > window.innerHeight / 2) { pop.style.top = ""; pop.style.bottom = window.innerHeight - r.top + 6 + "px"; }
+  else { pop.style.bottom = ""; pop.style.top = r.bottom + 6 + "px"; }
+  $("#jumpIn").value = "";
+  if (!matchMedia("(pointer: coarse)").matches) $("#jumpIn").focus();
+  const lastEl = $(".last", list); if (lastEl) lastEl.scrollIntoView({ block: "nearest" });
+}
+$("#jumpBtn").onclick = e => openJump(e.currentTarget);
+$("#pageInd").onclick = e => openJump(e.currentTarget);
+$("#jumpForm").addEventListener("submit", e => { e.preventDefault(); jumpTo($("#jumpIn").value); });
+$("#jumpIn").addEventListener("keydown", e => { if (e.key === "Escape") { e.stopPropagation(); hideJump(); } });
+document.addEventListener("pointerdown", e => { const pop = $("#jumpPop"); if (!pop.hidden && !pop.contains(e.target) && !$("#jumpBtn").contains(e.target) && !$("#pageInd").contains(e.target)) hideJump(); });
+// the next answer space after the one you're in (or after what's on screen) with nothing written in it yet
+function nextEmpty() {
+  if (!doc) return;
+  const all = orderedRegions(), inked = inkedRegions(); if (!all.length) return;
+  const a = document.activeElement, host = $("#pages");
+  let from = a && a.classList && a.classList.contains("ans") ? all.findIndex(([, r]) => r._el === a) : -1;
+  if (from < 0) { const top = host.scrollTop + 8; from = all.findIndex(([p, r]) => pageTop(p) + disp(p, r.y0) * zoom >= top) - 1; if (from < -1) from = all.length - 1; }
+  for (let k = 1; k <= all.length; k++) {
+    const [p, r] = all[(from + k) % all.length];
+    if (isAnswered(r, inked)) continue;
+    const wrapped = from + k >= all.length;
+    { const host = $("#pages"), t = readableScroll(p, r); if (Math.abs(t - host.scrollTop) < host.clientHeight * 6) glideTo(host, t); else host.scrollTop = t; } flashRegions([[p, r]]);
+    if (canFocusOnJump()) { r._el.focus({ preventScroll: true }); }
+    const lab = labelAt(labelIndex(), p, r.y0 + 6);
+    toast((lab !== "?" ? `Q${lab} · ` : "") + `page ${p + 1}` + (wrapped ? " (back to the start)" : ""), 1600);
+    return;
+  }
+  toast("Every answer space has something in it.", 2500);
+}
+$("#nextBtn").onclick = () => { hideJump(); nextEmpty(); };
 
 // bring papers across from the earlier single-device version (same site, older storage name)
 (async () => {

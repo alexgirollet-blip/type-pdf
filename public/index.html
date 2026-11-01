@@ -30,9 +30,19 @@
         <button type="submit">Open link</button>
       </form>
     </div>
-    <p class="privacy">Signed out, everything stays on this device and the PDF is never uploaded. Signed in, your papers are kept in your account and sync live between your devices.</p>
+    <form class="joinrow" id="joinForm">
+      <span>Join a shared paper</span>
+      <input id="joinCode" placeholder="Code, e.g. ABCD-2345" aria-label="Share code" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12">
+      <input id="joinName" placeholder="Your name" aria-label="Your name" autocomplete="nickname" maxlength="40">
+      <button type="submit">Join</button>
+    </form>
+    <p class="privacy" id="privacyNote">Without an account you can open a paper, fill it in and export it, but nothing is saved. Signed in, your papers are kept in your account and sync live between your devices.</p>
     <p class="tip" id="tip"><span>Tip</span> <b>Tab</b> glides to the next question, so you never miss one. <b>Shift+Tab</b> jumps back.</p>
     <div class="storage" id="storage" hidden><div class="sbar" id="storageBar"><i></i></div><span id="storageTxt"></span></div>
+    <section id="sharedWrap" class="lib" hidden>
+      <div class="libbar"><span class="crumb">Shared with me</span></div>
+      <ul id="sharedList" class="recent"></ul>
+    </section>
     <section id="recentWrap" class="lib">
       <div class="libbar">
         <nav class="crumbs" id="crumbs" aria-label="Folder"></nav>
@@ -56,16 +66,18 @@
       <ul>
         <li><b>Type:</b> click any dotted line, ruled line, empty table cell or answer box and type. Text sits on the lines, shrinks if you write a lot, and the page grows if it still doesn't fit.</li>
         <li><b>Tools:</b> <b>Text</b> only types (click any answer space; it never draws). <b>Pen</b> only draws (mouse, trackpad, Apple Pencil or a mirrored iPad). <b>Smart</b> does both: tap an answer space to type, drag to draw. Laptops start on Text; iPads, and devices where an Apple Pencil has been used, start on Pen. Fingers scroll; pinch to zoom.</li>
-        <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo, three fingers to redo.</li>
+        <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo. Tap with three fingers to swap between the pen and the eraser (four fingers redo).</li>
         <li><b>Live sync:</b> sign in on two devices (say a laptop and an iPad) and open the same paper. Typing and ink appear on the other one straight away.</li>
+        <li><b>Go to…:</b> jump straight to any question (type <b>3</b>, <b>4b</b> or <b>4b(ii)</b>) or page (<b>p5</b>), see at a glance which questions are answered, started or flagged, and hop to the <b>next empty answer</b>. Tapping the page number in the corner opens it too. Tab and jumps leave the question's wording in view above the box.</li>
         <li><b>Flags:</b> click into an answer and press ⚑ Flag to mark it to come back to, e.g. to draw it on the iPad or because it's hard. The ⚑ button in the bar lists them.</li>
         <li><b>Folders:</b> make folders (and folders inside folders), drag papers onto them, star papers to keep them at the top, and make a blank new attempt of any paper. Deleted papers stay in the Bin for 30 days.</li>
-        <li><b>Move drawings:</b> with <b>Select</b>, drag a box round some drawing (mouse, finger or Pencil), then drag inside the dashed box to move it, even onto another page. Delete removes it; arrow keys nudge it. With Select, scroll with two fingers.</li>
+        <li><b>Move drawings:</b> with <b>Select</b>, drag a box round some drawing (mouse, finger or Pencil), then drag inside the dashed box to move it, even onto another page, or drag a corner to resize it (it keeps its shape and line thickness scales too). Delete removes it; arrow keys nudge it. With Select, scroll with two fingers.</li>
+        <li><b>Code:</b> press <b>&lt;/&gt; Code</b> beside an answer (or just start typing code and it switches itself) for monospace text with no capitals or corrections. Tab and Shift+Tab indent (several lines at once too), and Enter keeps your indentation.</li>
         <li><b>Resize on the go:</b> while typing in a box, drag the dots on its corners to make it bigger or smaller.</li>
         <li><b>Two pages at once:</b> the ▯▯ button next to zoom shows pages side by side, like a book.</li>
         <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed.</li>
         <li><b>Export PDF</b> keeps the original paper sharp and adds your writing on top. <b>Export for AI</b> gives typed answers as JSON plus a small PDF of only your handwritten work, which costs far fewer tokens to mark.</li>
-        <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab glides to the next answer space · Shift+Tab jumps back · double-click a word, triple-click a paragraph · Esc leaves a box.</li>
+        <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab glides to the next answer space · Shift+Tab jumps back · double-click a word, triple-click a paragraph · Esc leaves a box · G or ⌘/Ctrl+G go to a question · N next empty answer.</li>
       </ul>
     </details>
   </div>
@@ -76,7 +88,9 @@
   <div class="bar" id="bar">
     <button class="ib" id="homeBtn" title="All papers" aria-label="All papers"><svg viewBox="0 0 24 24"><path d="M4 11l8-7 8 7M6 10v10h12V10"/></svg></button>
     <span class="docname" id="docName"></span>
-    <button class="pill" id="syncPill" data-state="local">Saved on this device</button>
+    <button class="pill" id="syncPill" data-state="local">Not saved</button>
+    <span class="peoplebar" id="peopleBar"></span>
+    <button id="shareBtn" hidden title="Share this paper so others can work on it with you, live">Share</button>
     <span class="sep"></span>
     <div class="grp" role="group" aria-label="Tools">
       <button class="tool" data-tool="text" title="Text: click or tap answer spaces to type. Never draws.">Text</button>
@@ -110,6 +124,7 @@
     </div>
     <select id="fontSel" class="fontsel" aria-label="Answer font" title="Font for typed answers"></select>
     <span class="grow"></span>
+    <button id="jumpBtn" title="Jump to a question or page, or the next empty answer (G)">Go to…</button>
     <button id="flagsBtn" title="Flagged answer spaces">⚑ Flags</button>
     <button class="timer" id="timerBtn" title="Timer">⏱ <span id="timerTxt">Timer</span></button>
     <span class="count" id="count" title="Answer spaces with something typed in them"></span>
@@ -143,41 +158,48 @@
   </div>
 
   <div class="pop flagspop" id="flagsPop" hidden></div>
+  <div class="pop jumppop" id="jumpPop" hidden>
+    <form id="jumpForm" class="row">
+      <input id="jumpIn" placeholder="Question (3, 4b(ii)) or page (p5)" aria-label="Question or page to jump to" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
+      <button type="submit" class="primary">Go</button>
+    </form>
+    <button type="button" id="nextBtn" title="The next answer space with nothing written in it yet (N)">Next empty answer ↓</button>
+    <div class="jumplist" id="jumpList"></div>
+    <div class="jumpkey"><i class="done"></i> answered <i class="part"></i> started <i></i> not yet <i class="flag"></i> flagged</div>
+  </div>
   <div class="pages" id="pages"></div>
   <button class="flagfloat" id="flagFloat" hidden>⚑ Flag</button>
-  <div class="pageind" id="pageInd"></div>
+  <button class="flagfloat codefloat" id="codeFloat" hidden>&lt;/&gt; Code</button>
+  <button class="pageind" id="pageInd" title="Jump to a question or page"></button>
 </div>
 
 <!-- ============ DIALOGS ============ -->
-<dialog id="authDlg" class="dlg">
-  <form id="authForm" method="dialog">
-    <h2 id="auTitle">Sign in</h2>
-    <label>Username <input id="auUser" autocomplete="username" required minlength="3" maxlength="24" autocapitalize="off" spellcheck="false"></label>
-    <label>Password <input id="auPass" type="password" autocomplete="current-password" required minlength="8"></label>
-    <p class="note" id="auHint" hidden>3–24 letters, numbers, dots, dashes or underscores. At least 8 characters for the password. There's no email, so keep your password somewhere safe. The site's admin can see your papers' names and how much space they use.</p>
-    <p class="err" id="authErr" role="alert"></p>
-    <div class="row"><button class="primary" id="auGo" type="submit">Sign in</button><button type="button" id="auClose">Cancel</button></div>
-    <button type="button" class="linkbtn" id="auSwitch">New here? Create an account</button>
-  </form>
-</dialog>
+
 
 <dialog id="acctDlg" class="dlg">
   <h2>Account</h2>
-  <form id="pwForm">
-    <h3>Change password</h3>
-    <label>Current password <input id="pwOld" type="password" autocomplete="current-password" required></label>
-    <label>New password <input id="pwNew" type="password" autocomplete="new-password" required minlength="8"></label>
-    <div class="row"><button class="primary" type="submit">Change password</button></div>
-  </form>
+  <p class="note">You're signed in with your GirolletServer account <b id="acEmail"></b>. Your name and password are managed there.</p>
   <form id="delForm">
-    <h3>Delete account</h3>
-    <p class="note">Removes your account and every paper stored in it. Papers saved on this device stay here.</p>
-    <label>Password <input id="delPw" type="password" autocomplete="current-password" required></label>
+    <h3>Delete my TypePDF papers</h3>
+    <p class="note">Deletes every paper stored in your TypePDF account. Your GirolletServer account stays as it is.</p>
     <label>Type <b>delete</b> to confirm <input id="delConfirm" autocomplete="off"></label>
-    <div class="row"><button class="danger" type="submit">Delete my account</button></div>
+    <div class="row"><button class="danger" type="submit">Delete my papers</button></div>
   </form>
   <p class="err" id="acctErr" role="alert"></p>
   <div class="row"><button type="button" id="acClose">Close</button></div>
+</dialog>
+<dialog id="shareDlg" class="dlg">
+  <h2>Share this paper</h2>
+  <p class="note">Anyone with a code can join from the TypePDF home page. No account needed; they just type their name. Changes are saved in your account.</p>
+  <div class="codes">
+    <div class="code"><span>Can edit</span><b id="codeEdit">…</b><button type="button" data-copy="codeEdit">Copy</button></div>
+    <div class="code"><span>View only</span><b id="codeView">…</b><button type="button" data-copy="codeView">Copy</button></div>
+  </div>
+  <h3>People</h3>
+  <ul class="people" id="sharePeople"><li class="note">Nobody has joined yet.</li></ul>
+  <p class="err" id="shareErr" role="alert"></p>
+  <div class="row"><button type="button" id="shareReset" class="danger">New codes</button><span class="grow"></span><button type="button" id="shareClose">Close</button></div>
+  <p class="note">New codes stop the old ones working for anyone new. People already in stay until you remove them.</p>
 </dialog>
 
 <dialog id="aiDlg" class="dlg">

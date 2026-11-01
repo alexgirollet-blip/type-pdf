@@ -35,6 +35,14 @@ async function setMeta(e, fields) {
 }
 async function loadEntries() {
   let local = []; try { local = (await DB.list()).filter(m => m.id !== "__lib"); } catch (e) {}
+  // this browser keeps a copy of each signed-in person's papers; only show the current account's
+  // (papers saved before accounts were tied to them are taken by whoever signs in first)
+  const me = Sync.info && Sync.info.user;
+  if (!signedIn()) local = [];
+  else if (me) {
+    for (const m of local) if (!m.owner) { m.owner = me; DB.putMeta(m).catch(() => {}); }
+    local = local.filter(m => m.owner === me);
+  }
   const lib = await localLib();
   let remote = null;
   if (signedIn()) { try { remote = await Sync.listDocs(); } catch (e) {} }
@@ -67,6 +75,12 @@ async function loadEntries() {
 let renderSeq = 0;
 async function renderHomeList() {
   const my = ++renderSeq;
+  // without an account nothing is saved, so there's no library to show
+  const on = signedIn();
+  $("#recentWrap").hidden = !on; $("#joinName").hidden = on;
+  $("#privacyNote").textContent = on ? "Your papers are kept in your account and sync live between your devices. Share any paper from its toolbar to work on it together." : "Without an account you can open a paper, fill it in and export it, but nothing is saved. Sign in with GirolletServer to keep papers and sync them between devices.";
+  if (!on) { $("#storage").hidden = true; $("#sharedWrap").hidden = true; return; }
+  renderShared();
   await loadEntries();
   if (my !== renderSeq) return;
   renderStorage();
@@ -340,3 +354,20 @@ renderHomeList();
 // the big "Open a PDF" box lights up while a file is dragged over it
 ["dragenter", "dragover"].forEach(ev => $("#drop").addEventListener(ev, e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); $("#drop").classList.add("over"); } }));
 ["dragleave", "drop"].forEach(ev => $("#drop").addEventListener(ev, () => $("#drop").classList.remove("over")));
+
+// ---------------- papers other people shared with me ----------------
+async function renderShared() {
+  const wrap = $("#sharedWrap"), ul = $("#sharedList");
+  let list = []; try { list = (await Sync.share.list()).shared || []; } catch (e) {}
+  wrap.hidden = !list.length; ul.innerHTML = "";
+  for (const s of list) {
+    const li = document.createElement("li");
+    li.innerHTML = `<button class="nm" type="button"></button><span class="meta"></span><button class="open" type="button">Open</button><button class="more" type="button" title="Leave">Leave</button>`;
+    $(".nm", li).textContent = s.name || "Shared paper";
+    $(".meta", li).textContent = (s.role === "view" ? "View only" : "Can edit") + " · shared with you";
+    const open = async () => { try { busy(true, "Opening the shared paper…"); const j = await Sync.share.rejoin(s.owner, s.doc); await openSharedFrom(j); } catch (e) { busy(false); toast(e.message, 5000); renderShared(); } };
+    $(".nm", li).onclick = open; $(".open", li).onclick = open;
+    $(".more", li).onclick = async () => { if (!confirm(`Leave "${s.name}"? You can join again with a code.`)) return; await Sync.share.leave(s.owner, s.doc).catch(() => {}); renderShared(); };
+    ul.appendChild(li);
+  }
+}
