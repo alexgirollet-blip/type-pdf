@@ -254,7 +254,7 @@ function placeHandles() {
   for (const h of hs) {
     if (h.parentElement !== v.el) v.el.appendChild(h);
     const c = h.dataset.c; h.hidden = false;
-    h.style.left = (c[1] === "w" ? L : L + W) + "px";
+    h.style.left = (c[1] === "w" ? L + (c === "nw" && ta.classList.contains("notch") ? r._notch || 0 : 0) : L + W) + "px";
     h.style.top = (c[0] === "n" ? T : T + H) + "px";
   }
 }
@@ -383,10 +383,10 @@ function makeField(p, r) {
   const v = views[p];
   const ta = document.createElement("textarea");
   ta.className = "ans " + r.kind + (r.code ? " code" : "");
-  ta.spellcheck = !r.code; ta.autocapitalize = r.code ? "off" : "sentences"; ta.setAttribute("autocorrect", r.code ? "off" : "on");
+  codeAttrs(ta, r.code);
   ta.dataset.rid = r.id; ta.value = doc.text[r.id] || "";
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
-  ta.addEventListener("input", () => { if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
+  ta.addEventListener("input", () => { if (!r.code && !r.codeSet && looksLikeCode(ta.value)) { setCode(p, r, true, false); toast("This looks like code, so this space is now in code mode: no capitals or corrections, Tab indents. Press </> Code to switch back.", 5000); } if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
   ta.addEventListener("focus", () => { showFlagFloat(p, r); showHandles(p, r); });
   ta.addEventListener("blur", () => setTimeout(() => { if (!document.activeElement || !document.activeElement.classList.contains("ans")) { hideFlagFloat(); hideHandles(); } }, 150));
@@ -396,18 +396,52 @@ function makeField(p, r) {
 
 function fieldKeys(e, p, r, ta) {
   if (e.key === "Escape") { ta.blur(); return; }
+  if (r.code && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+    // a new line keeps the indentation, and goes one step further in after ":" "{" "then" or "do"
+    e.preventDefault();
+    const s = ta.selectionStart, v = ta.value, ls = v.lastIndexOf("\n", s - 1) + 1, line = v.slice(ls, s);
+    let ind = (line.match(/^[ \t]*/) || [""])[0];
+    if (/(:|\{|\bthen|\bdo)\s*$/i.test(line)) ind += "    ";
+    ta.setRangeText("\n" + ind, s, ta.selectionEnd, "end"); ta.dispatchEvent(new Event("input")); return;
+  }
   if (e.key === "Tab") {
     if (r.code && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       const s = ta.selectionStart, en = ta.selectionEnd, v = ta.value;
       const ls = v.lastIndexOf("\n", s - 1) + 1;
-      if (e.shiftKey) { const m = v.slice(ls).match(/^ {1,4}/); if (m) ta.setRangeText("", ls, ls + m[0].length, "preserve"); }
+      if (en > s && v.slice(s, en).includes("\n")) {
+        // several lines selected: indent or outdent every one of them
+        const le = v.indexOf("\n", en - 1) < 0 ? v.length : v.indexOf("\n", en - (v[en - 1] === "\n" ? 1 : 0));
+        const lines = v.slice(ls, le).split("\n").map(l => e.shiftKey ? l.replace(/^ {1,4}|^\t/, "") : "    " + l);
+        const t = lines.join("\n"); ta.setRangeText(t, ls, le, "select");
+      } else if (e.shiftKey) { const m = v.slice(ls).match(/^ {1,4}/); if (m) ta.setRangeText("", ls, ls + m[0].length, "preserve"); }
       else ta.setRangeText("    ", s, en, "end");
       ta.dispatchEvent(new Event("input")); return;
     }
     e.preventDefault(); focusNext(r, e.shiftKey ? -1 : 1); return;
   }
   if (e.key === "Enter" && r.kind === "cell" && !e.shiftKey) { e.preventDefault(); focusNext(r, 1); }
+}
+// ---- code mode: monospace, no auto-capitals, autocorrect or spellcheck, Tab indents ----
+function codeAttrs(ta, on) {
+  ta.classList.toggle("code", !!on);
+  ta.spellcheck = !on; ta.autocapitalize = on ? "off" : "sentences";
+  ta.setAttribute("autocorrect", on ? "off" : "on"); ta.setAttribute("autocomplete", "off");
+}
+function setCode(p, r, on, byHand) {
+  r.code = !!on; if (byHand) r.codeSet = true;
+  codeAttrs(r._el, r.code);
+  delete doc.fit[r.id]; queueFit(p, r); pageChanged(p); placeFlagFloat();
+  if (boxMode) updateSelTools();
+}
+// typed text that is clearly code: a line that is plainly a statement, or several code-looking lines
+function looksLikeCode(v) {
+  if (!v || v.length < 6) return false;
+  const lines = v.split("\n").filter(l => l.trim());
+  const strong = /^\s*(def |function |procedure |for \w+ ?(=|in )|while .*[<>=!]|if .*(==|!=|<=|>=|[<>]|\bthen\b)|else:|elif |endif|endwhile|next \w|print\(|return\b|var |let |const |public |private |int \w+ ?=|string \w+ ?=|SELECT\b.+\bFROM\b|INSERT INTO|UPDATE \w+ SET|DELETE FROM|CREATE TABLE|<\/?[a-z]+[ >])/;
+  if (lines.some(l => strong.test(l))) return true;
+  const codeish = /([{};]\s*$|^\s{2,}\S|\w+\[\w*\]|\w+\([^)]*\)\s*$|^\s*\w+\s*(=|\+=|-=|\+\+)\s*\S|==|!=|<=|>=|\/\/)/;
+  return lines.length >= 2 && lines.filter(l => codeish.test(l)).length >= 2;
 }
 function orderedRegions() { const out = []; doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
 function focusNext(r, dir) {
@@ -466,6 +500,24 @@ function applyField(p, r, f) {
   } else {
     ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = "0";
   }
+  shapeField(r, f);
+}
+// an answer whose first line starts further right (after a label like "Difference 1") gets a notched outline that
+// follows where text can actually go: clipped background plus a matching outline drawn beside it
+function shapeField(r, f) {
+  const ta = r._el, z = zoom, ind = r.kind === "lines" ? (r.indent || 0) * z : 0;
+  let sv = r._shape;
+  if (ind < 2) { ta.classList.remove("notch"); ta.style.clipPath = ""; if (sv) sv.style.display = "none"; return; }
+  const W = parseFloat(ta.style.width), H = parseFloat(ta.style.height), step = Math.min(H, f.L * z), x = ind + 1 * z;
+  const pts = [[x, 0], [W, 0], [W, H], [0, H], [0, step], [x, step]];
+  ta.classList.add("notch");
+  ta.style.clipPath = "polygon(" + pts.map(q => q[0].toFixed(1) + "px " + q[1].toFixed(1) + "px").join(",") + ")";
+  if (!sv) { sv = document.createElementNS("http://www.w3.org/2000/svg", "svg"); sv.setAttribute("class", "ansshape"); sv.innerHTML = "<path/>"; r._shape = sv; }
+  if (sv.previousSibling !== ta) ta.after(sv);
+  Object.assign(sv.style, { display: "", left: ta.style.left, top: ta.style.top, width: W + "px", height: H + "px" });
+  sv.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  sv.firstChild.setAttribute("d", "M" + pts.map(q => (q[0] + (q[0] >= W ? -0.5 : 0.5)).toFixed(1) + " " + (q[1] + (q[1] >= H ? -0.5 : 0.5)).toFixed(1)).join(" L") + " Z");
+  r._notch = x;
 }
 function contentH(r) { const ta = r._el; const prev = ta.style.height; ta.style.height = "1px"; const h = ta.scrollHeight; ta.style.height = prev; return h / zoom; }
 function availFor(r, f) {
@@ -778,6 +830,37 @@ function bindInk(p, v) {
     doc.strokes[p].push(s.stroke);
   }
 }
+// ---- a text cursor the height of the text, not of the whole ruled line ----
+// browsers draw a textarea's caret as tall as the line spacing, which on answer lines is far taller than the
+// writing. So the real caret is made invisible and this one is drawn instead, measured with a hidden copy of the text.
+const caretEl = document.createElement("div"); caretEl.className = "tcaret"; caretEl.hidden = true;
+let caretKey = "";
+function caretRect(ta, idx) {
+  const cs = getComputedStyle(ta), m = document.createElement("div");
+  for (const p of ["fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing", "wordSpacing", "lineHeight", "textIndent", "textAlign", "tabSize", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "boxSizing", "fontKerning", "fontFeatureSettings"]) m.style[p] = cs[p];
+  Object.assign(m.style, { position: "absolute", visibility: "hidden", left: ta.offsetLeft + "px", top: ta.offsetTop - ta.scrollTop + "px", width: ta.offsetWidth + "px", margin: "0", border: "0", whiteSpace: "pre-wrap", overflowWrap: "break-word", wordBreak: cs.wordBreak });
+  const v = ta.value, mk = document.createElement("span");
+  m.appendChild(document.createTextNode(v.slice(0, idx))); mk.textContent = "\u200b"; m.appendChild(mk); m.appendChild(document.createTextNode(v.slice(idx)));
+  ta.parentElement.appendChild(m);
+  const pr = ta.parentElement.getBoundingClientRect(), k = mk.getBoundingClientRect();
+  m.remove();
+  return { x: k.left - pr.left, y: k.top - pr.top, h: k.height };
+}
+function updateCaret() {
+  const ta = document.activeElement;
+  if (!ta || !ta.classList || !ta.classList.contains("ans") || ta.selectionStart !== ta.selectionEnd || boxMode) { if (!caretEl.hidden) caretEl.hidden = true; caretKey = ""; return; }
+  const key = [ta.dataset.rid, ta.selectionStart, ta.value, ta.style.fontSize, ta.style.width, ta.style.left, ta.style.top, ta.style.textIndent, ta.scrollTop, zoom].join("|");
+  if (key === caretKey && !caretEl.hidden) return;
+  caretKey = key;
+  const c = caretRect(ta, ta.selectionStart), fs = parseFloat(getComputedStyle(ta).fontSize) || 12;
+  const h = Math.max(fs * 1.15, Math.min(c.h, fs * 1.4));
+  if (caretEl.parentElement !== ta.parentElement) ta.parentElement.appendChild(caretEl);
+  Object.assign(caretEl.style, { left: c.x - 0.5 + "px", top: c.y + (c.h - h) / 2 + "px", height: h + "px", width: Math.max(1.5, fs * 0.08) + "px", background: getComputedStyle(ta).color });
+  caretEl.hidden = false;
+  caretEl.classList.remove("blink"); void caretEl.offsetWidth; caretEl.classList.add("blink");   // solid while moving, then blinks
+}
+(function caretLoop() { try { updateCaret(); } catch (e) {} requestAnimationFrame(caretLoop); })();
+
 // ---- placing the text cursor where you click, even though the ink layer sits on top ----
 let clickRun = null;
 function inRect(el, x, y) { const r = el.getBoundingClientRect(); return x >= r.left - 2 && x <= r.right + 2 && y >= r.top - 2 && y <= r.bottom + 2; }
@@ -1079,11 +1162,11 @@ $("#redetect").onclick = async () => {
   rebuildPageFields(p); pageChanged(p); busy(false); toast(`Page ${p + 1}: ${fresh.regions.length} answer spaces.`);
 };
 function pageChanged(p) { emit("page:" + p); scheduleSave(); }
-function rebuildPageFields(p) { $$(".ans", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
-function rebuildField(p, r) { if (r._el) r._el.remove(); makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
+function rebuildPageFields(p) { $$(".ans,.ansshape", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
+function rebuildField(p, r) { if (r._el) r._el.remove(); if (r._shape) { r._shape.remove(); r._shape = null; } makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
 function deleteSel() {
   if (!sel) return; const { p, r } = sel; const P = doc.pages[p];
-  setGap(p, r, 0); P.regions.splice(P.regions.indexOf(r), 1); if (r._el) r._el.remove();
+  setGap(p, r, 0); P.regions.splice(P.regions.indexOf(r), 1); if (r._el) r._el.remove(); if (r._shape) r._shape.remove();
   if (doc.text[r.id]) toast("Box deleted. Its typed text was removed too.");
   delete doc.text[r.id]; delete doc.fit[r.id]; emit("text:" + r.id); sel = null; updateSelTools(); layoutPage(p); updateCount(); pageChanged(p);
 }
@@ -1412,7 +1495,7 @@ window.addEventListener("beforeunload", () => { if (doc) { saveView(); DB.put(do
 // ---------------- flags: mark an answer space to come back to ----------------
 let flagFor = null;   // {p, r} of the focused answer space
 function showFlagFloat(p, r) { flagFor = { p, r }; placeFlagFloat(); }
-function hideFlagFloat() { flagFor = null; const b = $("#flagFloat"); if (b) b.hidden = true; }
+function hideFlagFloat() { flagFor = null; const b = $("#flagFloat"); if (b) b.hidden = true; const c = $("#codeFloat"); if (c) c.hidden = true; }
 function placeFlagFloat() {
   const b = $("#flagFloat"); if (!flagFor || !b) return;
   const { p, r } = flagFor, v = views[p]; if (!v) return;
@@ -1425,6 +1508,15 @@ function placeFlagFloat() {
   const ta = r._el;
   b.style.left = (ta.offsetLeft + ta.offsetWidth + 8) + "px";
   b.style.top = (ta.offsetTop + ta.offsetHeight / 2 - b.offsetHeight / 2) + "px";
+  // the code switch sits just right of the flag
+  const c = $("#codeFloat");
+  if (c) {
+    if (c.parentElement !== v.el) v.el.appendChild(c);
+    c.hidden = r.kind === "cell"; c.classList.toggle("on", !!r.code);
+    c.textContent = r.code ? "</> Code on" : "</> Code";
+    c.title = r.code ? "Code mode is on: monospace, no capitals or corrections, Tab indents. Click to turn it off." : "Typing code? Turn on code mode: monospace, no capitals or corrections, Tab indents.";
+    c.style.left = parseFloat(b.style.left) + b.offsetWidth + 4 + "px"; c.style.top = b.style.top;
+  }
 }
 function toggleFlag(p, r) {
   doc.flags ||= {};
@@ -1433,6 +1525,8 @@ function toggleFlag(p, r) {
   toast(doc.flags[r.id] ? "Flagged. Find it again under Flags." : "Flag removed.");
 }
 $("#flagFloat").addEventListener("pointerdown", e => e.preventDefault());   // keep the cursor in the answer
+$("#codeFloat").addEventListener("pointerdown", e => e.preventDefault());
+$("#codeFloat").addEventListener("click", () => { if (!flagFor) return; const { p, r } = flagFor; setCode(p, r, !r.code, true); toast(r.code ? "Code mode on for this space." : "Code mode off for this space.", 1500); });
 $("#flagFloat").addEventListener("click", () => { if (flagFor) toggleFlag(flagFor.p, flagFor.r); placeFlagFloat(); });
 function renderFlags() {
   const n = doc ? Object.keys(doc.flags || {}).filter(id => findRegion(id)).length : 0;

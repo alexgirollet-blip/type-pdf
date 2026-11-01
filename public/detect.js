@@ -6,6 +6,7 @@
 const Detect = (() => {
   const S = 2;              // analysis scale: px per pt
   const DARK = 165;         // grey level below which a pixel counts as ink
+  const RULE = 212;         // lighter limit used only when looking for ruled lines (they're often pale grey)
 
   function grey(imgData) {
     const { data, width, height } = imgData;
@@ -18,14 +19,27 @@ const Detect = (() => {
     return { g, w: width, h: height };
   }
 
+  // thin rules (0.5pt = 1 px here) that fall between two pixel rows render as two faint rows, neither dark
+  // enough on its own. Adding each pixel's darkness to its neighbour's (below, or to the right) makes such a
+  // line read as solid wherever it lands. Lines found this way sit half a pixel lower/right (corrected later).
+  function pairUp(G, vertical) {
+    const { g, w, h } = G, o = new Uint8Array(w * h), step = vertical ? 1 : w;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x, last = vertical ? x === w - 1 : y === h - 1;
+      const d = (255 - g[i]) + (last ? 0 : 255 - g[i + step]);
+      o[i] = d >= 255 ? 0 : 255 - d;
+    }
+    return { g: o, w, h };
+  }
+
   // integral image of ink so any rectangle's ink count is O(1)
-  function integral(G) {
+  function integral(G, dark = DARK) {
     const { g, w, h } = G;
     const I = new Uint32Array((w + 1) * (h + 1));
     for (let y = 0; y < h; y++) {
       let row = 0;
       for (let x = 0; x < w; x++) {
-        row += g[y * w + x] < DARK ? 1 : 0;
+        row += g[y * w + x] < dark ? 1 : 0;
         I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + row;
       }
     }
@@ -40,18 +54,18 @@ const Detect = (() => {
   }
 
   // ---- horizontal rules (solid, dotted, dashed, underscores) ----
-  function hRules(G, I) {
+  function hRules(G, I, D = DARK) {
     const { g, w, h } = G;
     const T = 4;           // thinness probe distance (px)
     const GAP = 9;         // max gap inside a dotted line (px)
-    const MINLEN = 34 * S; // shortest answer line (pt->px)
+    const MINLEN = 7 * S;  // shortest rule kept (pt->px); short ones are only used for gaps in equations
     const segs = [];
     for (let y = T; y < h - T; y++) {
       const row = y * w;
       let x = 0, runs = [];
       while (x < w) {
-        if (g[row + x] < DARK) {
-          let a = x; while (x < w && g[row + x] < DARK) x++;
+        if (g[row + x] < D) {
+          let a = x; while (x < w && g[row + x] < D) x++;
           const b = x;
           // thin: little ink T px above and below this run
           const above = inkIn(I, w, a - 1, y - T, b + 1, y - T + 1);
@@ -112,7 +126,7 @@ const Detect = (() => {
   }
 
   // ---- enclosed empty areas: table cells and answer boxes ----
-  function enclosed(G, I, H, V) {
+  function enclosed(G, I, H, V, IF) {
     const { w, h } = G;
     if (!V.length) return [];
     const solidH = H.filter(l => l.solid);
@@ -153,7 +167,10 @@ const Detect = (() => {
       const pad = 3;
       const ink = inkIn(I, w, x0 + pad, y0 + pad, x1 - pad + 1, y1 - pad + 1);
       const area = Math.max(1, (bw - 2 * pad) * (bh - 2 * pad));
-      out.push({ x0: x0 / S, y0: y0 / S, x1: (x1 + 1) / S, y1: (y1 + 1) / S, empty: ink / area < 0.002 && ink < 12 });
+      // graph paper: the squares are crossed by faint minor gridlines, which a real answer cell never is
+      const faint = inkIn(IF, w, x0 + pad, y0 + pad, x1 - pad + 1, y1 - pad + 1);
+      const grid = faint / area > 0.03;
+      out.push({ x0: x0 / S, y0: y0 / S, x1: (x1 + 1) / S, y1: (y1 + 1) / S, empty: !grid && ink / area < 0.002 && ink < 12, grid });
     }
     return out;
   }
@@ -180,13 +197,22 @@ const Detect = (() => {
     const G = grey(ctx.getImageData(0, 0, canvas.width, canvas.height));
     const I = integral(G);
     const PW = viewport.width, PH = viewport.height;
-    const H = hRules(G, I), V = vRules(G);
+    // rules are found on the row/column-paired image (so faint, off-pixel lines aren't missed); everything else uses the page as drawn
+    // a pale line counts, but pale shading next to a line doesn't stop it looking thin
+    const Gh = pairUp(G, false), Hall = hRules(Gh, integral(Gh, DARK), RULE).map(l => ({ ...l, y: l.y + 0.5 / S, th: Math.max(0.5, l.th - 1 / S) }));
+    const H = Hall.filter(l => l.x1 - l.x0 >= 24);
+    const V = vRules(pairUp(G, true)).map(v => ({ ...v, x: v.x + 0.5 / S }));
     const items = tc ? textItems(tc, viewport) : [];
     const inkPt = (x0, y0, x1, y1) => inkIn(I, G.w, x0 * S, y0 * S, x1 * S, y1 * S);
 
     // rules touched by two or more vertical lines are table/box borders
     const touching = l => V.filter(v => v.x >= l.x0 - 3 && v.x <= l.x1 + 3 && v.y0 <= l.y + 3 && v.y1 >= l.y - 3).length;
-    const boxes = enclosed(G, I, H, V);
+    const IF = integral(G, 238);   // any visible ink, however faint
+    const boxes = enclosed(G, I, H.filter(l => l.x1 - l.x0 >= 34), V, IF);
+    const gridAt = (x, y) => boxes.some(b => b.grid && x >= b.x0 - 2 && x <= b.x1 + 2 && y >= b.y0 - 2 && y <= b.y1 + 2);
+    // the page frame: a rule whose two ends both meet long vertical rules
+    const longV = V.filter(v => v.y1 - v.y0 > 0.45 * PH);
+    const frameEdge = l => longV.some(v => Math.abs(v.x - l.x0) < 4) && longV.some(v => Math.abs(v.x - l.x1) < 4);
     const insideBox = (l) => boxes.some(b => l.x0 >= b.x0 - 2 && l.x1 <= b.x1 + 2 && l.y > b.y0 + 4 && l.y < b.y1 - 4);
 
     // answer lines: thin, long, blank band above, not a table border
@@ -195,7 +221,11 @@ const Detect = (() => {
       if (l.y < 25 || l.y > PH - 20) return false;                 // header/footer rules
       if (l.x1 - l.x0 > 0.92 * PW) return false;                     // full-width separators
       if (touching(l) >= 2 && !insideBox(l)) return false;
-      if (l.x1 - l.x0 < 60) return false;
+      if (frameEdge(l)) return false;
+      if (gridAt((l.x0 + l.x1) / 2, l.y)) return false;                // a line of a graph's grid
+      // short lines (24–60pt) only count as a gap in a sentence or equation: printed text on the same baseline right next to it
+      if (l.x1 - l.x0 < 60 && !items.some(it => Math.abs(it.base - l.y) < 6 && it.str.trim() && (Math.abs(it.x1 - l.x0) < 30 || Math.abs(it.x - l.x1) < 30))) return false;
+      if (l.x1 - l.x0 < 60 && items.some(it => it.str.trim() && it.base > l.y - 12 && it.base < l.y + 8 && Math.min(it.x1, l.x1) - Math.max(it.x, l.x0) > 2)) return false;   // printed text on or over it: not a gap
       // a box edge: ink runs straight up or down from both ends
       const vert = (x) => { const dn = inkPt(x - 1.2, l.y + 1.5, x + 1.2, l.y + 9), up = inkPt(x - 1.2, l.y - 9, x + 1.2, l.y - 1.5); return Math.max(dn, up) > 9 * S * 1.2; };
       if (vert(l.x0 + 0.5) && vert(l.x1 - 0.5) && !insideBox(l)) return false;                            // too short for an answer line
@@ -225,7 +255,7 @@ const Detect = (() => {
         const last = g.lines[g.lines.length - 1];
         const dy = l.y - last.y;
         const minx = Math.min(...g.lines.map(q => q.x0));
-        const okSpacing = dy >= 11 && dy <= 42 && (g.lines.length < 2 || Math.abs(dy - g.sp) <= 3.5);
+        const okSpacing = dy >= 11 && dy <= 50 && (g.lines.length < 2 || Math.abs(dy - g.sp) <= 3.5);
         const okX = l.x0 <= minx + 6 && l.x1 > minx + 40 && Math.min(l.x1, Math.max(...g.lines.map(q => q.x1))) - Math.max(l.x0, minx) > 60;
         // nothing printed between the two rules apart from the rules themselves
         const between = items.some(it => it.base > last.y + 3 && it.base < l.y - 1 && it.x < Math.max(l.x1, last.x1) && it.x1 > Math.min(l.x0, last.x0) && !/^\.*$/.test(it.str.replace(/\s/g, "")));
@@ -269,6 +299,22 @@ const Detect = (() => {
       regions.push({ kind: hgt <= 36 ? "cell" : "box", x0: b.x0 + 1.5, x1: b.x1 - 1.5, y0: b.y0 + 1.5, y1: b.y1 - 1.5 });
     }
 
+    // gaps for the mass and atomic numbers in a nuclear equation: two short stacked blanks just left of an element symbol
+    const shortH = Hall.filter(l => l.x1 - l.x0 >= 6 && l.x1 - l.x0 <= 24 && l.th <= 1.5 && l.solid);
+    const usedShort = new Set();
+    for (const a of shortH) for (const b of shortH) {
+      if (a === b || usedShort.has(a) || usedShort.has(b)) continue;
+      const dy = b.y - a.y; if (dy < 7 || dy > 26) continue;
+      if (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) < 0.7 * Math.min(a.x1 - a.x0, b.x1 - b.x0)) continue;
+      const x0 = Math.min(a.x0, b.x0), x1 = Math.max(a.x1, b.x1);
+      const sym = items.find(it => /^[A-Z][a-z]?$/.test(it.str.trim()) && it.x >= x1 - 2 && it.x <= x1 + 14 && it.base > a.y - 2 && it.base < b.y + 8);
+      if (!sym) continue;
+      if (inkPt(x0 + 1, a.y + 1.2, x1 - 1, b.y - 1.2) > 4 * S) continue;          // something already written between them
+      if (inkPt(x0 + 1, a.y - 9, x1 - 1, a.y - 1.2) > 4 * S) continue;            // and above the top one
+      usedShort.add(a); usedShort.add(b);
+      for (const l of [a, b]) regions.push({ kind: "cell", x0: l.x0 - 1, x1: l.x1 + 1, y0: l.y - Math.min(9, dy - 1), y1: l.y + 0.5 });
+    }
+
     // geometry common to all kinds: top/bottom in pt
     for (const r of regions) {
       if (r.kind === "lines") { r.y0 = r.ys[0] - r.sp; r.y1 = r.ys[r.ys.length - 1] + 2; }
@@ -291,5 +337,5 @@ const Detect = (() => {
     return { regions, items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1) })), hasText: items.length > 0 };
   }
 
-  return { page, S };
+  return { page, S, _debug: { grey, integral, hRules, vRules, pairUp } };
 })();

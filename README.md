@@ -4,7 +4,7 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 
 ## Features
 
-- **Finds answer spaces automatically** from the page image and the text layer, so it works on most exam papers and on scans. Labelled lines ("Name …", "Description …") become separate spaces. Code answers (SQL, pseudocode, CSS) get a monospace font where Tab indents.
+- **Finds answer spaces automatically** from the page image and the text layer, so it works on most exam papers and on scans. Thin pale-grey answer lines are found wherever they fall on the pixel grid, graph paper and page frames are ignored, and short gaps in equations (including the mass and atomic numbers in nuclear equations) become answer spaces. Labelled lines ("Name …", "Description …") become separate spaces. Code answers (SQL, pseudocode, CSS) get a monospace font where Tab indents; a **</> Code** switch beside any answer (or just typing code) turns code mode on: no auto-capitals or corrections, Tab/Shift+Tab indent, and Enter keeps the indentation.
 - **Typed text sits on the printed lines.** Long answers shrink a little, then fit two lines per printed line, and only then extend the page with extra writing lines. The page is never split through printed text.
 - **Text, Pen and Smart tools**: Text only types, Pen only draws, Smart does both (tap to type, drag to draw). Laptops start on Text; iPads and devices where an Apple Pencil has been used start on Pen.
 - **Select and move drawings**: draw a box round any ink (mouse, finger or Pencil) and drag it anywhere, even to another page; Delete removes it and arrow keys nudge it. Undo works, and moves sync live.

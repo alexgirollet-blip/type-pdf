@@ -85,12 +85,18 @@ button{font:inherit;cursor:pointer}
 .page canvas.ink{position:absolute;left:0;top:0;touch-action:pan-x pan-y pinch-zoom;cursor:crosshair}
 .page.tool-eraser canvas.ink{cursor:cell}
 .page.tool-text canvas.ink{cursor:text}
-.page .ans{position:absolute;margin:0;border:0;padding:0;background:transparent;resize:none;overflow:hidden;color:var(--ink);
+.page .ans{caret-color:transparent;position:absolute;margin:0;border:0;padding:0;background:transparent;resize:none;overflow:hidden;color:var(--ink);
   font-family:var(--ans-font,"PaperSans"),sans-serif;white-space:pre-wrap;overflow-wrap:break-word;outline:none;border-radius:2px;caret-color:#1b4d47}
 .page .ans.code{font-family:"PaperMono",monospace;tab-size:4}
 .page .ans.cell{text-align:center}
 .page .ans:focus{background:rgba(47,125,116,.08);box-shadow:0 0 0 1px rgba(47,125,116,.55)}
 .hints .page .ans{background:rgba(47,125,116,.07);box-shadow:0 0 0 1px rgba(47,125,116,.25)}
+.page .ans.notch{box-shadow:none!important}
+.page .ansshape{position:absolute;pointer-events:none;overflow:visible;display:none}
+.page .ansshape path{fill:none;stroke:rgba(47,125,116,.55);stroke-width:1}
+.page .ans.notch:focus + .ansshape{display:block}
+.hints .page .ans.notch + .ansshape{display:block}
+.hints .page .ans.notch:not(:focus) + .ansshape path{stroke:rgba(47,125,116,.25)}
 .page .gapfill{position:absolute;left:0;right:0;border-top:1px dashed #b9c3bf;border-bottom:1px dashed #b9c3bf;pointer-events:none}
 .page .gapfill span{position:absolute;right:6px;top:2px;font:11px var(--ui);color:#8a9792}
 .page .pno{position:absolute;bottom:-18px;right:0;font:12px var(--ui);color:#dfe5e3}
@@ -228,3 +234,9 @@ label.inline{display:block;margin-top:10px;font-size:14px}
 .page .selbox{position:absolute;border:1.5px dashed #2f7d74;background:rgba(47,125,116,.05);pointer-events:none;z-index:6;border-radius:3px}
 .page .selbox .seldel{position:absolute;right:-2px;top:-30px;pointer-events:auto;font:600 12px var(--ui);padding:4px 10px;border-radius:6px;border:1px solid #b33;background:#fff;color:#b33;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.2);touch-action:manipulation}
 .seloverlay{position:fixed;pointer-events:none;z-index:50;display:none}
+.page .tcaret{position:absolute;pointer-events:none;z-index:5;border-radius:1px}
+.page .tcaret[hidden]{display:none}
+.page .tcaret.blink{animation:tblink 1.06s steps(1) .5s infinite}
+@keyframes tblink{50%{opacity:0}}
+.codefloat{font-family:"PaperMono",ui-monospace,monospace;border-color:#3d6f8f;background:#eef5fa;color:#2b5875}
+.codefloat.on{background:#3d6f8f;color:#fff}
