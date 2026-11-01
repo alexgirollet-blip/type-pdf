@@ -93,7 +93,8 @@ window.Sync = (() => {
     deleteDoc: async (user, id) => jsonOrThrow(await api(`/api/admin/user/${user}/docs/${id}`, { method: "DELETE" })),
     deleteUser: async user => jsonOrThrow(await api(`/api/admin/user/${user}`, { method: "DELETE" })),
   };
-  function fetchPdf(url) { return api("/api/fetch-pdf?url=" + encodeURIComponent(url)); }
+  function fetchPdf(url, name) { return api("/api/fetch-pdf?url=" + encodeURIComponent(url) + (name ? "&name=" + encodeURIComponent(name) : "")); }
+  async function apiGet(path) { return jsonOrThrow(await api(path)); }
   async function uploadPdf(d) {
     try {
       const r = await api(`/api/pdf/${d.pdf || d.id}?doc=${d.id}&name=${encodeURIComponent(d.name)}`, { method: "PUT", body: d.bytes.slice(0), headers: { "content-type": "application/pdf" } });
@@ -273,7 +274,7 @@ window.Sync = (() => {
   function flashLive() { const pill = $("#syncPill"); if (!pill) return; pill.classList.remove("flash"); void pill.offsetWidth; pill.classList.add("flash"); }
 
   return {
-    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, openAuth, signIn, refreshInfo, admin, share, focus,
+    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, apiGet, openAuth, signIn, refreshInfo, admin, share, focus,
     get user() { return S.user; }, get info() { return S.info; }, get people() { return S.people; }, get sid() { return S.sid; },
   };
 })();

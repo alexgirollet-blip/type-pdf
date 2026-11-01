@@ -107,11 +107,11 @@ document.addEventListener("paste", async e => {
   if (files.length) toast("Only PDF files can be pasted.");
 });
 $("#linkForm").addEventListener("submit", e => { e.preventDefault(); const v = $("#linkIn").value.trim(); if (v) openLink(v); });
-async function openLink(url) {
+async function openLink(url, title) {
   busy(true, "Fetching the PDF…");
   try {
     let res;
-    if (window.Sync && Sync.user) res = await Sync.fetchPdf(url);
+    if (window.Sync && Sync.user) res = await Sync.fetchPdf(url, title);
     else { try { res = await fetch(url); } catch (e) { busy(false); toast("That site doesn't allow direct downloads. Sign in to open PDFs from links, or download it and drop it here.", 6000); return; } }
     if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || "the link didn't work (" + res.status + ")"); }
     const buf = await res.arrayBuffer();

@@ -317,3 +317,35 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .boxmode .page .choice{pointer-events:none}
 #editor.viewonly .page .choice{cursor:default}
 .page .choice.jumpflash{animation:jflash 1.6s ease-out}
+/* past paper finder: a quiet section on the home page */
+.finder{border:1px solid var(--line);border-radius:10px;background:var(--paper);padding:0 12px}
+.finder summary{cursor:pointer;padding:10px 0;font-weight:600;font-size:14px;color:var(--fg);list-style-position:inside}
+.finder summary small{font-weight:400;color:var(--muted);margin-left:6px}
+.finder[open] summary{border-bottom:1px solid var(--line);margin-bottom:10px}
+.pfrow{display:flex;gap:8px;flex-wrap:wrap}
+.pfrow select,.pfrow input{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}
+.pfrow select{flex:0 1 190px;min-width:0}
+.pfrow input{flex:1 1 220px;min-width:0}
+.pfrow button{padding:7px 14px}
+.pfnote{margin:8px 0;font-size:13px;color:var(--muted)}
+.pfnote.err{color:var(--danger)}
+.pftags{display:grid;gap:6px;margin-bottom:8px}
+.pfgroup{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.pfgroup>span{font-size:12px;color:var(--muted);min-width:76px}
+.pftag{font-size:12.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+.pftag small{color:var(--muted);margin-left:2px}
+.pftag.on{background:var(--accent-2);border-color:var(--accent-2);color:#fff}
+.pftag.on small{color:#e3f1ee}
+.pfclear{justify-self:start;font-size:12px;border:0;background:none;color:var(--accent);text-decoration:underline;padding:0}
+.pfgroup select{font:inherit;font-size:13px;padding:3px 6px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.pflist{list-style:none;margin:0 0 12px;padding:0;display:grid;gap:4px;max-height:420px;overflow:auto}
+.pflist li{display:flex;gap:8px;align-items:center;padding:7px 8px;border:1px solid var(--line);border-radius:8px}
+.pfinfo{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline}
+.pfinfo b{font-size:14px}
+.pfinfo small{flex-basis:100%;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pfkind{font-size:11px;padding:1px 7px;border-radius:999px;background:var(--soft);color:var(--accent)}
+.pfkind.k-mark{background:#fdf0dc;color:#9a5a00}
+.pfkind.k-examiner{background:#ece6fa;color:#5b3fa0}
+.pfsrc{font-size:12px;color:var(--muted);text-decoration:none;white-space:nowrap}
+.pfopen{padding:5px 10px;font-size:13px;white-space:nowrap;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:#fff}
+@media (max-width:560px){.pflist li{flex-wrap:wrap}.pfinfo{flex-basis:100%}}

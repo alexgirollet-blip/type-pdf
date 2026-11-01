@@ -2,6 +2,7 @@
 // live sync and shared (collaborative) papers.
 // Storage changes are additive only (new tables / new columns), so existing accounts and papers
 // carry over untouched when a new version is deployed.
+import { pmtSearch, pmtSubjects, isPmtPdf, PMT_UA } from "./pmt.js";
 import { DurableObject } from "cloudflare:workers";
 
 const MB = 1024 * 1024;
@@ -305,17 +306,25 @@ async function api(req, env, url, ctx) {
   }
 
   // fetch a PDF from a pasted link (signed-in users only, PDFs only)
+  // ---- past paper finder: Physics & Maths Tutor's A-level papers ----
+  if (path === "/api/pmt/subjects") {
+    try { return json({ subjects: await pmtSubjects() }); } catch (e) { return bad(String(e.message || e), 502); }
+  }
+  if (path === "/api/pmt/search") {
+    try { const r = await pmtSearch(url.searchParams.get("q") || "", url.searchParams.get("subject") || ""); return r.error ? bad(r.error, 502) : json(r); }
+    catch (e) { return bad(String(e.message || e), 502); }
+  }
   if (path === "/api/fetch-pdf") {
     const target = url.searchParams.get("url") || "";
     let u; try { u = new URL(target); } catch { return bad("That link isn't valid."); }
     if (!/^https?:$/.test(u.protocol)) return bad("Only http and https links work.");
-    const r = await fetch(u.toString(), { headers: { "user-agent": "type-pdf/1.0" }, redirect: "follow" });
+    const r = await fetch(u.toString(), { headers: { "user-agent": isPmtPdf(u.toString()) ? PMT_UA : "type-pdf/1.0" }, redirect: "follow" });
     if (!r.ok) return bad(`The site answered ${r.status}.`, 502);
     if (+(r.headers.get("content-length") || 0) > MAX_PDF) return bad("That PDF is too large (40 MB max).", 413);
     const buf = await r.arrayBuffer();
     if (buf.byteLength > MAX_PDF) return bad("That PDF is too large (40 MB max).", 413);
     if (!new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024))).includes("%PDF")) return bad("That link isn't a PDF file.");
-    const name = decodeURIComponent((u.pathname.split("/").pop() || "paper.pdf")).slice(0, 120);
+    const name = (String(url.searchParams.get("name") || "").replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 110) + (url.searchParams.get("name") ? ".pdf" : "")) || decodeURIComponent((u.pathname.split("/").pop() || "paper.pdf")).slice(0, 120);
     return new Response(buf, { headers: { "content-type": "application/pdf", "x-file-name": encodeURIComponent(name) } });
   }
 
