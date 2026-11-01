@@ -128,7 +128,13 @@ export default {
 
 // ---------- the hub: accounts live there; TypePDF only trusts its signed passes ----------
 const hubOn = env => !!(env.HUB_URL && env.HUB_SSO_SECRET);
-const hubBase = env => String(env.HUB_URL || "").trim().replace(/\/+$/, "");
+// only the hub's address counts: a path pasted on the end (".../api", ".../login") or a missing https:// would
+// otherwise send people to the wrong page, which answers {"error":"Sign in first"}
+const hubBase = env => {
+  let v = String(env.HUB_URL || "").trim().replace(/^["']|["']$/g, "");
+  if (v && !/^https?:\/\//i.test(v)) v = "https://" + v;
+  try { return new URL(v).origin; } catch { return v.replace(/\/+$/, ""); }
+};
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64u = s => { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); };
 async function hmac(secret, text) {
@@ -167,6 +173,7 @@ async function api(req, env, url, ctx) {
   // sign in: off to the hub, which sends the person back here with a signed pass
   if (path === "/api/auth/hub-login") {
     if (!hubOn(env)) return new Response("Sign-in isn't set up on this site yet (HUB_URL and HUB_SSO_SECRET).", { status: 503 });
+    if (hubBase(env) === url.origin) return new Response("HUB_URL on the TypePDF Worker is set to TypePDF's own address. Set it to the GirolletServer hub's address, e.g. https://girolletserver.com", { status: 503 });
     return redirectTo(hubBase(env) + "/sso/typepdf?return=" + encodeURIComponent(url.origin + "/api/auth/hub-callback"));
   }
   if (path === "/api/auth/hub-callback") {
