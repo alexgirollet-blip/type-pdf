@@ -927,6 +927,10 @@ function placeInkSel() {
     const del = document.createElement("button"); del.type = "button"; del.className = "seldel"; del.textContent = "Delete"; del.title = "Delete the selected drawing (Delete key)";
     del.addEventListener("pointerdown", e => e.stopPropagation()); del.onclick = e => { e.stopPropagation(); deleteInkSel(); };
     el.appendChild(del);
+    for (const c of ["nw", "ne", "sw", "se"]) {
+      const h = document.createElement("div"); h.className = "selh " + c; h.dataset.c = c; h.title = "Drag to resize the drawing";
+      h.addEventListener("pointerdown", e => selScaleDown(e, c)); el.appendChild(h);
+    }
   }
   if (el.parentElement !== v.el) v.el.appendChild(el);
   el.style.left = (b.x0 - SEL_PAD) * zoom + "px"; el.style.top = (b.y0 - SEL_PAD) * zoom + "px";
@@ -961,10 +965,41 @@ function applyMove(a, which) {
   for (const it of a.items) {
     const i = S.findIndex(s => s.id === it.id); if (i < 0) continue;     // gone (e.g. deleted on another device)
     const s = S[i]; s.pts = it[which];
+    if (it.w) s.w = it.w[which === "after" ? 1 : 0];             // resized: line thickness scales too
     if (src !== dst) { S.splice(i, 1); D.push(s); emit(`s:${src}:${s.id}`); }
     emit(`s:${dst}:${s.id}`);
   }
   drawInk(src); if (dst !== src) drawInk(dst); scheduleSave();
+}
+// ---- resizing the selection from a corner: scales evenly about the opposite corner, line thickness included,
+// so the writing looks exactly the same, just bigger or smaller ----
+function scaleFactor(op, cx, cy) {
+  const v = views[op.p], r = v.ink.getBoundingClientRect(), q = [(cx - r.left) / zoom, (cy - r.top) / zoom];
+  const d0 = [op.corner[0] - op.anchor[0], op.corner[1] - op.anchor[1]], d = [q[0] - op.anchor[0], q[1] - op.anchor[1]];
+  let k = (d[0] * d0[0] + d[1] * d0[1]) / Math.max(1e-6, d0[0] * d0[0] + d0[1] * d0[1]);
+  // keep it a sensible size and on the page
+  const b = op.box, P = doc.pages[op.p], Hd = pageDispH(op.p), A = op.anchor;
+  const lim = [];
+  if (b.x1 > A[0] + 0.01) lim.push((P.w - A[0]) / (b.x1 - A[0])); if (b.x0 < A[0] - 0.01) lim.push(A[0] / (A[0] - b.x0));
+  if (b.y1 > A[1] + 0.01) lim.push((Hd - A[1]) / (b.y1 - A[1])); if (b.y0 < A[1] - 0.01) lim.push(A[1] / (A[1] - b.y0));
+  const minK = Math.max(0.15, 4 / Math.max(b.x1 - b.x0, b.y1 - b.y0, 1));
+  return clamp(k, minK, Math.min(8, ...lim));
+}
+function selScaleDown(e, c) {
+  if (!inkSel || !inkSel.box || selOp) return;
+  e.preventDefault(); e.stopPropagation();
+  try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {}
+  const b = inkSel.box, p = inkSel.p;
+  const corner = [c[1] === "w" ? b.x0 : b.x1, c[0] === "n" ? b.y0 : b.y1], anchor = [c[1] === "w" ? b.x1 : b.x0, c[0] === "n" ? b.y1 : b.y0];
+  selOp = { kind: "scale", id: e.pointerId, p, cx: e.clientX, cy: e.clientY, x: e.clientX, y: e.clientY, corner, anchor, box: { ...b }, moved: false, k: 1, list: selStrokes().map(s => ({ s, pts: dispPts(p, s) })) };
+  window.addEventListener("pointermove", selMove); window.addEventListener("pointerup", selUp); window.addEventListener("pointercancel", cancelSelOp);
+  selOp.raf = requestAnimationFrame(selTick);
+}
+function scaleStrokes(p, ids, A, k) {
+  const list = (doc.strokes[p] || []).filter(s => ids.has(s.id)); if (!list.length) return;
+  const items = list.map(s => ({ id: s.id, before: s.pts, after: dispPts(p, s).map(pt => toAnchor(p, A[0] + (pt[0] - A[0]) * k, A[1] + (pt[1] - A[1]) * k)), w: [s.w, Math.round(s.w * k * 100) / 100] }));
+  const a = { t: "move", from: p, to: p, items };
+  pushUndo(a); applyMove(a, "after");
 }
 function nudgeInkSel(dx, dy) {
   if (!inkSel || !inkSel.box) return; const p = inkSel.p, b = inkSel.box, P = doc.pages[p];
@@ -1002,7 +1037,7 @@ function selDown(p, e) {
   window.addEventListener("pointermove", selMove); window.addEventListener("pointerup", selUp); window.addEventListener("pointercancel", cancelSelOp);
   selOp.raf = requestAnimationFrame(selTick);
 }
-function selMove(e) { if (!selOp || e.pointerId !== selOp.id) return; selOp.cx = e.clientX; selOp.cy = e.clientY; if (selOp.kind === "move" && !selOp.moved && Math.hypot(e.clientX - selOp.x, e.clientY - selOp.y) > 3) { selOp.moved = true; inkSel.moving = true; drawInk(selOp.p); const el = $(".selbox"); if (el) el.style.display = "none"; } }
+function selMove(e) { if (!selOp || e.pointerId !== selOp.id) return; selOp.cx = e.clientX; selOp.cy = e.clientY; if ((selOp.kind === "move" || selOp.kind === "scale") && !selOp.moved && Math.hypot(e.clientX - selOp.x, e.clientY - selOp.y) > 3) { selOp.moved = true; inkSel.moving = true; drawInk(selOp.p); const el = $(".selbox"); if (el) el.style.display = "none"; } }
 // every frame: scroll when near the top/bottom edge, then redraw the box or the dragged drawings
 function selTick() {
   if (!selOp) return;
@@ -1014,6 +1049,17 @@ function selTick() {
     const q = [clamp((selOp.cx - b.left) / zoom, 0, P.w), clamp((selOp.cy - b.top) / zoom, 0, pageDispH(selOp.p))], s0 = selOp.start;
     selOp.end = q;
     Object.assign(selOp.el.style, { left: Math.min(s0[0], q[0]) * zoom + "px", top: Math.min(s0[1], q[1]) * zoom + "px", width: Math.abs(q[0] - s0[0]) * zoom + "px", height: Math.abs(q[1] - s0[1]) * zoom + "px" });
+  } else if (selOp.kind === "scale") {
+    if (selOp.moved) {
+      const k = selOp.k = scaleFactor(selOp, selOp.cx, selOp.cy), A = selOp.anchor, v = views[selOp.p], r = v.ink.getBoundingClientRect(), ctx = overlayCtx();
+      ctx.save(); ctx.translate(r.left, r.top);
+      const tp = pts => pts.map(q => [A[0] + (q[0] - A[0]) * k, A[1] + (q[1] - A[1]) * k]);
+      for (const pass of ["hl", "pen"]) for (const it of selOp.list) if ((it.s.t === "hl") === (pass === "hl")) drawStroke(ctx, { ...it.s, w: it.s.w * k }, tp(it.pts), zoom);
+      const b = selOp.box, x0 = A[0] + (b.x0 - A[0]) * k, x1 = A[0] + (b.x1 - A[0]) * k, y0 = A[1] + (b.y0 - A[1]) * k, y1 = A[1] + (b.y1 - A[1]) * k;
+      ctx.strokeStyle = "#2f7d74"; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+      ctx.strokeRect((Math.min(x0, x1) - SEL_PAD) * zoom, (Math.min(y0, y1) - SEL_PAD) * zoom, (Math.abs(x1 - x0) + SEL_PAD * 2) * zoom, (Math.abs(y1 - y0) + SEL_PAD * 2) * zoom);
+      ctx.restore();
+    }
   } else if (selOp.moved) {
     const ctx = overlayCtx(), sb = inkSel.box, w = sb.x1 - sb.x0, h = sb.y1 - sb.y0;
     const left = selOp.cx - selOp.grab[0] * zoom, top = selOp.cy - selOp.grab[1] * zoom;   // where the box's top-left is on screen
@@ -1046,6 +1092,12 @@ function selUp(e) {
     if (!ids.size) { toast("No drawings inside that box.", 1500); return; }
     inkSel = { p: op.p, ids }; placeInkSel();
     return;
+  }
+  if (op.kind === "scale") {
+    if (!inkSel) return;
+    inkSel.moving = false;
+    if (op.moved && Math.abs(op.k - 1) > 0.005) { const ids = new Set(inkSel.ids); scaleStrokes(op.p, ids, op.anchor, op.k); inkSel = { p: op.p, ids }; }
+    drawInk(op.p); placeInkSel(); return;
   }
   // move
   if (!inkSel) return;
