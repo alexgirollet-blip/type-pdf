@@ -108,7 +108,7 @@ window.Sync = (() => {
     if (k === "font") return doc.font ? JSON.stringify(doc.font) : null;
     if (k.startsWith("flag:")) return doc.flags && doc.flags[k.slice(5)] ? JSON.stringify(doc.flags[k.slice(5)]) : null;
     let m;
-    if ((m = k.match(/^page:(\d+)$/))) { const P = doc.pages[+m[1]]; if (!P) return null; return JSON.stringify({ w: P.w, h: P.h, rot: P.rot, hasText: P.hasText, ocr: P.ocr, items: P.items, regions: P.regions.map(cleanRegion) }); }
+    if ((m = k.match(/^page:(\d+)$/))) { const P = doc.pages[+m[1]]; if (!P) return null; return JSON.stringify({ w: P.w, h: P.h, rot: P.rot, hasText: P.hasText, ocr: P.ocr, items: P.items, qs: P.qs, regions: P.regions.map(cleanRegion) }); }
     if ((m = k.match(/^text:(.+)$/))) return doc.text[m[1]] ? JSON.stringify(doc.text[m[1]]) : null;
     if ((m = k.match(/^s:(\d+):(.+)$/))) { const s = (doc.strokes[+m[1]] || []).find(q => q.id === m[2]); if (!s || s._live) return null; const { _live, ...rest } = s; return JSON.stringify(rest); }
     return null;

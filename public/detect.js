@@ -334,8 +334,8 @@ const Detect = (() => {
       r.code = nLines >= 3 && CODE_RE.test(lastSentence);
     }
     regions.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
-    return { regions, items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1) })), hasText: items.length > 0 };
+    return { regions, items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1), h: +it.fh.toFixed(1) })), hasText: items.length > 0 };
   }
 
-  return { page, S, _debug: { grey, integral, hRules, vRules, pairUp } };
+  return { page, S, textItems, _debug: { grey, integral, hRules, vRules, pairUp } };
 })();

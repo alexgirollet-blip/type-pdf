@@ -186,6 +186,7 @@ async function openDoc(d, fresh = false) {
     doc.pages[i] = await detectPage(i, doc.pages[i]);
     emit("page:" + i);
   }
+  if (doc.pages.some(P => P && !Array.isArray(P.qs))) { busy(true, "Finding the questions…"); await findQuestions().catch(e => console.warn("questions", e)); }
   if (!doc.font) { const name = await detectFont().catch(() => ""); doc.font = { key: matchFont(name) || FONT_DEFAULT, auto: true, detected: name || "" }; emit("font"); }
   await applyFont(false);
   busy(false);
@@ -312,9 +313,10 @@ async function ensureOcr() {
       const page = await pdf.getPage(p + 1), vp2 = page.getViewport({ scale: Detect.S });   // the printed page as is (no added space)
       const c = document.createElement("canvas"); c.width = Math.ceil(vp2.width); c.height = Math.ceil(vp2.height);
       const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, c.width, c.height); await page.render({ canvasContext: cx, viewport: vp2 }).promise;
-      doc.pages[p].items = await ocrMargin(c, page.getViewport({ scale: 1 })); doc.pages[p].ocr = true; c.width = 0;
+      doc.pages[p].items = await ocrMargin(c, page.getViewport({ scale: 1 })); doc.pages[p].ocr = true; c.width = 0; delete doc.pages[p].qs;
       emit("page:" + p);
     }
+    await findQuestions(); doc.pages.forEach((P, p) => { layoutPage(p); });
     scheduleSave();
   } catch (e) { toast("Couldn't read the question numbers from this paper's images: " + (e.message || e), 5000); }
   busy(false);
@@ -500,6 +502,37 @@ let viewT; $("#pages").addEventListener("scroll", () => { clearTimeout(viewT); v
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") { saveView(); saveNow(); } });
 window.addEventListener("pagehide", () => { saveView(); });
 function findRegion(id) { for (const P of doc.pages) { const r = P && P.regions.find(q => q.id === id); if (r) return r; } return null; }
+
+// ---------------- question markers: a box over each printed question number and part ----------------
+// found from the text (with font sizes) of every page together, since the numbering runs across pages.
+// Only pages without markers get them, so markers someone has fixed in the Boxes tool are kept.
+async function findQuestions() {
+  const pages = [];
+  for (let i = 0; i < doc.pages.length; i++) {
+    const P = doc.pages[i]; if (!P) { pages.push(null); continue; }
+    let items = P.items || [];
+    if (P.hasText && pdf && !(items.length && items[0].h)) {             // saved before font sizes were kept: read the text again
+      try { const page = await pdf.getPage(i + 1), tc = await page.getTextContent(); items = Detect.textItems(tc, page.getViewport({ scale: 1 })).map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1), h: +it.fh.toFixed(1) })); } catch (e) {}
+    }
+    pages.push({ w: P.w, h: P.h, items });
+  }
+  const found = Questions.detect(pages);
+  doc.pages.forEach((P, p) => { if (P && !Array.isArray(P.qs)) { P.qs = found[p] || []; if (canEdit()) emit("page:" + p); } });
+}
+const canEdit = () => !(doc && doc.shared && doc.shared.role === "view");
+function markerRect(p, m) { return { x0: m.x0, x1: m.x1, y0: disp(p, m.y0), y1: disp(p, m.y1) }; }
+function drawMarkers(p) {
+  const v = views[p], P = doc.pages[p]; if (!v) return;
+  $$(".qmark", v.el).forEach(e => e.remove());
+  if (boxMode) return;                                                  // the Boxes tool draws them itself, editable
+  const lab = new Map(labelIndex().filter(e => e.p === p).map(e => [e.m, e.label]));
+  for (const m of P.qs || []) {
+    const R = markerRect(p, m), d = document.createElement("div");
+    d.className = "qmark"; d.dataset.qid = m.id; d.title = "Question " + (lab.get(m) || m.tok);
+    Object.assign(d.style, { left: R.x0 * zoom + "px", top: R.y0 * zoom + "px", width: (R.x1 - R.x0) * zoom + "px", height: (R.y1 - R.y0) * zoom + "px" });
+    v.el.appendChild(d);
+  }
+}
 
 // ---------------- geometry: page extension ("gaps") ----------------
 function gapList(p) {
@@ -780,6 +813,7 @@ function layoutPage(p) {
     m.onclick = () => { const ta = r._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); };
     v.el.appendChild(m);
   }
+  drawMarkers(p);
   sizeInk(p); drawInk(p);
   if (v.visible) composite(p);
   if (boxMode) drawBoxes(p);
@@ -1403,7 +1437,7 @@ function setBoxMode(on) {
   boxMode = on; $("#boxBar").hidden = !on; $("#editor").classList.toggle("boxmode", on);
   $$(".tool").forEach(b => b.classList.toggle("on", on ? b.dataset.tool === "boxes" : b.dataset.tool === tool));
   sel = null; updateSelTools();
-  doc.pages.forEach((P, p) => drawBoxes(p));
+  doc.pages.forEach((P, p) => { drawBoxes(p); drawMarkers(p); });
 }
 const KIND_NAME = { lines: "Lines", box: "Box", cell: "Cell" };
 function drawBoxes(p) {
@@ -1416,15 +1450,38 @@ function drawBoxes(p) {
     d.innerHTML = `<b>${KIND_NAME[r.kind]}${r.kind === "lines" ? " ×" + r.ys.length : ""}${r.code ? " · code" : ""}</b><i></i>`;
     d.dataset.rid = r.id; v.el.appendChild(d);
   }
+  // question markers: a box over each printed question number, labelled with the question it starts
+  const lab = new Map(labelIndex().filter(e => e.p === p).map(e => [e.m, e.label]));
+  for (const m of doc.pages[p].qs || []) {
+    const R = markerRect(p, m), d = document.createElement("div");
+    d.className = "bx q" + (sel && sel.r === m ? " sel" : "");
+    d.style.left = R.x0 * zoom + "px"; d.style.top = R.y0 * zoom + "px"; d.style.width = (R.x1 - R.x0) * zoom + "px"; d.style.height = (R.y1 - R.y0) * zoom + "px";
+    d.innerHTML = `<b>Q ${(lab.get(m) || m.tok).replace(/</g, "")}</b><i></i>`;
+    d.dataset.qid = m.id; d.title = "Question marker: Go to jumps here. Drag to move, corner to resize."; v.el.appendChild(d);
+  }
 }
 function updateSelTools() {
   $("#selTools").hidden = !sel;
-  if (sel) { $("#kindBtn").textContent = "Type: " + KIND_NAME[sel.r.kind]; $("#codeBtn").textContent = "Code: " + (sel.r.code ? "on" : "off"); }
+  if (!sel) return;
+  $("#codeBtn").hidden = !!sel.q;
+  if (sel.q) { const e = labelIndex().find(x => x.m === sel.r); $("#kindBtn").textContent = "Label: " + (e ? e.label : sel.r.tok); $("#delBtn").textContent = "Delete marker"; return; }
+  $("#delBtn").textContent = "Delete space";
+  $("#kindBtn").textContent = "Type: " + KIND_NAME[sel.r.kind]; $("#codeBtn").textContent = "Code: " + (sel.r.code ? "on" : "off");
+}
+// what a question marker says: its own number or part ("5", "b", "ii"); a full label like 4(b)(ii) uses its last part
+function askMarkerLabel(cur) {
+  const v = prompt("What's printed here? A question number (5), a part (b) or a sub-part (ii). AQA parts like 06.2 work too.", cur || "");
+  if (v === null) return null;
+  const t = Questions.parseTok(v);
+  if (!t) { toast("That isn't a question number or part. Try 5, b or ii."); return null; }
+  return t;
 }
 $$(".nk").forEach(b => b.onclick = () => { newKind = b.dataset.k; $$(".nk").forEach(x => x.classList.toggle("on", x === b)); });
 $("#doneBoxes").onclick = () => setBoxMode(false);
 $("#delBtn").onclick = () => deleteSel();
-$("#kindBtn").onclick = () => { if (!sel) return; const order = ["lines", "box", "cell"]; const nk = order[(order.indexOf(sel.r.kind) + 1) % 3]; convertKind(sel.p, sel.r, nk); };
+$("#kindBtn").onclick = () => {
+  if (sel && sel.q) { const t = askMarkerLabel(sel.r.num ? "." + sel.r.tok : sel.r.tok); if (!t) return; const m = sel.r; m.lvl = t.lvl; m.tok = t.tok; if (t.num) m.num = true; else delete m.num; pageChanged(sel.p); doc.pages.forEach((P, q) => drawBoxes(q)); updateSelTools(); return; }
+  if (!sel) return; const order = ["lines", "box", "cell"]; const nk = order[(order.indexOf(sel.r.kind) + 1) % 3]; convertKind(sel.p, sel.r, nk); };
 $("#codeBtn").onclick = () => { if (!sel) return; sel.r.code = !sel.r.code; rebuildField(sel.p, sel.r); pageChanged(sel.p); };
 function currentPage() { const host = $("#pages"); let p = 0; const mid = host.scrollTop + host.clientHeight / 3; views.forEach((v, i) => { if (v.el.offsetTop <= mid) p = i; }); return p; }
 $("#redetect").onclick = async () => {
@@ -1440,13 +1497,15 @@ $("#redetect").onclick = async () => {
     if (best) { doc.text[best.id] = (doc.text[best.id] ? doc.text[best.id] + "\n" : "") + t; emit("text:" + best.id); }
     else toast("Some typed text had no matching box and was removed.", 4000);
   }
-  doc.pages[p].gaps = {}; doc.pages[p].regions = fresh.regions; doc.pages[p].items = fresh.items;
+  doc.pages[p].gaps = {}; doc.pages[p].regions = fresh.regions; doc.pages[p].items = fresh.items; delete doc.pages[p].qs;
+  await findQuestions();
   rebuildPageFields(p); pageChanged(p); busy(false); toast(`Page ${p + 1}: ${fresh.regions.length} answer spaces.`);
 };
 function pageChanged(p) { emit("page:" + p); scheduleSave(); }
 function rebuildPageFields(p) { $$(".ans,.ansshape", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
 function rebuildField(p, r) { if (r._el) r._el.remove(); if (r._shape) { r._shape.remove(); r._shape = null; } makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
 function deleteSel() {
+  if (sel && sel.q) { const { p, r } = sel, P = doc.pages[p]; P.qs = (P.qs || []).filter(m => m !== r); sel = null; updateSelTools(); pageChanged(p); doc.pages.forEach((P2, q) => drawBoxes(q)); return; }
   if (!sel) return; const { p, r } = sel; const P = doc.pages[p];
   setGap(p, r, 0); P.regions.splice(P.regions.indexOf(r), 1); if (r._el) r._el.remove(); if (r._shape) r._shape.remove();
   if (doc.text[r.id]) toast("Box deleted. Its typed text was removed too.");
@@ -1474,6 +1533,18 @@ $("#pages").addEventListener("pointerdown", e => {
   const p0 = pt(e);
   const bx = e.target.closest(".bx");
   e.preventDefault();
+  if (bx && bx.dataset.qid) {
+    const m = (doc.pages[p].qs || []).find(q => q.id === bx.dataset.qid); if (!m) return;
+    sel = { p, r: m, q: true }; updateSelTools(); drawBoxes(p);
+    const resize = e.target.tagName === "I", o = { x0: m.x0, x1: m.x1, y0: m.y0, y1: m.y1 }, P = doc.pages[p];
+    const mv = ev => { const q = pt(ev), dx = q[0] - p0[0], dy = q[1] - p0[1];
+      if (resize) { m.x1 = clamp(o.x1 + dx, o.x0 + 4, P.w); m.y1 = clamp(o.y1 + dy, o.y0 + 4, P.h); }
+      else { const w = o.x1 - o.x0, h = o.y1 - o.y0; m.x0 = clamp(o.x0 + dx, 0, P.w - w); m.y0 = clamp(o.y0 + dy, 0, P.h - h); m.x1 = m.x0 + w; m.y1 = m.y0 + h; }
+      m.x0 = r2(m.x0); m.x1 = r2(m.x1); m.y0 = r2(m.y0); m.y1 = r2(m.y1); drawBoxes(p); };
+    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); pageChanged(p); doc.pages.forEach((P2, q) => drawBoxes(q)); updateSelTools(); };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+    return;
+  }
   if (bx) {
     const r = doc.pages[p].regions.find(q => q.id === bx.dataset.rid); sel = { p, r }; updateSelTools(); drawBoxes(p);
     const resize = e.target.tagName === "I";
@@ -1494,6 +1565,13 @@ $("#pages").addEventListener("pointerdown", e => {
   const up = () => {
     window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); rb.remove();
     const w = Math.abs(q[0] - p0[0]), h = Math.abs(q[1] - p0[1]);
+    if (newKind === "q") {                                           // a new question marker
+      if (w < 4 || h < 4) return;
+      const t = askMarkerLabel(""); if (!t) return;
+      const m = { id: "q" + p + "_u" + rid8(), lvl: t.lvl, tok: t.tok, ...(t.num ? { num: true } : {}), x0: r2(Math.min(p0[0], q[0])), x1: r2(Math.max(p0[0], q[0])), y0: r2(src(p, Math.min(p0[1], q[1]))), y1: r2(src(p, Math.max(p0[1], q[1]))) };
+      (doc.pages[p].qs ||= []).push(m); sel = { p, r: m, q: true }; pageChanged(p); doc.pages.forEach((P2, k) => drawBoxes(k)); updateSelTools();
+      return;
+    }
     if (w < 12 || h < 8) return;
     const r = { id: `${p}:u${rid8()}`, kind: newKind, code: false, label: "" };
     const y0 = src(p, Math.min(p0[1], q[1])), y1 = src(p, Math.max(p0[1], q[1]));
@@ -1523,25 +1601,8 @@ $("#tReset").onclick = () => { doc.timer = null; timerTick(); scheduleSave(); em
 document.addEventListener("pointerdown", e => { const pop = $("#timerPop"); if (!pop.hidden && !pop.contains(e.target) && !$("#timerBtn").contains(e.target)) pop.hidden = true; });
 
 // ---------------- question labels ----------------
-// walk the printed text in reading order, tracking question / part / sub-part numbers
-function labelIndex() {
-  const idx = []; let q = "", a = "", r = "";
-  doc.pages.forEach((P, p) => {
-    const items = (P.items || []).filter(it => it.x < 150).sort((m, n) => m.y - n.y || m.x - n.x);
-    for (const it of items) {
-      let changed = false;
-      for (const t of it.s.trim().split(/\s+/)) {
-        let m;
-        if ((m = t.match(/^(\d{1,2})\*?$/)) && it.x < 75 && +m[1] > 0 && +m[1] < 40) { q = m[1]; a = ""; r = ""; changed = true; }
-        else if ((m = t.match(/^\(([ivx]{1,4})\)\*?$/)) && a && !(m[1] === "i" && a === "h")) { r = m[1]; changed = true; }
-        else if ((m = t.match(/^\(([a-h,j-z])\)\*?$/)) || (m = t.match(/^\((i)\)\*?$/))) { a = m[1]; r = ""; changed = true; }
-        else break;
-      }
-      if (changed) idx.push({ p, y: it.y - 2, label: q + (a ? `(${a})` : "") + (r ? `(${r})` : "") });
-    }
-  });
-  return idx;
-}
+// the question markers (questions.js), in reading order, with their full labels ("4(b)(ii)")
+function labelIndex() { return Questions.index(doc.pages); }
 function labelAt(idx, p, y) { let lab = "?"; for (const e of idx) { if (e.p < p || (e.p === p && e.y <= y)) lab = e.label; else break; } return lab; }
 // the printed wording just above an answer space (for marking without the paper)
 function questionText(p, r, prevBottom) {
@@ -1878,11 +1939,11 @@ function inkedRegions() {
   return out;
 }
 const isAnswered = (r, inked) => !!((doc.text[r.id] || "").trim() || inked.has(r.id));
-const normQ = s => String(s).toLowerCase().replace(/^\s*(question|q)\s*/, "").replace(/[\s().,]/g, "");
+const normQ = s => String(s).toLowerCase().replace(/^\s*(question|q)\s*/, "").replace(/^0+(?=\d)/, "").replace(/[\s().,]/g, "");
 // every question label in reading order, with the answer spaces that belong to it
 function questionMap() {
   const idx = labelIndex(), inked = inkedRegions(), byLabel = new Map();
-  for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.label.replace(/\(.*$/, ""), p: e.p, y: e.y, regions: [] });
+  for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.q, p: e.p, y: e.y, m: e.m, regions: [] });
   for (const [p, r] of orderedRegions()) { const lab = labelAt(idx, p, r.y0 + 6); const e = byLabel.get(lab); if (e) e.regions.push([p, r]); }
   const list = [...byLabel.values()];
   for (const e of list) { const n = e.regions.filter(([, r]) => isAnswered(r, inked)).length; e.done = n; e.flag = e.regions.some(([, r]) => doc.flags && doc.flags[r.id]); e.state = !e.regions.length ? "" : n === e.regions.length ? "done" : n ? "part" : ""; }
@@ -1902,8 +1963,9 @@ function canFocusOnJump() { return (tool === "text" || tool === "smart") && !mat
 function goToQuestion(e) {
   if (!e) return;
   hideJump();
-  scrollToPoint(e.p, e.y);
+  scrollToPoint(e.p, e.y, 0.12);
   flashRegions(e.regions);
+  const mk = e.m && $(`.qmark[data-qid="${e.m.id}"]`); if (mk) { mk.classList.remove("flash"); void mk.offsetWidth; mk.classList.add("flash"); }
   const first = e.regions.find(([, r]) => !(doc.text[r.id] || "").trim()) || e.regions[0];
   if (first && canFocusOnJump()) { const ta = first[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
   lastJump = e.label;
@@ -1943,17 +2005,17 @@ function openJump(anchorEl) {
       head.onclick = () => goToQuestion(g.items.find(e => e.regions.length) || g.items[0]);
       row.appendChild(head);
       for (const e of g.items) {
-        if (e.label === g.q || !e.regions.length) continue;
+        if (e.label === g.q) continue;
         const c = document.createElement("button"); c.type = "button"; c.className = "jc " + e.state + (e.flag ? " flag" : "") + (e.label === lastJump ? " last" : "");
-        c.textContent = e.label.slice(g.q.length).replace(/\)\(/g, " ").replace(/[()]/g, "");
-        c.title = `${e.label}: ${e.done} of ${e.regions.length} answered` + (e.flag ? " · flagged" : "");
+        c.textContent = e.label.slice(g.q.length).replace(/^\./, "").replace(/\)\(/g, " ").replace(/[()]/g, "");
+        c.title = e.regions.length ? `${e.label}: ${e.done} of ${e.regions.length} answered` + (e.flag ? " · flagged" : "") : `${e.label}: the start of this part`;
         c.onclick = () => goToQuestion(e);
         row.appendChild(c);
       }
       list.appendChild(row);
     }
   } else {
-    const m = document.createElement("p"); m.className = "note"; m.textContent = "No question numbers were found on this paper, so jump by page:"; list.appendChild(m);
+    const m = document.createElement("p"); m.className = "note"; m.textContent = "No question numbers were found on this paper, so jump by page. To add them, use Boxes → Question and drag a box over each printed number."; list.appendChild(m);
   }
   // pages, always
   const pr = document.createElement("div"); pr.className = "jpages";

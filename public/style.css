@@ -293,3 +293,12 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .toolflash.show{opacity:1}
 
 .jumppop #nextBtn{justify-self:stretch}
+/* question markers: a box over each printed question number (shown with "Show spaces", flashes after Go to) */
+.page .qmark{position:absolute;pointer-events:none;border-radius:3px;z-index:3}
+.hints .page .qmark{box-shadow:0 0 0 1.5px rgba(124,77,214,.7);background:rgba(124,77,214,.08)}
+.page .qmark.flash{animation:qflash 1.8s ease-out}
+@keyframes qflash{0%,40%{box-shadow:0 0 0 3px rgba(124,77,214,.9);background:rgba(124,77,214,.18)}100%{}}
+.page .bx.q{border-color:#7c4dd6;background:rgba(124,77,214,.12)}
+.page .bx.q b{background:#7c4dd6;top:-15px}
+.page .bx.q.sel{border-color:#e07a1f;background:rgba(224,122,31,.14)}
+.page .bx.q.sel b{background:#e07a1f}
