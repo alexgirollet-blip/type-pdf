@@ -302,3 +302,17 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .page .bx.q b{background:#7c4dd6;top:-15px}
 .page .bx.q.sel{border-color:#e07a1f;background:rgba(224,122,31,.14)}
 .page .bx.q.sel b{background:#e07a1f}
+/* typed answers: colour and look (see ANS_LOOKS) */
+.ans-bg .page .ans.filled{background:color-mix(in srgb,var(--ans-bg) 70%,transparent)}
+.ans-bold .page .ans{font-weight:700}
+/* multiple choice: a button over each printed box or oval; chosen ones get a tick or are filled in */
+.page .choice{position:absolute;z-index:4;margin:0;padding:0;border:0;background:transparent;cursor:pointer;border-radius:3px;display:grid;place-items:center;line-height:1;color:var(--ink);font-family:system-ui,sans-serif}
+.page .choice.oval{border-radius:50%}
+.page .choice:hover{background:rgba(47,125,116,.12);box-shadow:0 0 0 1.5px rgba(47,125,116,.6)}
+.page .choice:focus-visible{outline:2px solid var(--accent-2);outline-offset:1px}
+.page .choice.box.on::after{content:"✓";font-weight:700;transform:translateY(-4%)}
+.page .choice.oval.on::after{content:"";position:absolute;inset:16%;border-radius:50%;background:var(--ink)}
+.hints .page .choice{box-shadow:0 0 0 1px rgba(47,125,116,.4)}
+.boxmode .page .choice{pointer-events:none}
+#editor.viewonly .page .choice{cursor:default}
+.page .choice.jumpflash{animation:jflash 1.6s ease-out}

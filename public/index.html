@@ -66,7 +66,10 @@
       <ul>
         <li><b>Type:</b> click any dotted line, ruled line, empty table cell or answer box and type. Text sits on the lines, shrinks if you write a lot, and the page grows if it still doesn't fit.</li>
         <li><b>Tools:</b> <b>Text</b> only types (click any answer space; it never draws). <b>Pen</b> only draws (mouse, trackpad, Apple Pencil or a mirrored iPad). <b>Smart</b> does both: tap an answer space to type, drag to draw. Laptops start on Text; iPads, and devices where an Apple Pencil has been used, start on Pen. Fingers scroll; pinch to zoom.</li>
-        <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo. Tap with three fingers to swap between the pen and the eraser (four fingers redo).</li>
+        <li><b>Apple Pencil:</b> ink responds slightly to pressure, and on iPads with Pencil hover a dot shows where you'll write. Tap with two fingers to undo and three fingers to redo. Tap one finger four times quickly to swap between the pen and the eraser; once you've rubbed something out and lift the Pencil, it goes back to the pen by itself.</li>
+        <li><b>Multiple choice:</b> tick boxes, ovals and pills are found automatically. Click or tap one to choose it (a tick, or the oval filled in); choose as many as the question needs, and click again to un-choose. Missed one? Boxes → <b>Choice</b>, drag over it.</li>
+        <li><b>Answer colour and style:</b> the two menus next to the font make typed answers blue (or another colour), highlighted, bold or in a tinted box, so they stand out from the question. The exported PDF looks the same.</li>
+        <li><b>Missed answer space?</b> With <b>Text</b>, click the blank spot where your answer should go: TypePDF looks there again for lines or a box, and otherwise adds a space that fits the gap.</li>
         <li><b>Live sync:</b> sign in on two devices (say a laptop and an iPad) and open the same paper. Typing and ink appear on the other one straight away.</li>
         <li><b>Go to…:</b> jump straight to any question (type <b>3</b>, <b>4b</b> or <b>4b(ii)</b>) or page (<b>p5</b>), see at a glance which questions are answered, started or flagged, and hop to the <b>next empty answer</b>. Tapping the page number in the corner opens it too. Tab and jumps leave the question's wording in view above the box.</li>
         <li><b>Flags:</b> click into an answer and press ⚑ Flag to mark it to come back to, e.g. to draw it on the iPad or because it's hard. The ⚑ button in the bar lists them.</li>
@@ -123,6 +126,8 @@
       <button class="ib" id="bookBtn" title="Two pages side by side" aria-label="Two-page view"><svg viewBox="0 0 24 24"><path d="M3 5h8v14H3zM13 5h8v14h-8z"/></svg></button>
     </div>
     <select id="fontSel" class="fontsel" aria-label="Answer font" title="Font for typed answers"></select>
+    <select id="ansColSel" class="fontsel" aria-label="Answer colour" title="Colour of typed answers (and chosen boxes), so they stand out from the questions"></select>
+    <select id="ansLookSel" class="fontsel" aria-label="Answer style" title="Make typed answers stand out: a highlight behind them, bold, or a tinted box"></select>
     <span class="grow"></span>
     <button id="jumpBtn" title="Jump to a question or page, or the next empty answer (G)">Go to…</button>
     <button id="flagsBtn" title="Flagged answer spaces">⚑ Flags</button>
@@ -139,6 +144,7 @@
       <button class="nk on" data-k="lines">Lines</button>
       <button class="nk" data-k="box">Box</button>
       <button class="nk" data-k="cell">Cell</button>
+      <button class="nk" data-k="choice" title="A multiple-choice box or oval: drag over it, then click it to choose">Choice</button>
       <button class="nk" data-k="q" title="A question marker: drag a box over a printed question number or part, so Go to can jump to it">Question</button>
     </div>
     <span class="hint">Click a space to select it. Drag to move, drag its corner to resize.</span>

@@ -188,6 +188,72 @@ const Detect = (() => {
     return items;
   }
 
+  // ---- multiple choice: tick boxes, ovals and pills to fill in ----
+  // small closed outlines (a square, or a round/pill shape) with nothing inside, not part of the printed text,
+  // that come in a group of the same size lined up in a row or a column
+  const BOX_CHAR = /^[\u25A1\u25A2\u2610\u274F\u2751\u2B1C\u25CB\u25EF\u26AA]$|^[\uE000-\uF8FF]$/;
+  function choices(G, items) {
+    const { g, w, h } = G, lab = new Int32Array(w * h), stack = new Int32Array(w * h);
+    const found = [];
+    let id = 0;
+    for (let start = 0; start < g.length; start++) {
+      if (g[start] >= DARK || lab[start]) continue;
+      id++; let sp = 0, n = 0, x0 = w, x1 = 0, y0 = h, y1 = 0;
+      stack[sp++] = start; lab[start] = id;
+      while (sp) {
+        const i = stack[--sp], x = i % w, y = (i - x) / w; n++;
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+          const j = yy * w + xx; if (!lab[j] && g[j] < DARK) { lab[j] = id; stack[sp++] = j; }
+        }
+      }
+      const bw = (x1 - x0 + 1) / S, bh = (y1 - y0 + 1) / S;
+      if (bh < 7 || bh > 28 || bw < 7 || bw > 64 || bw / bh < 0.7 || bw / bh > 3.6) continue;
+      const per = 2 * (x1 - x0 + y1 - y0 + 2), thick = n / per;
+      if (thick < 0.5 || thick > 5) continue;
+      // a closed outline: ink on all four sides, on the middle row and column
+      const my = (y0 + y1) >> 1, mx = (x0 + x1) >> 1, bx = Math.max(2, Math.round((x1 - x0) * 0.3)), by = Math.max(2, Math.round((y1 - y0) * 0.3));
+      const has = (ax, ay, bx2, by2) => { for (let y = ay; y <= by2; y++) for (let x = ax; x <= bx2; x++) if (lab[y * w + x] === id) return true; return false; };
+      if (!has(x0, my - 1, x0 + bx, my + 1) || !has(x1 - bx, my - 1, x1, my + 1) || !has(mx - 1, y0, mx + 1, y0 + by) || !has(mx - 1, y1 - by, mx + 1, y1)) continue;
+      const cx = Math.max(1, Math.round((x1 - x0) * 0.12)), cy = Math.max(1, Math.round((y1 - y0) * 0.12));
+      const square = has(x0, y0, x0 + cx, y0 + cy) && has(x1 - cx, y1 - cy, x1, y1);
+      // nothing inside (a letter printed in the middle of an oval is allowed: it names the option)
+      const ix0 = x0 + Math.max(bx * 0.8, 2 * S) | 0, ix1 = x1 - Math.max(bx * 0.8, 2 * S) | 0, iy0 = y0 + Math.max(by * 0.8, 2 * S) | 0, iy1 = y1 - Math.max(by * 0.8, 2 * S) | 0;
+      let inside = 0, area = 0;
+      for (let y = iy0; y <= iy1; y++) for (let x = ix0; x <= ix1; x++) { area++; if (g[y * w + x] < DARK) inside++; }
+      const box = { x0: x0 / S, y0: y0 / S, x1: (x1 + 1) / S, y1: (y1 + 1) / S, shape: square ? "box" : "oval" };
+      // not printed text (a letter O, a 0, a boxed question number): any text over it rules it out, except a box
+      // character, or one capital letter sitting inside it
+      const over = items.filter(it => it.x < box.x1 - 1 && it.x1 > box.x0 + 1 && it.y0 < box.y1 - 1 && it.y1 > box.y0 + 1);
+      let letter = "";
+      if (over.length) {
+        if (over.every(it => BOX_CHAR.test(it.str.trim()))) { /* a tick box drawn with a font */ }
+        else if (over.length === 1 && /^[A-F]$/.test(over[0].str.trim()) && over[0].x >= box.x0 && over[0].x1 <= box.x1 + 1 &&
+          box.y1 - box.y0 > over[0].fh * 1.15 && box.x1 - box.x0 > (over[0].x1 - over[0].x) * 1.8) letter = over[0].str.trim();   // bigger than the letter itself
+        else continue;
+      }
+      if (!letter && area && inside > area * 0.03) continue;
+      if (letter) box.opt = letter;
+      found.push(box);
+    }
+    // keep shapes with a partner of the same size, lined up in a row or a column
+    const same = (a, b) => Math.abs((a.x1 - a.x0) - (b.x1 - b.x0)) < 0.2 * (a.x1 - a.x0) + 1 && Math.abs((a.y1 - a.y0) - (b.y1 - b.y0)) < 0.2 * (a.y1 - a.y0) + 1;
+    const lined = (a, b) => (Math.abs(a.x0 - b.x0) < 4 && Math.abs(a.y0 - b.y0) < 260) || (Math.abs((a.y0 + a.y1) - (b.y0 + b.y1)) < 8 && Math.abs(a.x0 - b.x0) < 400);
+    const out = found.filter(a => found.some(b => b !== a && same(a, b) && lined(a, b)));
+    // what each option says: a letter beside it (A–F), or the words on the same line
+    for (const c of out) {
+      if (c.opt) continue;
+      const cyy = (c.y0 + c.y1) / 2, row = items.filter(it => it.base > cyy - (c.y1 - c.y0) && it.base < cyy + (c.y1 - c.y0) * 1.2 && it.str.trim());
+      const near = row.filter(it => /^[A-F]$/.test(it.str.trim()) && (Math.abs(it.x1 - c.x0) < 30 || Math.abs(it.x - c.x1) < 30));
+      if (near.length) { c.opt = near.sort((a, b) => Math.min(Math.abs(a.x1 - c.x0), Math.abs(a.x - c.x1)) - Math.min(Math.abs(b.x1 - c.x0), Math.abs(b.x - c.x1)))[0].str.trim(); continue; }
+      const right = row.filter(it => it.x >= c.x1 - 1 && it.x < c.x1 + 160).sort((a, b) => a.x - b.x).map(it => it.str).join(" ").trim();
+      const left = row.filter(it => it.x1 <= c.x0 + 1).sort((a, b) => a.x - b.x).map(it => it.str).join(" ").trim();
+      c.opt = (right ? right.slice(0, 60) : left.slice(-60)).replace(/\s+/g, " ").trim();
+    }
+    return out;
+  }
+
   const CODE_RE = /\b(write|complete|rewrite|amend|modify|give)\b[^.]{0,80}\b(pseudo-?code|code|function|procedure|sub-?routine|algorithm|program|sql|statement|query|method|class|css|html|javascript|python)\b/i;
 
   // ---- main ----
@@ -315,6 +381,13 @@ const Detect = (() => {
       for (const l of [a, b]) regions.push({ kind: "cell", x0: l.x0 - 1, x1: l.x1 + 1, y0: l.y - Math.min(9, dy - 1), y1: l.y + 0.5 });
     }
 
+    // multiple-choice boxes and ovals: clicked to choose. A tiny "cell" found on the same spot is the same thing.
+    const ch = choices(G, items);
+    for (const c of ch) {
+      for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if (r.kind !== "lines" && r.x0 < c.x1 && r.x1 > c.x0 && r.y0 < c.y1 && r.y1 > c.y0 && (r.x1 - r.x0) < 40 && (r.y1 - r.y0) < 36) regions.splice(i, 1); }
+      regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: c.shape, opt: c.opt || "" });
+    }
+
     // geometry common to all kinds: top/bottom in pt
     for (const r of regions) {
       if (r.kind === "lines") { r.y0 = r.ys[0] - r.sp; r.y1 = r.ys[r.ys.length - 1] + 2; }
@@ -326,7 +399,7 @@ const Detect = (() => {
     }
     // code hint from the nearest instruction above
     for (const r of regions) {
-      if (r.kind === "cell") continue;
+      if (r.kind === "cell" || r.kind === "choice") continue;
       const above = items.filter(it => it.base < r.y0 + 4 && it.base > r.y0 - 260).sort((a, b) => a.base - b.base || a.x - b.x);
       const txt = above.map(it => it.str).join(" ");
       const lastSentence = txt.split(/(?<=[.?!])\s+/).slice(-3).join(" ");
@@ -337,5 +410,5 @@ const Detect = (() => {
     return { regions, items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1), h: +it.fh.toFixed(1) })), hasText: items.length > 0 };
   }
 
-  return { page, S, textItems, _debug: { grey, integral, hRules, vRules, pairUp } };
+  return { page, S, textItems, choices, grey, _debug: { grey, integral, hRules, vRules, pairUp } };
 })();

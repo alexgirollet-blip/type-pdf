@@ -25,7 +25,7 @@ const Questions = (() => {
       for (const it of L.items) {
         const s = it.s, n = s.length, w = Math.max(0, it.x1 - it.x) / Math.max(1, n);
         if (prevEnd !== null && it.x - prevEnd > L.h * 0.22 && chars.length && chars[chars.length - 1].c !== " ") chars.push({ c: " ", x0: prevEnd, x1: it.x });
-        for (let k = 0; k < n; k++) chars.push({ c: s[k], x0: it.x + w * k, x1: it.x + w * (k + 1) });
+        for (let k = 0; k < n; k++) chars.push({ c: s[k], x0: it.x + w * k, x1: it.x + w * (k + 1), b: it.b, mo: it.mo });
         prevEnd = Math.max(prevEnd ?? -1e9, it.x1);
       }
       // drop leading spaces
@@ -48,7 +48,7 @@ const Questions = (() => {
     if (D(text[pre] || "")) {
       let j = pre + 1, two = false;
       if (D(text[j] || "")) { j++; two = true; }
-      else if (text[j] === " " && D(text[j + 1] || "") && !D(text[j + 2] || "") && (text[pre] === "0" || text[pre] === "1")) { j += 2; two = true; }   // AQA's boxed digits
+      else if (text[j] === " " && D(text[j + 1] || "") && !D(text[j + 2] || "")) { j += 2; two = true; }   // AQA's boxed digits: "0 6", "3 2"
       if (!D(text[j] || "") && (j >= text.length || /[\s.)]/.test(text[j])) && !(text[j] === "." && D(text[j + 1] || "") && !two) && !/^\s*(hours?|minutes?|mins?|marks?|seconds?|cm|mm|km|kg|g|m|s|%|°)\b/i.test(text.slice(j).replace(/^\./, ""))) {
         const num = String(+text.slice(pre, j).replace(/\s/g, ""));
         if (+num > 0) {
@@ -73,7 +73,14 @@ const Questions = (() => {
     return toks;
   }
 
-  // every marker on every page. pages: [{w, h, items}]
+  // how a token is printed: bold true/false (null when the font isn't known, e.g. read by OCR), monospace
+  function style(L, t) {
+    const cs = L.chars.slice(t.a, t.b).filter(c => c.c.trim());
+    const known = cs.filter(c => c.b !== undefined);
+    return { bold: known.length ? known.every(c => c.b) : null, mono: cs.some(c => c.mo) };
+  }
+
+  // every marker on every page. pages: [{w, h, items}] (items may carry b: bold and mo: monospace)
   function detect(pages) {
     // 1. the numbers at the start of every line
     const rows = [];
@@ -83,13 +90,22 @@ const Questions = (() => {
       for (const L of lines(P.items, W, H)) {
         if (L.x > W * 0.42) continue;
         const toks = leading(L.text);
-        if (toks.length) rows.push({ p, L, W, toks });
+        if (!toks.length) continue;
+        toks.forEach(t => Object.assign(t, style(L, t)));
+        if (toks[0].mono) continue;                                     // line numbers in a code listing (01, 02 …)
+        rows.push({ p, L, W, toks });
       }
     });
     // 2. which of the line-start numbers are question numbers: the best run that counts up (1, 2, 3 …, allowing the
     // odd one missed), preferring numbers in the same column as the others. Page numbers, table data, "1 hour" and
     // barcodes drop out because they don't fit the run.
-    const cand = rows.filter(r => r.toks[0].lvl === 0 && r.L.chars[r.toks[0].a].x0 <= r.W * 0.2);
+    let cand = rows.filter(r => r.toks[0].lvl === 0 && r.L.chars[r.toks[0].a].x0 <= r.W * 0.2);
+    // question numbers are nearly always bold: when this paper's are, only bold ones count
+    const nb = cand.filter(r => r.toks[0].bold === true).length;
+    if (nb >= 2 && nb >= cand.filter(r => r.toks[0].bold !== null).length * 0.25) cand = cand.filter(r => r.toks[0].bold !== false);
+    // and the same for parts: (a), (i) …
+    const partToks = rows.flatMap(r => r.toks.filter(t => t.lvl === -1 && t.bold !== null));
+    const partsBold = partToks.length >= 3 && partToks.filter(t => t.bold).length >= partToks.length * 0.6;
     const xs = cand.map(r => Math.round(r.L.chars[r.toks[0].a].x0 / 4)), freq = {};
     for (const x of xs) freq[x] = (freq[x] || 0) + 1;
     const modeX = cand.length ? +Object.entries(freq).sort((m, n) => n[1] - m[1])[0][0] * 4 : 0;
@@ -99,8 +115,8 @@ const Questions = (() => {
       const n = +r.toks[0].tok;
       best[k] = (n === 1 ? 1 : n <= 3 ? 0.6 : 0.3) - off(r); prev[k] = -1;
       for (let j = 0; j < k; j++) {
-        const d = n - +cand[j].toks[0].tok; if (d < 1 || d > 3) continue;
-        const v = best[j] + (d === 1 ? 1 : 0.4) - off(r);
+        const d = n - +cand[j].toks[0].tok; if (d < 1 || d > 15) continue;
+        const v = best[j] + (d === 1 ? 1 : d <= 3 ? 0.4 : 0.1) - off(r);
         if (v > best[k]) { best[k] = v; prev[k] = j; }
       }
     });
@@ -125,6 +141,7 @@ const Questions = (() => {
         if (lvl === 0) ok = i === 0;
         else if (lvl === 1 && t.num) { ok = true; a = t.tok; aNum = true; r = ""; }
         else {
+          if (t.mono || (partsBold && t.bold === false)) break;
           // a bracketed letter or roman: work out which from what came before
           const tok = t.tok, li = letterIdx(tok), ri = romanIdx(tok);
           const nextRoman = ri >= 0 && (r ? ri === romanIdx(r) + 1 : ri === 0);

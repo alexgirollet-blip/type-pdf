@@ -186,9 +186,10 @@ async function openDoc(d, fresh = false) {
     doc.pages[i] = await detectPage(i, doc.pages[i]);
     emit("page:" + i);
   }
-  if (doc.pages.some(P => P && !Array.isArray(P.qs))) { busy(true, "Finding the questions…"); await findQuestions().catch(e => console.warn("questions", e)); }
+  if (doc.pages.some(P => P && P.cv !== CV)) await findChoices().catch(e => console.warn("choices", e));
+  if (doc.pages.some(needsQuestions)) { busy(true, "Finding the questions…"); await findQuestions().catch(e => console.warn("questions", e)); }
   if (!doc.font) { const name = await detectFont().catch(() => ""); doc.font = { key: matchFont(name) || FONT_DEFAULT, auto: true, detected: name || "" }; emit("font"); }
-  await applyFont(false);
+  await applyFont(false); applyAnsStyle();
   busy(false);
   $("#home").hidden = true; $("#editor").hidden = false;
   $("#docName").textContent = doc.name; document.title = doc.name + " · TypePDF";
@@ -236,6 +237,21 @@ function fontMenu() {
   s.innerHTML = `<option value="auto">Match paper${det ? " (" + det + ")" : ""} → ${FONTS[auto].label}</option>` + Object.entries(FONTS).map(([k, f]) => `<option value="${k}">${f.label}</option>`).join("");
   s.value = doc.font && !doc.font.auto ? doc.font.key : "auto";
 }
+// ---- how typed answers look: a colour, and optionally a highlight behind them or bold, to tell them apart from the question ----
+const ANS_COLOURS = [["#111418", "Black"], ["#1f4fbf", "Blue"], ["#16357a", "Dark blue"], ["#c62a1f", "Red"], ["#1e7a3c", "Green"], ["#6b3fb3", "Purple"]];
+const ANS_LOOKS = { plain: ["Plain", {}], hl: ["Highlighted", { bg: "#fff1a6" }], bold: ["Bold", { bold: true }], hlbold: ["Highlighted + bold", { bg: "#fff1a6", bold: true }], tint: ["Tinted box", { bg: "#e3edff" }] };
+function ansStyle() { const st = (doc && doc.style) || {}; return { c: st.c || INK, look: ANS_LOOKS[st.look] ? st.look : "plain", ...(ANS_LOOKS[st.look] || ANS_LOOKS.plain)[1] }; }
+function applyAnsStyle() {
+  const st = ansStyle(), host = $("#pages");
+  host.style.setProperty("--ink", st.c); host.style.setProperty("--ans-bg", st.bg || "transparent");
+  host.classList.toggle("ans-bg", !!st.bg); host.classList.toggle("ans-bold", !!st.bold);
+  const cs = $("#ansColSel"), ls = $("#ansLookSel");
+  if (cs && !cs.options.length) { cs.innerHTML = ANS_COLOURS.map(([c, n]) => `<option value="${c}">${n} answers</option>`).join(""); ls.innerHTML = Object.entries(ANS_LOOKS).map(([k, [n]]) => `<option value="${k}">${n}</option>`).join(""); }
+  if (cs) { cs.value = st.c; if (cs.value !== st.c) cs.value = INK; ls.value = st.look; }
+}
+function setAnsStyle(patch) { doc.style = { ...(doc.style || {}), ...patch }; applyAnsStyle(); emit("style"); scheduleSave(); }
+$("#ansColSel").addEventListener("change", e => setAnsStyle({ c: e.target.value }));
+$("#ansLookSel").addEventListener("change", e => setAnsStyle({ look: e.target.value }));
 $("#fontSel").addEventListener("change", e => {
   const v = e.target.value, det = (doc.font && doc.font.detected) || "";
   doc.font = v === "auto" ? { key: matchFont(det) || FONT_DEFAULT, auto: true, detected: det } : { key: v, auto: false, detected: det };
@@ -255,7 +271,7 @@ async function detectPage(i, prev) {
   if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
   res.regions.forEach((r, k) => r.id = `${i}:${k}`);
-  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, gaps: (prev && prev.gaps) || {} };
+  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, cv: CV, gaps: (prev && prev.gaps) || {} };
 }
 // ---- reading question numbers off image-only papers (Tesseract, bundled and only loaded when needed) ----
 let ocrWorkerP = null;
@@ -346,7 +362,7 @@ function sharedUI() {
   const sh = doc && doc.shared, view = sh && sh.role === "view";
   $("#shareBtn").hidden = !(window.Sync && Sync.user && doc && !sh);
   $("#editor").classList.toggle("viewonly", !!view);
-  $$(".tool,.sw,.sz,#undo,#redo,#fontSel,#timerBtn,#flagsBtn").forEach(b => { b.disabled = !!view; });
+  $$(".tool,.sw,.sz,#undo,#redo,#fontSel,#ansColSel,#ansLookSel,#timerBtn,#flagsBtn").forEach(b => { b.disabled = !!view; });
   if (view) { setTool("text"); toast("View only: you can see changes live but not edit.", 3500); }
 }
 window.onPeople = (people, mySid) => {
@@ -506,18 +522,64 @@ function findRegion(id) { for (const P of doc.pages) { const r = P && P.regions.
 // ---------------- question markers: a box over each printed question number and part ----------------
 // found from the text (with font sizes) of every page together, since the numbering runs across pages.
 // Only pages without markers get them, so markers someone has fixed in the Boxes tool are kept.
+const CV = 1;   // version of the multiple-choice finder
+// multiple-choice boxes and ovals on pages detected before they were looked for: render each page once and look
+async function findChoices() {
+  const need = doc.pages.map((P, p) => P && P.cv !== CV ? p : -1).filter(p => p >= 0);
+  for (let k = 0; k < need.length; k++) {
+    const p = need[k], P = doc.pages[p];
+    busy(true, `Looking for multiple-choice boxes… page ${p + 1}`, k / need.length);
+    try {
+      const page = await pdf.getPage(p + 1), vp = page.getViewport({ scale: 1 }), vp2 = page.getViewport({ scale: Detect.S });
+      const c = document.createElement("canvas"); c.width = Math.ceil(vp2.width); c.height = Math.ceil(vp2.height);
+      const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+      await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
+      let items = []; try { items = Detect.textItems(await page.getTextContent(), vp); } catch (e) {}
+      const found = Detect.choices(Detect.grey(ctx.getImageData(0, 0, c.width, c.height)), items); c.width = c.height = 0;
+      for (const ch of found) {
+        if (P.regions.some(r => r.kind === "choice" && r.x0 < ch.x1 && r.x1 > ch.x0 && r.y0 < ch.y1 && r.y1 > ch.y0)) continue;
+        // a tiny empty cell found on the same spot was really this box
+        P.regions = P.regions.filter(r => !(r.kind !== "lines" && !doc.text[r.id] && r.x0 < ch.x1 && r.x1 > ch.x0 && r.y0 < ch.y1 && r.y1 > ch.y0 && r.x1 - r.x0 < 40 && r.y1 - r.y0 < 36));
+        P.regions.push({ id: `${p}:c${rid8()}`, kind: "choice", x0: +ch.x0.toFixed(1), y0: +ch.y0.toFixed(1), x1: +ch.x1.toFixed(1), y1: +ch.y1.toFixed(1), shape: ch.shape, opt: ch.opt || "", cut: +ch.y1.toFixed(1) + 3 });
+      }
+    } catch (e) { console.warn(e); }
+    P.cv = CV; if (canEdit()) emit("page:" + p);
+  }
+}
+const QV = 2;   // version of the question finder: pages found by an older one are looked at again
+const needsQuestions = P => !!P && (!Array.isArray(P.qs) || P.qv !== QV);
+// each text item with whether its font is bold or monospace (question numbers are nearly always bold;
+// line numbers in code listings are monospace)
+async function textWithFonts(i) {
+  const page = await pdf.getPage(i + 1), vp = page.getViewport({ scale: 1 });
+  await page.getOperatorList();                                         // loads the fonts so their names are known
+  const tc = await page.getTextContent(), fonts = {};
+  const fontOf = fn => fonts[fn] || (fonts[fn] = (() => {
+    let f = null; try { f = page.commonObjs.get(fn); } catch (e) {}
+    const name = ((f && (f.name || f.loadedName)) || "") + " " + ((tc.styles[fn] || {}).fontFamily || "");
+    return { b: !!(f && (f.bold || f.black)) || /bold|black|heavy|semibold|demi/i.test(name), mo: !!(f && f.isMonospace) || /courier|mono|consol|menlo|typewriter/i.test(name) };
+  })());
+  const out = [];
+  for (const it of tc.items) {
+    if (!it.str || !it.str.trim()) continue;
+    const t = Detect.textItems({ items: [it] }, vp)[0]; if (!t) continue;
+    const f = fontOf(it.fontName);
+    out.push({ s: t.str, x: +t.x.toFixed(1), y: +t.base.toFixed(1), x1: +t.x1.toFixed(1), h: +t.fh.toFixed(1), b: f.b, mo: f.mo });
+  }
+  return out;
+}
+// question markers for every page that needs them, found from the text of the whole paper together (the numbering
+// runs across pages). Markers someone has fixed in the Boxes tool are kept.
 async function findQuestions() {
   const pages = [];
   for (let i = 0; i < doc.pages.length; i++) {
     const P = doc.pages[i]; if (!P) { pages.push(null); continue; }
     let items = P.items || [];
-    if (P.hasText && pdf && !(items.length && items[0].h)) {             // saved before font sizes were kept: read the text again
-      try { const page = await pdf.getPage(i + 1), tc = await page.getTextContent(); items = Detect.textItems(tc, page.getViewport({ scale: 1 })).map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1), h: +it.fh.toFixed(1) })); } catch (e) {}
-    }
+    if (P.hasText && pdf) { try { items = await textWithFonts(i); } catch (e) { console.warn(e); } }
     pages.push({ w: P.w, h: P.h, items });
   }
   const found = Questions.detect(pages);
-  doc.pages.forEach((P, p) => { if (P && !Array.isArray(P.qs)) { P.qs = found[p] || []; if (canEdit()) emit("page:" + p); } });
+  doc.pages.forEach((P, p) => { if (needsQuestions(P)) { P.qs = found[p] || []; P.qv = QV; if (canEdit()) emit("page:" + p); } });
 }
 const canEdit = () => !(doc && doc.shared && doc.shared.role === "view");
 function markerRect(p, m) { return { x0: m.x0, x1: m.x1, y0: disp(p, m.y0), y1: disp(p, m.y1) }; }
@@ -595,6 +657,16 @@ function buildViews() {
 
 function makeField(p, r) {
   const v = views[p];
+  if (r.kind === "choice") {
+    const b = document.createElement("button"); b.type = "button";
+    b.className = "choice " + (r.shape === "oval" ? "oval" : "box"); b.dataset.rid = r.id;
+    b.title = r.opt ? "Choose: " + r.opt : "Choose this answer"; b.setAttribute("aria-label", b.title);
+    b.addEventListener("pointerdown", e => { if (e.pointerType === "pen") sawPen(); e.stopPropagation(); });
+    b.addEventListener("click", e => { e.preventDefault(); toggleChoice(p, r); });
+    if (doc.shared && doc.shared.role === "view") b.disabled = true;
+    v.el.appendChild(b); r._el = b; paintChoice(r);
+    return;
+  }
   const ta = document.createElement("textarea");
   ta.className = "ans " + r.kind + (r.code ? " code" : "");
   codeAttrs(ta, r.code);
@@ -661,7 +733,14 @@ function looksLikeCode(v) {
   const codeish = /([{};]\s*$|^\s{2,}\S|\w+\[\w*\]|\w+\([^)]*\)\s*$|^\s*\w+\s*(=|\+=|-=|\+\+)\s*\S|==|!=|<=|>=|\/\/)/;
   return lines.length >= 2 && lines.filter(l => codeish.test(l)).length >= 2;
 }
-function orderedRegions() { const out = []; doc.pages.forEach((P, p) => [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
+function orderedRegions(withChoices) { const out = []; doc.pages.forEach((P, p) => [...P.regions].filter(r => withChoices || r.kind !== "choice").sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
+// ---- multiple choice: click a box or oval to choose it (as many as you like); click again to un-choose ----
+function toggleChoice(p, r) {
+  if (doc.shared && doc.shared.role === "view") return;
+  if (doc.text[r.id]) delete doc.text[r.id]; else doc.text[r.id] = "x";
+  paintChoice(r); updateCount(); scheduleSave(); emit("text:" + r.id);
+}
+function paintChoice(r) { const b = r._el; if (!b) return; const on = !!doc.text[r.id]; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); }
 function focusNext(r, dir) {
   const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
   const ta = n[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L);
@@ -726,6 +805,11 @@ function fitSteps(r) {
 function fieldTop(p, r, f) { return r.kind === "lines" ? disp(p, r.ys[0]) - 2 - baseInLine(f.fs, f.L) : disp(p, r.y0) + (r.kind === "box" ? 4 : 0); }
 function applyField(p, r, f) {
   const ta = r._el; if (!ta) return;
+  if (r.kind === "choice") {
+    const R = regionRect(p, r), z = zoom;
+    Object.assign(ta.style, { left: R.x0 * z + "px", top: R.y0 * z + "px", width: (R.x1 - R.x0) * z + "px", height: (R.y1 - R.y0) * z + "px", fontSize: (R.y1 - R.y0) * z * 1.05 + "px" });
+    return;
+  }
   const z = zoom, rect = regionRect(p, r);
   ta.style.fontSize = f.fs * fontScale(r) * z + "px"; ta.style.lineHeight = f.L * z + "px";
   ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
@@ -739,6 +823,7 @@ function applyField(p, r, f) {
     ta.style.top = rect.y0 * z + "px"; ta.style.height = (rect.y1 - rect.y0) * z + "px"; ta.style.padding = "0";
   }
   shapeField(r, f);
+  ta.classList.toggle("filled", !!(ta.value && ta.value.trim()));
 }
 // an answer whose first line starts further right (after a label like "Difference 1") gets a notched outline that
 // follows where text can actually go: clipped background plus a matching outline drawn beside it
@@ -765,6 +850,7 @@ function availFor(r, f) {
 }
 function fitRegion(p, r) {
   const ta = r._el; if (!ta || !ta.isConnected) return;
+  if (r.kind === "choice") { applyField(p, r); paintChoice(r); return; }
   const steps = fitSteps(r);
   const fits = f => { applyFieldNoGap(p, r, f); return contentH(r) <= availFor(r, f) + 0.5; };
   let f = steps[0], gap = 0;
@@ -784,7 +870,8 @@ function fitRegion(p, r) {
   if (handFor && handFor.r === r) placeHandles();
   if (flagFor && flagFor.r === r) placeFlagFloat();
 }
-function applyFieldNoGap(p, r, f) { const P = doc.pages[p]; const g = (P.gaps || {})[r.id]; if (g) { P.gaps[r.id] = 0; applyField(p, r, f); P.gaps[r.id] = g; } else applyField(p, r, f); if (r.kind === "cell") r._el.style.paddingTop = "0"; }
+function applyFieldNoGap(p, r, f) { if (r.kind === "choice") return applyField(p, r, f);
+  const P = doc.pages[p]; const g = (P.gaps || {})[r.id]; if (g) { P.gaps[r.id] = 0; applyField(p, r, f); P.gaps[r.id] = g; } else applyField(p, r, f); if (r.kind === "cell") r._el.style.paddingTop = "0"; }
 function centreCell(r) { const ta = r._el; ta.style.paddingTop = "0"; const h = (r.y1 - r.y0); const c = contentH(r); const pad = Math.max(0, (h - c) / 2); ta.style.paddingTop = pad * zoom + "px"; ta.style.height = (h - pad) * zoom + "px"; }
 function gapRules(p, r, g) {
   const f = fitOf(r), top = fieldTop(p, r, f), g0 = disp(p, g.at), g1 = g0 + g.h, out = [];
@@ -920,8 +1007,9 @@ function showHover(p, q) {
   Object.assign(hoverDot.style, { display: "block", width: d + "px", height: d + "px", left: q[0] * zoom - d / 2 + "px", top: q[1] * zoom - d / 2 + "px", background: er ? "transparent" : hl ? "rgba(242,210,27,.45)" : colour });
 }
 function hideHover() { if (hoverDot) hoverDot.style.display = "none"; }
-// ---- two-finger tap undoes; three-finger tap redoes, or on an iPad / with an Apple Pencil swaps pen ⇄ eraser
-// (four fingers redo there). Fingers still scroll and pinch as normal ----
+// ---- two-finger tap undoes, three-finger tap redoes, and four quick taps with one finger swap pen ⇄ eraser
+// (with Pen, Highlighter or Eraser, where a finger tap does nothing else). Fingers still scroll and pinch as normal ----
+let quickTaps = [];
 const multiTouch = { max: 0, t0: 0, moved: false, start: null, last: 0 };
 $("#pages").addEventListener("touchstart", e => {
   const fingers = [...e.touches].filter(t => t.touchType !== "stylus");
@@ -940,16 +1028,16 @@ $("#pages").addEventListener("touchend", e => {
   if (e.touches.length || !multiTouch.start) return;
   const quick = performance.now() - multiTouch.t0 < 350, n = multiTouch.max;
   multiTouch.start = null; multiTouch.max = 0;
-  if (!quick || multiTouch.moved || boxMode || !doc) return;
-  if (n === 2) { undo(); toast("Undo", 900); }
-  else if (n === 3 && penDevice()) swapEraser();               // iPad / Apple Pencil: three fingers swap pen ⇄ eraser
-  else if (n === 3 || (n === 4 && penDevice())) { redo(); toast("Redo", 900); }
+  if (!quick || multiTouch.moved || boxMode || !doc) { quickTaps = []; return; }
+  if (n === 2) { undo(); toast("Undo", 900); quickTaps = []; }
+  else if (n === 3) { redo(); toast("Redo", 900); quickTaps = []; }
+  else if (n === 1 && (tool === "pen" || tool === "hl" || tool === "eraser")) {
+    const t = e.changedTouches[0], now = performance.now(), last = quickTaps[quickTaps.length - 1];
+    if (!last || now - last.t > 450 || Math.hypot(t.clientX - quickTaps[0].x, t.clientY - quickTaps[0].y) > 60) quickTaps = [];
+    quickTaps.push({ t: now, x: t.clientX, y: t.clientY });
+    if (quickTaps.length >= 4) { quickTaps = []; swapEraser(); }
+  }
 }, { passive: true });
-// an iPad, or any device where an Apple Pencil has been used
-function penDevice() {
-  let pen = false; try { pen = localStorage.getItem("hasPen") === "1"; } catch (e) {}
-  return pen || /iPad/.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
-}
 let drawTool = "pen";   // the tool the eraser hands back to
 function swapEraser() {
   if (doc.shared && doc.shared.role === "view") return;
@@ -989,7 +1077,7 @@ function drawInk(p) {
 }
 function hitRegion(p, x, y) {
   const P = doc.pages[p];
-  return P.regions.find(r => { const R = regionRect(p, r); return x >= R.x0 - 3 && x <= R.x1 + 3 && y >= R.y0 - 4 && y <= R.y1 + 3; });
+  return P.regions.find(r => { if (r.kind === "choice") return false; const R = regionRect(p, r); return x >= R.x0 - 3 && x <= R.x1 + 3 && y >= R.y0 - 4 && y <= R.y1 + 3; });
 }
 function bindInk(p, v) {
   let st = null;
@@ -1008,8 +1096,10 @@ function bindInk(p, v) {
     if (!(a && a.classList.contains("ans"))) a = null;
     if (a && !inRect(a, e.clientX, e.clientY)) a = null;
     if (!a && tool === "text" && e.pointerType !== "touch") { const r = hitRegion(p, p0[0], p0[1]); if (r && r._el) { r._el.focus({ preventScroll: true }); a = r._el; } }
-    if (tool === "text" && e.pointerType !== "touch" && !a) {    // Text never draws: clicking empty paper just leaves the box
-      e.preventDefault(); const f = document.activeElement; if (f && f.classList.contains("ans")) f.blur(); st = null; return;
+    if (tool === "text" && e.pointerType !== "touch" && !a) {    // Text never draws: clicking empty paper leaves the box you're in,
+      e.preventDefault(); const f = document.activeElement;           // or, when you're in none, looks for a missed answer space there
+      if (f && f.classList.contains("ans")) f.blur(); else addSpaceAt(p, p0);
+      st = null; return;
     }
     if (textish && a && e.pointerType !== "touch") {
       e.preventDefault(); v.ink.setPointerCapture(e.pointerId);
@@ -1026,7 +1116,7 @@ function bindInk(p, v) {
       return;
     }
     st = { id: e.pointerId, type: e.pointerType, start: p0, t0: performance.now(), moved: false, stroke: null, erased: [] };
-    if (e.pointerType !== "touch") { v.ink.setPointerCapture(e.pointerId); e.preventDefault(); }
+    if (e.pointerType !== "touch") { try { v.ink.setPointerCapture(e.pointerId); } catch (err) {} e.preventDefault(); }
     if (tool === "text") return;                                   // a finger in Text: scroll, or tap a space to type
     if (e.pointerType === "pen" || (tool === "pen" && e.pointerType === "mouse")) { hideHover(); beginDraw(st, p0, e); }
   });
@@ -1041,7 +1131,7 @@ function bindInk(p, v) {
       if (!st.stroke && !st.erasing && tool !== "text") beginDraw(st, st.start);
     }
     if (!st.moved && st.type !== "pen") return;
-    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    let evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e]; if (!evs.length) evs = [e];
     if (st.erasing) { for (const ev of evs) eraseAt(p, pos(ev), st.erased); return; }
     if (!st.stroke) return;
     const live = st.stroke._live;
@@ -1074,8 +1164,12 @@ function bindInk(p, v) {
         if (st.type !== "touch") clickRun = { t: performance.now(), x: e.clientX, y: e.clientY, n: 1 };
       }
       else if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
+      else if (tool === "text") addSpaceAt(p, st.start);
     } else if (st.stroke) { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); drawInk(p); }
-    else if (st.erased && st.erased.length) { pushUndo({ t: "erase", p, list: st.erased }); st.erased.forEach(s => emit(`s:${p}:${s.id}`)); scheduleSave(); }
+    else if (st.erased && st.erased.length) {
+      pushUndo({ t: "erase", p, list: st.erased }); st.erased.forEach(s => emit(`s:${p}:${s.id}`)); scheduleSave();
+      if (tool === "eraser") { toolAuto = false; setTool(drawTool); toolFlash(drawTool === "hl" ? "Highlighter" : drawTool === "smart" ? "Smart" : "Pen"); }   // erased something: straight back to writing
+    }
     st = null;
   };
   v.ink.addEventListener("pointerup", end);
@@ -1090,6 +1184,52 @@ function bindInk(p, v) {
     doc.strokes[p].push(s.stroke);
   }
 }
+// ---- Text tool on blank paper: there should be an answer space here. Look at the page again for one that was
+// missed (a faint line, a box …); failing that, fit a space to the blank area around the click ----
+let addingSpace = false;
+async function addSpaceAt(p, q) {
+  if (addingSpace || !canEdit() || boxMode) return;
+  const P = doc.pages[p], x = q[0], y = src(p, q[1]);
+  if (y > P.h || x < 0 || x > P.w) return;                               // in the extra space added under an answer
+  addingSpace = true;
+  try {
+    const page = await pdf.getPage(p + 1), vp = page.getViewport({ scale: 1 }), S = Detect.S, vp2 = page.getViewport({ scale: S });
+    const c = document.createElement("canvas"); c.width = Math.ceil(vp2.width); c.height = Math.ceil(vp2.height);
+    const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
+    let tc = null; try { tc = await page.getTextContent(); } catch (e) {}
+    const G = Detect.grey(ctx.getImageData(0, 0, c.width, c.height)), ink = (x0, y0, x1, y1) => {
+      let n = 0; for (let yy = Math.max(0, Math.floor(y0 * S)); yy < Math.min(G.h, Math.ceil(y1 * S)); yy++) for (let xx = Math.max(0, Math.floor(x0 * S)); xx < Math.min(G.w, Math.ceil(x1 * S)); xx++) if (G.g[yy * G.w + xx] < 165) n++; return n; };
+    if (ink(x - 1.5, y - 1.5, x + 1.5, y + 1.5) > 2) return;              // clicked on the printing itself
+    const overlaps = r => P.regions.some(o => o.x0 < r.x1 - 2 && o.x1 > r.x0 + 2 && o.y0 < r.y1 - 2 && o.y1 > r.y0 + 2);
+    // 1. a space the detector finds here now (which isn't one we already have)
+    const fresh = Detect.page(c, vp, tc).regions.filter(r => r.kind !== "choice" && !overlaps(r));
+    const dist = r => Math.max(r.x0 - x, 0, x - r.x1) + Math.max(r.y0 - y, 0, y - r.y1) * 1.5;
+    let r = fresh.filter(r => dist(r) < 14).sort((a, b) => dist(a) - dist(b))[0];
+    let how = "Found an answer space here.";
+    if (!r) {
+      // 2. the blank area around the click: as wide as the gap in the printing, from the click down
+      const band = (x0, x1, y0, y1) => ink(x0, y0, x1, y1) > 0;
+      let x0 = x, x1 = x;
+      while (x0 > 30 && !band(x0 - 2, x0, y - 5, y + 5)) x0 -= 2;
+      while (x1 < P.w - 30 && !band(x1, x1 + 2, y - 5, y + 5)) x1 += 2;
+      x0 = Math.max(x0 + 2, x - 6); x1 -= 2;
+      let y0 = y, y1 = y;
+      while (y0 > y - 12 && !band(x0, x1, y0 - 1, y0)) y0 -= 1;
+      while (y1 < y + 160 && y1 < P.h - 20 && !band(x0, x1, y1, y1 + 1)) y1 += 1;
+      if (x1 - x0 < 30 || y1 - y0 < 12) { toast("There's no room for an answer here. Use Boxes to draw one exactly.", 3000); return; }
+      r = { kind: "box", x0, x1, y0, y1: Math.max(y1, y0 + 16) };
+      how = "Added an answer space here. Use Boxes to change its size.";
+    }
+    c.width = c.height = 0;
+    r.id = `${p}:a${rid8()}`; r.label ||= ""; r.code ||= false; r.cut ??= r.y1 + 3;
+    P.regions.push(r); makeField(p, r); layoutPage(p); queueFit(p, r); updateCount(); pageChanged(p);
+    const ta = r._el; ta.focus({ preventScroll: true });
+    toast(how, 2600);
+  } catch (e) { console.warn(e); }
+  finally { addingSpace = false; }
+}
+
 // ---- a text cursor the height of the text, not of the whole ruled line ----
 // browsers draw a textarea's caret as tall as the line spacing, which on answer lines is far taller than the
 // writing. So the real caret is made invisible and this one is drawn instead, measured with a hidden copy of the text.
@@ -1426,9 +1566,22 @@ document.addEventListener("keydown", e => {
 });
 
 // ---------------- counts ----------------
-function totalRegions() { return doc ? doc.pages.reduce((s, P) => s + (P ? P.regions.length : 0), 0) : 0; }
-function filledCount() { if (!doc) return 0; const ids = new Set(doc.pages.flatMap(P => P ? P.regions.map(r => r.id) : [])); return Object.keys(doc.text).filter(k => ids.has(k) && doc.text[k].trim()).length; }
-function updateCount() { $("#count").textContent = `${filledCount()}/${totalRegions()} typed`; }
+// what's counted: every answer space, plus each multiple-choice question once (all its options together)
+function answerUnits() {
+  if (!doc) return [];
+  const units = [], groups = new Map(); let idx = null;
+  doc.pages.forEach((P, p) => { if (!P) return; for (const r of P.regions) {
+    if (r.kind !== "choice") { units.push({ ids: [r.id] }); continue; }
+    idx ||= labelIndex();
+    const key = labelAt(idx, p, r.y0 + 2) + "|" + (idx.length ? "" : p);
+    if (!groups.has(key)) { const u = { ids: [], choice: true }; groups.set(key, u); units.push(u); }
+    groups.get(key).ids.push(r.id);
+  } });
+  return units;
+}
+function totalRegions() { return answerUnits().length; }
+function filledCount() { return answerUnits().filter(u => u.ids.some(id => (doc.text[id] || "").trim())).length; }
+function updateCount() { $("#count").textContent = `${filledCount()}/${totalRegions()} answered`; }
 
 // ---------------- box editing ----------------
 let boxMode = false, sel = null; // sel = {p, r}
@@ -1439,7 +1592,7 @@ function setBoxMode(on) {
   sel = null; updateSelTools();
   doc.pages.forEach((P, p) => { drawBoxes(p); drawMarkers(p); });
 }
-const KIND_NAME = { lines: "Lines", box: "Box", cell: "Cell" };
+const KIND_NAME = { lines: "Lines", box: "Box", cell: "Cell", choice: "Choice" };
 function drawBoxes(p) {
   const v = views[p]; if (!v) return; $$(".bx,.rubber", v.el).forEach(e => e.remove());
   if (!boxMode) return;
@@ -1502,7 +1655,7 @@ $("#redetect").onclick = async () => {
   rebuildPageFields(p); pageChanged(p); busy(false); toast(`Page ${p + 1}: ${fresh.regions.length} answer spaces.`);
 };
 function pageChanged(p) { emit("page:" + p); scheduleSave(); }
-function rebuildPageFields(p) { $$(".ans,.ansshape", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
+function rebuildPageFields(p) { $$(".ans,.ansshape,.choice", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
 function rebuildField(p, r) { if (r._el) r._el.remove(); if (r._shape) { r._shape.remove(); r._shape = null; } makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
 function deleteSel() {
   if (sel && sel.q) { const { p, r } = sel, P = doc.pages[p]; P.qs = (P.qs || []).filter(m => m !== r); sel = null; updateSelTools(); pageChanged(p); doc.pages.forEach((P2, q) => drawBoxes(q)); return; }
@@ -1572,8 +1725,9 @@ $("#pages").addEventListener("pointerdown", e => {
       (doc.pages[p].qs ||= []).push(m); sel = { p, r: m, q: true }; pageChanged(p); doc.pages.forEach((P2, k) => drawBoxes(k)); updateSelTools();
       return;
     }
-    if (w < 12 || h < 8) return;
+    if (newKind === "choice" ? w < 5 || h < 5 : w < 12 || h < 8) return;
     const r = { id: `${p}:u${rid8()}`, kind: newKind, code: false, label: "" };
+    if (newKind === "choice") { r.shape = w > h * 1.4 ? "oval" : "box"; r.opt = ""; }
     const y0 = src(p, Math.min(p0[1], q[1])), y1 = src(p, Math.max(p0[1], q[1]));
     if (newKind === "lines") { r.sp = Math.min(pageSpacing(p), h); r.indent = 0; }
     setRegionRect(p, r, Math.min(p0[0], q[0]), y0, Math.max(p0[0], q[0]), y1);
@@ -1615,7 +1769,15 @@ function answerList(withQuestion) {
   const idx = labelIndex(); const out = [];
   doc.pages.forEach((P, p) => {
     let prev = 0;
+    const groups = new Map();
     for (const r of [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)) {
+      if (r.kind === "choice") {
+        const q = labelAt(idx, p, r.y0 + 2);
+        let e = groups.get(q);
+        if (!e) { e = { q, page: p + 1, type: "multiple choice", options: [], answer: [] }; if (withQuestion) { const qt = questionText(p, r, prev); if (qt) e.question = qt; } groups.set(q, e); out.push(e); }
+        const o = r.opt || `option ${e.options.length + 1}`; e.options.push(o); if (doc.text[r.id]) e.answer.push(o);
+        prev = Math.max(prev, r.y1); continue;
+      }
       const e = { q: labelAt(idx, p, r.y0 + 6), page: p + 1 };
       if (r.label && r.label !== "label") e.part = r.label.replace(/[.\s]+$/, "").slice(0, 40);
       if (r.kind === "cell") e.cell = true;
@@ -1694,8 +1856,16 @@ async function exportPDF() {
           for (const y of gapRules(p, r, g)) page.drawLine({ start: { x: r.x0, y: ty(y) }, end: { x: r.x1, y: ty(y) }, thickness: 0.5, color: rgb(0.6, 0.63, 0.62), dashArray: [1.2, 2.2] });
         }
       }
+      const ansCol = hex(ansStyle().c);
       for (const r of P.regions) {
         const raw = doc.text[r.id]; if (!raw || !raw.trim()) continue;
+        if (r.kind === "choice") {                                       // a chosen box gets a tick, a chosen oval is filled in
+          const R = regionRect(p, r), w = R.x1 - R.x0, h = R.y1 - R.y0;
+          if (r.shape === "oval") page.drawEllipse({ x: tx((R.x0 + R.x1) / 2), y: ty((R.y0 + R.y1) / 2), xScale: w / 2 - Math.min(w, h) * 0.16, yScale: h / 2 - Math.min(w, h) * 0.16, color: ansCol });
+          else page.drawSvgPath(`M${R.x0 + w * 0.2} ${R.y0 + h * 0.55} L${R.x0 + w * 0.42} ${R.y0 + h * 0.8} L${R.x0 + w * 0.85} ${R.y0 + h * 0.18}`, { x: tx(0), y: ty(0), borderColor: ansCol, borderWidth: Math.max(1, h * 0.12), borderLineCap: LineCapStyle.Round });
+          continue;
+        }
+        if (ansStyle().bg) { const R = regionRect(p, r); page.drawRectangle({ x: tx(R.x0 - 1), y: ty(R.y1 + 1), width: R.x1 - R.x0 + 2, height: R.y1 - R.y0 + 2, color: hex(ansStyle().bg), opacity: 0.45 }); }
         const font = r.code ? mono : sans, txt = clean(raw, r.code ? okM : okS);
         const R = regionRect(p, r), pad = r.kind === "box" ? 4 : 0, width = r.x1 - r.x0 - 2 * pad;
         const f0 = fitOf(r); let fs = f0.fs, L = f0.L, lines, top;
@@ -1713,7 +1883,8 @@ async function exportPDF() {
           if (!ln) return;
           const w = font.widthOfTextAtSize(ln, fs * fontScale(r));
           const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 && r.kind === "lines" ? r.indent || 0 : 0);
-          page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: rgb(0.067, 0.078, 0.094) });
+          page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: ansCol });
+          if (ansStyle().bold) page.drawText(ln, { x: tx(x) + fs * 0.035, y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: ansCol });   // a second pass a hair to the right: bold
         });
       }
       const S = (doc.strokes[p] || []).slice().sort((a, b) => (a.t === "hl" ? 0 : 1) - (b.t === "hl" ? 0 : 1));
@@ -1941,12 +2112,23 @@ function inkedRegions() {
 const isAnswered = (r, inked) => !!((doc.text[r.id] || "").trim() || inked.has(r.id));
 const normQ = s => String(s).toLowerCase().replace(/^\s*(question|q)\s*/, "").replace(/^0+(?=\d)/, "").replace(/[\s().,]/g, "");
 // every question label in reading order, with the answer spaces that belong to it
+// answered or not, per answer unit (a multiple-choice question is answered once any of its options is chosen or drawn on)
+function unitChecker() {
+  const inked = inkedRegions(), unitOf = new Map();
+  for (const u of answerUnits()) for (const id of u.ids) unitOf.set(id, u);
+  const done = u => u.ids.some(id => (doc.text[id] || "").trim() || inked.has(id));
+  return { unitOf: id => unitOf.get(id), done };
+}
 function questionMap() {
-  const idx = labelIndex(), inked = inkedRegions(), byLabel = new Map();
+  const idx = labelIndex(), U = unitChecker(), byLabel = new Map();
   for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.q, p: e.p, y: e.y, m: e.m, regions: [] });
-  for (const [p, r] of orderedRegions()) { const lab = labelAt(idx, p, r.y0 + 6); const e = byLabel.get(lab); if (e) e.regions.push([p, r]); }
+  for (const [p, r] of orderedRegions(true)) { const lab = labelAt(idx, p, r.y0 + (r.kind === "choice" ? 2 : 6)); const e = byLabel.get(lab); if (e) e.regions.push([p, r]); }
   const list = [...byLabel.values()];
-  for (const e of list) { const n = e.regions.filter(([, r]) => isAnswered(r, inked)).length; e.done = n; e.flag = e.regions.some(([, r]) => doc.flags && doc.flags[r.id]); e.state = !e.regions.length ? "" : n === e.regions.length ? "done" : n ? "part" : ""; }
+  for (const e of list) {
+    const us = [...new Set(e.regions.map(([, r]) => U.unitOf(r.id)).filter(Boolean))], n = us.filter(U.done).length;
+    e.total = us.length; e.done = n; e.flag = e.regions.some(([, r]) => doc.flags && doc.flags[r.id]);
+    e.state = !e.total ? "" : n === e.total ? "done" : n ? "part" : "";
+  }
   return list;
 }
 function flashRegions(list) {
@@ -1966,7 +2148,8 @@ function goToQuestion(e) {
   scrollToPoint(e.p, e.y, 0.12);
   flashRegions(e.regions);
   const mk = e.m && $(`.qmark[data-qid="${e.m.id}"]`); if (mk) { mk.classList.remove("flash"); void mk.offsetWidth; mk.classList.add("flash"); }
-  const first = e.regions.find(([, r]) => !(doc.text[r.id] || "").trim()) || e.regions[0];
+  const typed = e.regions.filter(([, r]) => r.kind !== "choice");
+  const first = typed.find(([, r]) => !(doc.text[r.id] || "").trim()) || typed[0];
   if (first && canFocusOnJump()) { const ta = first[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
   lastJump = e.label;
 }
@@ -1998,17 +2181,17 @@ function openJump(anchorEl) {
     const groups = []; for (const e of qs) { const g = groups[groups.length - 1]; if (g && g.q === e.q) g.items.push(e); else groups.push({ q: e.q, items: [e] }); }
     for (const g of groups) {
       const row = document.createElement("div"); row.className = "jrow";
-      const all = g.items.flatMap(e => e.regions), n = all.length, done = g.items.reduce((s, e) => s + e.done, 0);
+      const n = g.items.reduce((s, e) => s + e.total, 0), done = g.items.reduce((s, e) => s + e.done, 0);
       const head = document.createElement("button"); head.type = "button"; head.className = "jq " + (n && done === n ? "done" : done ? "part" : "") + (g.items.some(e => e.flag) ? " flag" : "") + (g.items.some(e => e.label === lastJump) ? " last" : "");
       head.innerHTML = `<b>Q${g.q}</b><small>${n ? `${done}/${n}` : "–"} · p${g.items[0].p + 1}</small>`;
       head.title = `Question ${g.q}, page ${g.items[0].p + 1}` + (n ? `: ${done} of ${n} answer spaces answered` : "");
-      head.onclick = () => goToQuestion(g.items.find(e => e.regions.length) || g.items[0]);
+      head.onclick = () => goToQuestion(g.items[0]);
       row.appendChild(head);
       for (const e of g.items) {
         if (e.label === g.q) continue;
         const c = document.createElement("button"); c.type = "button"; c.className = "jc " + e.state + (e.flag ? " flag" : "") + (e.label === lastJump ? " last" : "");
         c.textContent = e.label.slice(g.q.length).replace(/^\./, "").replace(/\)\(/g, " ").replace(/[()]/g, "");
-        c.title = e.regions.length ? `${e.label}: ${e.done} of ${e.regions.length} answered` + (e.flag ? " · flagged" : "") : `${e.label}: the start of this part`;
+        c.title = e.total ? `${e.label}: ${e.done} of ${e.total} answered` + (e.flag ? " · flagged" : "") : `${e.label}: the start of this part`;
         c.onclick = () => goToQuestion(e);
         row.appendChild(c);
       }
@@ -2038,16 +2221,16 @@ document.addEventListener("pointerdown", e => { const pop = $("#jumpPop"); if (!
 // the next answer space after the one you're in (or after what's on screen) with nothing written in it yet
 function nextEmpty() {
   if (!doc) return;
-  const all = orderedRegions(), inked = inkedRegions(); if (!all.length) return;
+  const all = orderedRegions(true), U = unitChecker(); if (!all.length) return;
   const a = document.activeElement, host = $("#pages");
   let from = a && a.classList && a.classList.contains("ans") ? all.findIndex(([, r]) => r._el === a) : -1;
   if (from < 0) { const top = host.scrollTop + 8; from = all.findIndex(([p, r]) => pageTop(p) + disp(p, r.y0) * zoom >= top) - 1; if (from < -1) from = all.length - 1; }
   for (let k = 1; k <= all.length; k++) {
     const [p, r] = all[(from + k) % all.length];
-    if (isAnswered(r, inked)) continue;
+    const u = U.unitOf(r.id); if (!u || U.done(u) || (u.choice && u.ids[0] !== r.id)) continue;
     const wrapped = from + k >= all.length;
     { const host = $("#pages"), t = readableScroll(p, r); if (Math.abs(t - host.scrollTop) < host.clientHeight * 6) glideTo(host, t); else host.scrollTop = t; } flashRegions([[p, r]]);
-    if (canFocusOnJump()) { r._el.focus({ preventScroll: true }); }
+    if (canFocusOnJump() && r.kind !== "choice") { r._el.focus({ preventScroll: true }); }
     const lab = labelAt(labelIndex(), p, r.y0 + 6);
     toast((lab !== "?" ? `Q${lab} · ` : "") + `page ${p + 1}` + (wrapped ? " (back to the start)" : ""), 1600);
     return;
