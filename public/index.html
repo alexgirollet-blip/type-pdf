@@ -75,7 +75,7 @@
         <li><b>Code:</b> press <b>&lt;/&gt; Code</b> beside an answer (or just start typing code and it switches itself) for monospace text with no capitals or corrections. Tab and Shift+Tab indent (several lines at once too), and Enter keeps your indentation.</li>
         <li><b>Resize on the go:</b> while typing in a box, drag the dots on its corners to make it bigger or smaller.</li>
         <li><b>Two pages at once:</b> the ▯▯ button next to zoom shows pages side by side, like a book.</li>
-        <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed.</li>
+        <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed. Question numbers have purple markers there: fix their label, or pick <b>Question</b> and drag a box over a number Go to missed.</li>
         <li><b>Export PDF</b> keeps the original paper sharp and adds your writing on top. <b>Export for AI</b> gives typed answers as JSON plus a small PDF of only your handwritten work, which costs far fewer tokens to mark.</li>
         <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab glides to the next answer space · Shift+Tab jumps back · double-click a word, triple-click a paragraph · Esc leaves a box · G or ⌘/Ctrl+G go to a question · N next empty answer.</li>
       </ul>
@@ -139,6 +139,7 @@
       <button class="nk on" data-k="lines">Lines</button>
       <button class="nk" data-k="box">Box</button>
       <button class="nk" data-k="cell">Cell</button>
+      <button class="nk" data-k="q" title="A question marker: drag a box over a printed question number or part, so Go to can jump to it">Question</button>
     </div>
     <span class="hint">Click a space to select it. Drag to move, drag its corner to resize.</span>
     <span class="grow"></span>
@@ -250,6 +251,7 @@
 <script src="lib/fontkit.umd.min.js"></script>
 <script src="fonts.js"></script>
 <script src="detect.js"></script>
+<script src="questions.js"></script>
 <script src="app.js"></script>
 <script src="sync.js"></script>
 <script src="home.js"></script>
