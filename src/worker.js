@@ -128,7 +128,13 @@ export default {
 
 // ---------- the hub: accounts live there; TypePDF only trusts its signed passes ----------
 const hubOn = env => !!(env.HUB_URL && env.HUB_SSO_SECRET);
-const hubBase = env => String(env.HUB_URL || "").trim().replace(/\/+$/, "");
+// only the hub's address counts: a path pasted on the end (".../api", ".../login") or a missing https:// would
+// otherwise send people to the wrong page, which answers {"error":"Sign in first"}
+const hubBase = env => {
+  let v = String(env.HUB_URL || "").trim().replace(/^["']|["']$/g, "");
+  if (v && !/^https?:\/\//i.test(v)) v = "https://" + v;
+  try { return new URL(v).origin; } catch { return v.replace(/\/+$/, ""); }
+};
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64u = s => { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); };
 async function hmac(secret, text) {
@@ -141,9 +147,26 @@ async function readSigned(secret, tok) {
   if (!sameStr(await hmac(secret, body), sig)) return null;
   try { const d = JSON.parse(new TextDecoder().decode(unb64u(body))); return d.exp && d.exp > Date.now() ? d : null; } catch { return null; }
 }
+// the shared secret with the hub, forgiving spaces, line breaks or quotes picked up when it was pasted in
+const hubSecret = env => String(env.HUB_SSO_SECRET || "").trim().replace(/^["']|["']$/g, "").trim();
+// a sign-in pass from the hub: {pass} when it's good, otherwise {why} saying what went wrong
+async function readHubPass(env, tok) {
+  tok = String(tok || "");
+  const i = tok.lastIndexOf(".");
+  if (!tok) return { why: "GirolletServer didn't send a sign-in pass back. Try again." };
+  if (i < 1) return { why: "The sign-in pass from GirolletServer was damaged. Try again." };
+  const body = tok.slice(0, i), sig = tok.slice(i + 1);
+  let ok = false;
+  for (const k of new Set([hubSecret(env), String(env.HUB_SSO_SECRET || "")])) if (k && sameStr(await hmac(k, body), sig)) { ok = true; break; }
+  if (!ok) return { why: "GirolletServer and TypePDF don't share the same sign-in secret: HUB_SSO_SECRET on the TypePDF Worker must be exactly the same as TYPEPDF_SSO_SECRET on the hub Worker." };
+  let d; try { d = JSON.parse(new TextDecoder().decode(unb64u(body))); } catch { return { why: "The sign-in pass from GirolletServer was damaged. Try again." }; }
+  if (!d.exp || d.exp <= Date.now()) return { why: "That sign-in took too long. Try again." };
+  if (!d.email) return { why: "GirolletServer didn't say who you are. Try again." };
+  return { pass: d };
+}
 async function makeSigned(secret, data) { const body = b64u(new TextEncoder().encode(JSON.stringify(data))); return body + "." + await hmac(secret, body); }
 async function hubCheck(env, emails) {
-  const r = await fetch(hubBase(env) + "/sso/check", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + env.HUB_SSO_SECRET }, body: JSON.stringify({ emails }) });
+  const r = await fetch(hubBase(env) + "/sso/check", { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer " + hubSecret(env) }, body: JSON.stringify({ emails }) });
   if (!r.ok) throw new Error("hub check failed: " + r.status);
   return (await r.json()).users || {};
 }
@@ -167,12 +190,13 @@ async function api(req, env, url, ctx) {
   // sign in: off to the hub, which sends the person back here with a signed pass
   if (path === "/api/auth/hub-login") {
     if (!hubOn(env)) return new Response("Sign-in isn't set up on this site yet (HUB_URL and HUB_SSO_SECRET).", { status: 503 });
+    if (hubBase(env) === url.origin) return new Response("HUB_URL on the TypePDF Worker is set to TypePDF's own address. Set it to the GirolletServer hub's address, e.g. https://girolletserver.com", { status: 503 });
     return redirectTo(hubBase(env) + "/sso/typepdf?return=" + encodeURIComponent(url.origin + "/api/auth/hub-callback"));
   }
   if (path === "/api/auth/hub-callback") {
     if (!hubOn(env)) return redirectTo("/#signinerror=" + encodeURIComponent("Sign-in isn't set up on this site yet."));
-    const pass = await readSigned(env.HUB_SSO_SECRET, url.searchParams.get("hubpass"));
-    if (!pass || !pass.email) return redirectTo("/#signinerror=" + encodeURIComponent("That sign-in didn't work or took too long. Try again."));
+    const { pass, why } = await readHubPass(env, url.searchParams.get("hubpass"));
+    if (!pass) return redirectTo("/#signinerror=" + encodeURIComponent(why));
     const r = await (await call(auth, "/sso", pass)).json();
     if (!r.token) return redirectTo("/#signinerror=" + encodeURIComponent(r.error || "Couldn't sign in."));
     return redirectTo("/#signin=" + r.token);
