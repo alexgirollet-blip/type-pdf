@@ -179,7 +179,7 @@ async function openDoc(d, fresh = false) {
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
   if (window.Sync && (Sync.user || doc.shared)) { busy(true, doc.shared ? "Joining…" : "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
   const need = [];
-  for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions) need.push(i);
+  for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions || (doc.pages[i].dv !== DV && untouched(i))) need.push(i);
   for (let k = 0; k < need.length; k++) {
     const i = need[k];
     busy(true, `Finding answer spaces… page ${i + 1} of ${pdf.numPages}`, k / need.length);
@@ -258,6 +258,13 @@ $("#fontSel").addEventListener("change", e => {
   applyFont(); emit("font"); scheduleSave();
 });
 
+// version of the answer-space finder: pages found by an older one are found again when nothing is on them yet
+const DV = 2;
+function untouched(i) {
+  const P = doc.pages[i]; if (!P || !P.regions) return true;
+  if ((doc.strokes[i] || []).length) return false;
+  return !P.regions.some(r => (doc.text[r.id] || "").trim() || (doc.flags && doc.flags[r.id]));
+}
 async function detectPage(i, prev) {
   const page = await pdf.getPage(i + 1);
   const vp = page.getViewport({ scale: 1 });
@@ -271,7 +278,7 @@ async function detectPage(i, prev) {
   if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
   res.regions.forEach((r, k) => r.id = `${i}:${k}`);
-  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, cv: CV, gaps: (prev && prev.gaps) || {} };
+  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, cv: CV, dv: DV, gaps: (prev && prev.gaps) || {} };
 }
 // ---- reading question numbers off image-only papers (Tesseract, bundled and only loaded when needed) ----
 let ocrWorkerP = null;
@@ -744,11 +751,59 @@ function toggleChoice(p, r) {
 // the part of a choice that's filled in: the capsule inside AQA's answer box, or the oval itself (slightly inset)
 function choiceMark(r) { return Array.isArray(r.mark) && r.mark.length === 4 ? r.mark : [0.16, 0.16, 0.84, 0.84]; }
 function paintChoice(r) { const b = r._el; if (!b) return; const on = !!doc.text[r.id]; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); }
-function focusNext(r, dir) {
-  const all = orderedRegions(); const i = all.findIndex(([q, s]) => s === r); const n = all[i + dir]; if (!n) return;
-  const ta = n[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L);
-  // glide to the next space (rather than jumping) so you can see everything you pass on the way
-  const host = $("#pages"), target = readableScroll(n[0], n[1]);
+// ---- Tab: every place an answer goes, in reading order ----
+// an answer space (lines, box, cell), each multiple-choice question once (its first option), and the questions
+// with no space of their own (draw on the diagram, write on the graph …): their printed number. A heading whose
+// parts follow (2(a) before 2(a)(i)) isn't a stop: its parts are.
+function tabStops() {
+  const out = [], idx = labelIndex(), groups = new Set(), hasAnswer = new Set();
+  doc.pages.forEach((P, p) => { if (!P) return; for (const r of P.regions) {
+    const lab = labelAt(idx, p, r.y0 + (r.kind === "choice" ? 2 : 6)); hasAnswer.add(lab);
+    if (r.kind === "choice") { const key = lab + "|" + (idx.length ? "" : p); if (groups.has(key)) continue; groups.add(key); }
+    out.push({ p, y: r.y0, x: r.x0, r });
+  } });
+  idx.forEach((e, i) => { const nx = idx[i + 1]; const leaf = !nx || nx.m.lvl <= e.m.lvl; if (leaf && !hasAnswer.has(e.label)) out.push({ p: e.p, y: e.y, x: e.x, m: e.m, label: e.label }); });
+  // choices sit beside their options, so order them by where their question's options start
+  return out.sort((a, b) => a.p - b.p || a.y - b.y || a.x - b.x);
+}
+let tabAt = null;   // the question number Tab last stopped at (it can't hold the keyboard focus itself)
+function focusNext(r, dir) { tabMove(dir, r); }
+function tabMove(dir, from) {
+  const all = tabStops(); if (!all.length) return;
+  const host = $("#pages"), a = document.activeElement;
+  let i = -1;
+  const cur = from || (a && a.dataset && a.dataset.rid ? findRegion(a.dataset.rid) : null);
+  if (cur) {
+    i = all.findIndex(s => s.r === cur);
+    if (i < 0 && cur.kind === "choice") { const u = answerUnits().find(u => u.ids.includes(cur.id)); if (u) i = all.findIndex(s => s.r && u.ids.includes(s.r.id)); }   // another option of the same question
+  } else if (tabAt) {
+    const k = all.findIndex(s => s.m === tabAt);
+    const v = views[all[k] ? all[k].p : 0], on = all[k] && v && Math.abs(pageTop(all[k].p) + disp(all[k].p, all[k].y) * zoom - host.scrollTop - host.clientHeight / 2) < host.clientHeight;
+    if (on) i = k;
+  }
+  if (i < 0) {                                   // from what's on screen: the first stop below the top of the view
+    const top = host.scrollTop + 8;
+    const j = all.findIndex(s => pageTop(s.p) + disp(s.p, s.y) * zoom >= top);
+    i = dir > 0 ? (j < 0 ? all.length : j) - 1 : (j < 0 ? all.length : j);
+    if (!cur && !tabAt && dir > 0) { const firstEmpty = all.findIndex((s, k) => k > i && s.r && !(doc.text[s.r.id] || "").trim()); if (firstEmpty > i) i = firstEmpty - 1; }
+  }
+  const n = all[i + (dir || 1)]; if (!n) return;
+  let target;
+  if (n.m) {
+    // a question answered on the paper itself: show it, nothing to type into
+    if (a && a.blur && a !== document.body) a.blur();
+    tabAt = n.m;
+    target = clamp(pageTop(n.p) + disp(n.p, n.y) * zoom - host.clientHeight * 0.15, 0, host.scrollHeight - host.clientHeight);
+    requestAnimationFrame(() => { const mk = $(`.qmark[data-qid="${n.m.id}"]`); if (mk) { mk.classList.remove("flash"); void mk.offsetWidth; mk.classList.add("flash"); } });
+    toast(`Q${n.label}: answer this one on the paper (Pen or Smart).`, 1800);
+  } else {
+    tabAt = null;
+    const el = n.r._el; el.focus({ preventScroll: true });
+    if (n.r.kind === "choice") flashRegions([[n.p, n.r]]);
+    else { const L = el.value.length; el.setSelectionRange(L, L); }
+    target = readableScroll(n.p, n.r);
+  }
+  // glide to the next stop (rather than jumping) so you can see everything you pass on the way
   if (dir > 0) glideTo(host, target);                 // Tab glides forward
   else { cancelAnimationFrame(glideRaf); host.scrollTop = target; }   // Shift+Tab jumps straight back
 }
@@ -816,7 +871,7 @@ function applyField(p, r, f) {
   const z = zoom, rect = regionRect(p, r);
   ta.style.fontSize = f.fs * fontScale(r) * z + "px"; ta.style.lineHeight = f.L * z + "px";
   ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
-  ta.style.textIndent = (r.kind === "lines" ? r.indent || 0 : 0) * z + "px";
+  ta.style.textIndent = indentOf(r) * z + "px";
   if (r.kind === "lines") {
     const top = fieldTop(p, r, f), extra = rect.y1 - disp(p, r.y1);   // extra = page space added under it
     ta.style.top = top * z + "px"; ta.style.height = Math.max(rect.y1 + 1 - top, availFor(r, f) + extra) * z + "px"; ta.style.padding = "0";
@@ -828,13 +883,17 @@ function applyField(p, r, f) {
   shapeField(r, f);
   ta.classList.toggle("filled", !!(ta.value && ta.value.trim()));
 }
+// how far in the first line starts (after a label like "Difference 1"). A few points is just the printed lines not
+// lining up exactly, not a label: that stays a plain rectangle.
+const MIN_INDENT = 14;
+function indentOf(r) { return r.kind === "lines" && (r.indent || 0) >= MIN_INDENT ? r.indent : 0; }
 // an answer whose first line starts further right (after a label like "Difference 1") gets a notched outline that
 // follows where text can actually go: clipped background plus a matching outline drawn beside it
 function shapeField(r, f) {
-  const ta = r._el, z = zoom, ind = r.kind === "lines" ? (r.indent || 0) * z : 0;
+  const ta = r._el, z = zoom, ind = indentOf(r) * z;
   let sv = r._shape;
   if (ind < 2) { ta.classList.remove("notch"); ta.style.clipPath = ""; if (sv) sv.style.display = "none"; return; }
-  const W = parseFloat(ta.style.width), H = parseFloat(ta.style.height), step = Math.min(H, f.L * z), x = ind + 1 * z;
+  const W = parseFloat(ta.style.width), H = parseFloat(ta.style.height), step = Math.min(H, f.L * z), x = Math.max(0, ind - 3 * z);   // a little left of the text, so no letter is clipped
   const pts = [[x, 0], [W, 0], [W, H], [0, H], [0, step], [x, step]];
   ta.classList.add("notch");
   ta.style.clipPath = "polygon(" + pts.map(q => q[0].toFixed(1) + "px " + q[1].toFixed(1) + "px").join(",") + ")";
@@ -1546,7 +1605,7 @@ $$(".sz").forEach(b => b.onclick = () => { width = +b.dataset.w; $$(".sz").forEa
 $("#hintBtn").onclick = e => { const on = $("#pages").classList.toggle("hints"); e.currentTarget.classList.toggle("on", on); saveView(); };
 $("#homeBtn").onclick = () => showHome();
 document.addEventListener("keydown", e => {
-  if (!doc || $("#editor").hidden) return;
+  if (!doc || $("#editor").hidden || e.defaultPrevented) return;      // already handled (e.g. Tab in an answer moved on)
   const typing = /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName);
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key.toLowerCase() === "z" && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
@@ -1560,7 +1619,7 @@ document.addEventListener("keydown", e => {
   if (k === "g" && !boxMode) { e.preventDefault(); openJump(); return; }
   if (k === "n" && !boxMode) { e.preventDefault(); nextEmpty(); return; }
   if (e.key.length === 1 && /[\p{L}\p{N}]/u.test(e.key) && !boxMode) { toast("Click or tap an answer space first, then type."); return; }
-  if (k === "tab") { e.preventDefault(); const all = orderedRegions(); const first = all.find(([p, r]) => !doc.text[r.id]) || all[0]; if (first) focusNext(first[1], 0); }
+  if (k === "tab") { e.preventDefault(); tabMove(e.shiftKey ? -1 : 1); }
   else if ((k === "delete" || k === "backspace") && boxMode && sel) { e.preventDefault(); deleteSel(); }
   else if ((k === "delete" || k === "backspace") && inkSel) { e.preventDefault(); deleteInkSel(); }
   else if (k === "escape" && inkSel) clearInkSel();
@@ -1873,7 +1932,7 @@ async function exportPDF() {
         const R = regionRect(p, r), pad = r.kind === "box" ? 4 : 0, width = r.x1 - r.x0 - 2 * pad;
         const f0 = fitOf(r); let fs = f0.fs, L = f0.L, lines, top;
         for (;;) {
-          lines = wrapText(txt, font, fs * fontScale(r), width, r.kind === "lines" ? r.indent || 0 : 0);
+          lines = wrapText(txt, font, fs * fontScale(r), width, indentOf(r));
           top = fieldTop(p, r, { fs, L });
           const fitsNow = r.kind === "lines"
             ? top + (lines.length - 1) * L + baseInLine(fs, L) <= R.y1 - 3.5 + 0.5   // last baseline on or above the last printed line
@@ -1885,7 +1944,7 @@ async function exportPDF() {
         lines.forEach((ln, i) => {
           if (!ln) return;
           const w = font.widthOfTextAtSize(ln, fs * fontScale(r));
-          const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 && r.kind === "lines" ? r.indent || 0 : 0);
+          const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 ? indentOf(r) : 0);
           page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: ansCol });
           if (ansStyle().bold) page.drawText(ln, { x: tx(x) + fs * 0.035, y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: ansCol });   // a second pass a hair to the right: bold
         });
