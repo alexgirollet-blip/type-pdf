@@ -284,8 +284,13 @@ const Detect = (() => {
     const Gh = pairUp(G, false), Hall = hRules(Gh, integral(Gh, DARK), RULE).map(l => ({ ...l, y: l.y + 0.5 / S, th: Math.max(0.5, l.th - 1 / S) }));
     const H = Hall.filter(l => l.x1 - l.x0 >= 24);
     const V = vRules(pairUp(G, true)).map(v => ({ ...v, x: v.x + 0.5 / S }));
-    const items = tc ? textItems(tc, viewport) : [];
     const inkPt = (x0, y0, x1, y1) => inkIn(I, G.w, x0 * S, y0 * S, x1 * S, y1 * S);
+    // only text you can see: papers carry invisible text too (AQA's "Answer space for question 03.3" in every answer
+    // area), which would otherwise split answer lines into pieces or hide them as "lines with text under them"
+    const items = (tc ? textItems(tc, viewport) : []).filter(it => {
+      const w = Math.max(1, it.x1 - it.x), y0 = it.base - it.fh * 0.72, y1 = it.base - it.fh * 0.08;
+      return inkPt(it.x, y0, it.x1, y1) > Math.max(2, w * (y1 - y0) * S * S * 0.015);
+    });
 
     // rules touched by two or more vertical lines are table/box borders
     const touching = l => V.filter(v => v.x >= l.x0 - 3 && v.x <= l.x1 + 3 && v.y0 <= l.y + 3 && v.y1 >= l.y - 3).length;
@@ -369,7 +374,7 @@ const Detect = (() => {
       }
       regions.push({
         kind: "lines", x0: xs0, x1: xs1, ys: g.lines.map(l => l.y), sp,
-        indent: Math.max(0, g.lines[0].x0 - xs0), label: g.lines[0].label || ""
+        indent: g.lines[0].x0 - xs0 >= 14 ? g.lines[0].x0 - xs0 : 0, label: g.lines[0].label || ""
       });
     }
 

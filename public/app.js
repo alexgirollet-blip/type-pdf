@@ -179,7 +179,7 @@ async function openDoc(d, fresh = false) {
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
   if (window.Sync && (Sync.user || doc.shared)) { busy(true, doc.shared ? "Joining…" : "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
   const need = [];
-  for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions) need.push(i);
+  for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions || (doc.pages[i].dv !== DV && untouched(i))) need.push(i);
   for (let k = 0; k < need.length; k++) {
     const i = need[k];
     busy(true, `Finding answer spaces… page ${i + 1} of ${pdf.numPages}`, k / need.length);
@@ -258,6 +258,13 @@ $("#fontSel").addEventListener("change", e => {
   applyFont(); emit("font"); scheduleSave();
 });
 
+// version of the answer-space finder: pages found by an older one are found again when nothing is on them yet
+const DV = 2;
+function untouched(i) {
+  const P = doc.pages[i]; if (!P || !P.regions) return true;
+  if ((doc.strokes[i] || []).length) return false;
+  return !P.regions.some(r => (doc.text[r.id] || "").trim() || (doc.flags && doc.flags[r.id]));
+}
 async function detectPage(i, prev) {
   const page = await pdf.getPage(i + 1);
   const vp = page.getViewport({ scale: 1 });
@@ -271,7 +278,7 @@ async function detectPage(i, prev) {
   if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
   res.regions.forEach((r, k) => r.id = `${i}:${k}`);
-  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, cv: CV, gaps: (prev && prev.gaps) || {} };
+  return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, cv: CV, dv: DV, gaps: (prev && prev.gaps) || {} };
 }
 // ---- reading question numbers off image-only papers (Tesseract, bundled and only loaded when needed) ----
 let ocrWorkerP = null;
@@ -816,7 +823,7 @@ function applyField(p, r, f) {
   const z = zoom, rect = regionRect(p, r);
   ta.style.fontSize = f.fs * fontScale(r) * z + "px"; ta.style.lineHeight = f.L * z + "px";
   ta.style.left = (r.x0 - 1) * z + "px"; ta.style.width = (r.x1 - r.x0 + 2) * z + "px";
-  ta.style.textIndent = (r.kind === "lines" ? r.indent || 0 : 0) * z + "px";
+  ta.style.textIndent = indentOf(r) * z + "px";
   if (r.kind === "lines") {
     const top = fieldTop(p, r, f), extra = rect.y1 - disp(p, r.y1);   // extra = page space added under it
     ta.style.top = top * z + "px"; ta.style.height = Math.max(rect.y1 + 1 - top, availFor(r, f) + extra) * z + "px"; ta.style.padding = "0";
@@ -828,13 +835,17 @@ function applyField(p, r, f) {
   shapeField(r, f);
   ta.classList.toggle("filled", !!(ta.value && ta.value.trim()));
 }
+// how far in the first line starts (after a label like "Difference 1"). A few points is just the printed lines not
+// lining up exactly, not a label: that stays a plain rectangle.
+const MIN_INDENT = 14;
+function indentOf(r) { return r.kind === "lines" && (r.indent || 0) >= MIN_INDENT ? r.indent : 0; }
 // an answer whose first line starts further right (after a label like "Difference 1") gets a notched outline that
 // follows where text can actually go: clipped background plus a matching outline drawn beside it
 function shapeField(r, f) {
-  const ta = r._el, z = zoom, ind = r.kind === "lines" ? (r.indent || 0) * z : 0;
+  const ta = r._el, z = zoom, ind = indentOf(r) * z;
   let sv = r._shape;
   if (ind < 2) { ta.classList.remove("notch"); ta.style.clipPath = ""; if (sv) sv.style.display = "none"; return; }
-  const W = parseFloat(ta.style.width), H = parseFloat(ta.style.height), step = Math.min(H, f.L * z), x = ind + 1 * z;
+  const W = parseFloat(ta.style.width), H = parseFloat(ta.style.height), step = Math.min(H, f.L * z), x = Math.max(0, ind - 3 * z);   // a little left of the text, so no letter is clipped
   const pts = [[x, 0], [W, 0], [W, H], [0, H], [0, step], [x, step]];
   ta.classList.add("notch");
   ta.style.clipPath = "polygon(" + pts.map(q => q[0].toFixed(1) + "px " + q[1].toFixed(1) + "px").join(",") + ")";
@@ -1873,7 +1884,7 @@ async function exportPDF() {
         const R = regionRect(p, r), pad = r.kind === "box" ? 4 : 0, width = r.x1 - r.x0 - 2 * pad;
         const f0 = fitOf(r); let fs = f0.fs, L = f0.L, lines, top;
         for (;;) {
-          lines = wrapText(txt, font, fs * fontScale(r), width, r.kind === "lines" ? r.indent || 0 : 0);
+          lines = wrapText(txt, font, fs * fontScale(r), width, indentOf(r));
           top = fieldTop(p, r, { fs, L });
           const fitsNow = r.kind === "lines"
             ? top + (lines.length - 1) * L + baseInLine(fs, L) <= R.y1 - 3.5 + 0.5   // last baseline on or above the last printed line
@@ -1885,7 +1896,7 @@ async function exportPDF() {
         lines.forEach((ln, i) => {
           if (!ln) return;
           const w = font.widthOfTextAtSize(ln, fs * fontScale(r));
-          const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 && r.kind === "lines" ? r.indent || 0 : 0);
+          const x = r.kind === "cell" ? (r.x0 + r.x1) / 2 - w / 2 : r.x0 + pad + (i === 0 ? indentOf(r) : 0);
           page.drawText(ln, { x: tx(x), y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: ansCol });
           if (ansStyle().bold) page.drawText(ln, { x: tx(x) + fs * 0.035, y: ty(top + i * L + baseInLine(fs, L)), size: fs * fontScale(r), font, color: ansCol });   // a second pass a hair to the right: bold
         });

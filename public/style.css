@@ -86,7 +86,7 @@ button{font:inherit;cursor:pointer}
 .page.tool-eraser canvas.ink{cursor:cell}
 .page.tool-text canvas.ink{cursor:text}
 .page .ans{caret-color:transparent;position:absolute;margin:0;border:0;padding:0;background:transparent;resize:none;overflow:hidden;color:var(--ink);
-  font-family:var(--ans-font,"PaperSans"),sans-serif;white-space:pre-wrap;overflow-wrap:break-word;outline:none;border-radius:2px;caret-color:#1b4d47}
+  font-family:var(--ans-font,"PaperSans"),sans-serif;white-space:pre-wrap;overflow-wrap:break-word;outline:none;border-radius:2px}
 .page .ans.code{font-family:"PaperMono",monospace;tab-size:4}
 .page .ans.cell{text-align:center}
 .page .ans:focus{background:rgba(47,125,116,.08);box-shadow:0 0 0 1px rgba(47,125,116,.55)}
