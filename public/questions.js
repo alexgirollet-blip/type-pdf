@@ -53,7 +53,7 @@ const Questions = (() => {
         const num = String(+text.slice(pre, j).replace(/\s/g, ""));
         if (+num > 0) {
           toks.push({ lvl: 0, tok: num, a: pre, b: j }); i = j;
-          const pm = two && text.slice(j).match(/^\s*\.\s*(\d{1,2})(?!\d)/);         // AQA's part: 04.2
+          const pm = two && (text.slice(j).match(/^\s*[.·]\s*(\d{1,2})(?!\d)/) || text.slice(j).match(/^\s+(\d)(?=\s+\S)/));   // AQA's part: 04.2 (the dot is sometimes drawn, not text)
           if (pm) { const b2 = j + pm[0].length; toks.push({ lvl: 1, tok: String(+pm[1]), a: b2 - pm[1].length, b: b2, num: true }); i = b2; }
           else if (text[i] === ".") i++;
         }

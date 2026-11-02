@@ -553,7 +553,7 @@ async function findChoices() {
     P.cv = CV; if (canEdit()) emit("page:" + p);
   }
 }
-const QV = 2;   // version of the question finder: pages found by an older one are looked at again
+const QV = 3;   // version of the question finder: pages found by an older one are looked at again
 const needsQuestions = P => !!P && (!Array.isArray(P.qs) || P.qv !== QV);
 // each text item with whether its font is bold or monospace (question numbers are nearly always bold;
 // line numbers in code listings are monospace)
@@ -1069,9 +1069,32 @@ function showHover(p, q) {
   Object.assign(hoverDot.style, { display: "block", width: d + "px", height: d + "px", left: q[0] * zoom - d / 2 + "px", top: q[1] * zoom - d / 2 + "px", background: er ? "transparent" : hl ? "rgba(242,210,27,.45)" : colour });
 }
 function hideHover() { if (hoverDot) hoverDot.style.display = "none"; }
-// ---- two-finger tap undoes, three-finger tap redoes, and four quick taps with one finger swap pen ⇄ eraser
-// (with Pen, Highlighter or Eraser, where a finger tap does nothing else). Fingers still scroll and pinch as normal ----
-let quickTaps = [];
+// ---- two-finger tap undoes, three-finger tap redoes; two to four quick taps with one finger, or three quick taps
+// with the Pencil, swap pen ⇄ eraser (with Pen, Highlighter or Eraser, where a tap does nothing else).
+// Fingers still scroll and pinch as normal ----
+let quickTaps = [], quickT = 0;
+function fingerTap(t) {
+  const now = performance.now(), last = quickTaps[quickTaps.length - 1];
+  if (!last || now - last.t > 420 || Math.hypot(t.clientX - quickTaps[0].x, t.clientY - quickTaps[0].y) > 60) quickTaps = [];
+  quickTaps.push({ t: now, x: t.clientX, y: t.clientY });
+  clearTimeout(quickT);
+  quickT = setTimeout(() => { const n = quickTaps.length; quickTaps = []; if (n >= 2 && n <= 4 && doc && !boxMode) swapEraser(); }, 430);   // decided once the taps stop
+}
+// the Pencil: three quick taps on the same spot. The dots the taps left are taken away again.
+let penTaps = [];
+function pencilTap(p, stroke, e) {
+  const now = performance.now(), last = penTaps[penTaps.length - 1];
+  if (!last || now - last.t > 450 || Math.hypot(e.clientX - penTaps[0].x, e.clientY - penTaps[0].y) > 40) penTaps = [];
+  penTaps.push({ t: now, x: e.clientX, y: e.clientY, p, stroke });
+  if (penTaps.length < 3) return;
+  for (const tp of penTaps) {
+    if (!tp.stroke) continue;
+    const arr = doc.strokes[tp.p] || [], i = arr.indexOf(tp.stroke); if (i >= 0) arr.splice(i, 1);
+    const u = undoS.findIndex(a => a.t === "add" && a.s === tp.stroke); if (u >= 0) undoS.splice(u, 1);
+    emit(`s:${tp.p}:${tp.stroke.id}`); drawInk(tp.p);
+  }
+  penTaps = []; scheduleSave(); swapEraser();
+}
 const multiTouch = { max: 0, t0: 0, moved: false, start: null, last: 0 };
 $("#pages").addEventListener("touchstart", e => {
   const fingers = [...e.touches].filter(t => t.touchType !== "stylus");
@@ -1093,12 +1116,7 @@ $("#pages").addEventListener("touchend", e => {
   if (!quick || multiTouch.moved || boxMode || !doc) { quickTaps = []; return; }
   if (n === 2) { undo(); toast("Undo", 900); quickTaps = []; }
   else if (n === 3) { redo(); toast("Redo", 900); quickTaps = []; }
-  else if (n === 1 && (tool === "pen" || tool === "hl" || tool === "eraser")) {
-    const t = e.changedTouches[0], now = performance.now(), last = quickTaps[quickTaps.length - 1];
-    if (!last || now - last.t > 450 || Math.hypot(t.clientX - quickTaps[0].x, t.clientY - quickTaps[0].y) > 60) quickTaps = [];
-    quickTaps.push({ t: now, x: t.clientX, y: t.clientY });
-    if (quickTaps.length >= 4) { quickTaps = []; swapEraser(); }
-  }
+  else if (n === 1 && (tool === "pen" || tool === "hl" || tool === "eraser")) fingerTap(e.changedTouches[0]);
 }, { passive: true });
 let drawTool = "pen";   // the tool the eraser hands back to
 function swapEraser() {
@@ -1209,6 +1227,12 @@ function bindInk(p, v) {
     delete s._pr; delete s._live; return s;
   };
   const end = e => {
+    const tapNow = st && e.pointerId === st.id && st.type === "pen" && !st.moved && performance.now() - st.t0 < 300 && (tool === "pen" || tool === "hl" || tool === "eraser");
+    const s0 = st && st.stroke;
+    endStroke(e);
+    if (tapNow) pencilTap(p, s0 && (doc.strokes[p] || []).includes(s0) ? s0 : null, e);
+  };
+  const endStroke = e => {
     if (!st || e.pointerId !== st.id) return;
     if (st.select) { st = null; return; }
     if (st.type === "touch" && performance.now() - multiTouch.last < 600) { st = null; return; }   // part of a two/three-finger tap
@@ -1820,37 +1844,6 @@ document.addEventListener("pointerdown", e => { const pop = $("#timerPop"); if (
 // the question markers (questions.js), in reading order, with their full labels ("4(b)(ii)")
 function labelIndex() { return Questions.index(doc.pages); }
 function labelAt(idx, p, y) { let lab = "?"; for (const e of idx) { if (e.p < p || (e.p === p && e.y <= y)) lab = e.label; else break; } return lab; }
-// the printed wording just above an answer space (for marking without the paper)
-function questionText(p, r, prevBottom) {
-  const P = doc.pages[p];
-  const junk = it => { const s = it.s.trim(); return /^\.{4,}|^\[\d+\]$|^PMT$|^©|^Turn over$|^Answer all questions\.?$|^BLANK PAGE$/i.test(s) || /^\s*\.+\s*$/.test(s) || (/^\d{1,3}$/.test(s) && it.x > 150 && it.y < 70); };
-  const its = (P.items || []).filter(it => it.y > prevBottom + 1 && it.y < r.y0 + 6 && !junk(it));
-  return its.sort((a, b) => a.y - b.y || a.x - b.x).map(it => it.s.replace(/\.{4,}/g, "").trim()).filter(Boolean).join(" ").replace(/\s+/g, " ").slice(-500).trim();
-}
-function answerList(withQuestion) {
-  const idx = labelIndex(); const out = [];
-  doc.pages.forEach((P, p) => {
-    let prev = 0;
-    const groups = new Map();
-    for (const r of [...P.regions].sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)) {
-      if (r.kind === "choice") {
-        const q = labelAt(idx, p, r.y0 + 2);
-        let e = groups.get(q);
-        if (!e) { e = { q, page: p + 1, type: "multiple choice", options: [], answer: [] }; if (withQuestion) { const qt = questionText(p, r, prev); if (qt) e.question = qt; } groups.set(q, e); out.push(e); }
-        const o = r.opt || `option ${e.options.length + 1}`; e.options.push(o); if (doc.text[r.id]) e.answer.push(o);
-        prev = Math.max(prev, r.y1); continue;
-      }
-      const e = { q: labelAt(idx, p, r.y0 + 6), page: p + 1 };
-      if (r.label && r.label !== "label") e.part = r.label.replace(/[.\s]+$/, "").slice(0, 40);
-      if (r.kind === "cell") e.cell = true;
-      if (withQuestion) { const qt = questionText(p, r, prev); if (qt) e.question = qt; }
-      e.answer = (doc.text[r.id] || "").trim();
-      out.push(e); prev = Math.max(prev, r.y1);
-    }
-  });
-  return out;
-}
-
 // ---------------- export: filled-in PDF ----------------
 let fontCache = null;
 const fontFiles = {};
@@ -1965,6 +1958,7 @@ async function exportPDF() {
         page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: s.w, borderOpacity: s.t === "hl" ? 0.35 : 1, borderLineCap: s.t === "hl" ? LineCapStyle.Butt : LineCapStyle.Round });
       }
     }
+    await aiPrep().catch(() => {});
     out.setTitle(doc.name + " (answered)"); out.setSubject(JSON.stringify(aiJSON(false))); out.setCreator("TypePDF"); out.setProducer("TypePDF");
     // carry the untouched paper and the answers inside, so opening this file in TypePDF brings back editable answers
     // (instead of answers baked into the page)
@@ -1994,73 +1988,7 @@ async function pageRaster(p, scale, withInk, grey) {
   return c2;
 }
 
-// ---------------- export for AI: typed answers as JSON + only the hand-drawn work as a small PDF ----------------
-function aiJSON(withQuestion) {
-  const list = answerList(withQuestion);
-  const answered = list.filter(e => e.answer), blank = list.filter(e => !e.answer).map(e => e.q + (e.part ? ` [${e.part}]` : "") + (e.cell ? " [cell]" : ""));
-  // group table cells under one entry so a filled truth table reads as rows
-  const answers = [];
-  for (const e of answered) {
-    const last = answers[answers.length - 1];
-    if (e.cell && last && last.cells && last.q === e.q && last.page === e.page) { last.cells.push(e.answer); continue; }
-    if (e.cell) { const { answer, cell, ...rest } = e; answers.push({ ...rest, cells: [answer] }); continue; }
-    answers.push(e);
-  }
-  const o = { paper: doc.name, exported: new Date().toISOString() };
-  if (doc.timer) o.time_used = fmtT(timerUsed(doc.timer)) + (doc.timer.up ? "" : " of " + fmtT(doc.timer.total));
-  o.note = "Typed answers are listed by question number. Table cells are given left-to-right, top-to-bottom. Handwritten or drawn work is in the separate workings PDF, one cropped image per area, captioned with page and question.";
-  o.answers = answers;
-  if (blank.length) o.blank = [...new Set(blank)];
-  const wk = workingsAreas(); if (wk.length) o.handwritten = wk.map(a => ({ q: a.q, page: a.p + 1 }));
-  const idx = labelIndex(), fl = [];
-  doc.pages.forEach((P, p) => P.regions.forEach(r => { if (doc.flags && doc.flags[r.id]) fl.push(labelAt(idx, p, r.y0 + 6) + (r.label && r.label !== "label" ? ` [${r.label.replace(/[.\s]+$/, "")}]` : "")); }));
-  if (fl.length) o.flagged = fl;
-  return o;
-}
-function workingsAreas() {
-  const idx = labelIndex(); const areas = [];
-  doc.pages.forEach((P, p) => {
-    const boxes = (doc.strokes[p] || []).filter(s => s.t === "pen" && s.pts.length).map(s => { const pts = dispPts(p, s); const ys = pts.map(q => q[1]); return [Math.min(...ys), Math.max(...ys)]; }).sort((a, b) => a[0] - b[0]);
-    const bands = [];
-    for (const b of boxes) { const l = bands[bands.length - 1]; if (l && b[0] - l[1] < 70) l[1] = Math.max(l[1], b[1]); else bands.push([b[0], b[1]]); }
-    const H = P.h + totalGap(p);
-    for (const b of bands) { const y0 = Math.max(0, b[0] - 100), y1 = Math.min(H, b[1] + 18); areas.push({ p, y0, y1, q: labelAt(idx, p, src(p, b[0])) }); }
-  });
-  return areas;
-}
-async function workingsPDF() {
-  const areas = workingsAreas(); if (!areas.length) return null;
-  const { PDFDocument, StandardFonts, rgb } = PDFLib;
-  const out = await PDFDocument.create(); const font = await out.embedFont(StandardFonts.Helvetica);
-  const scale = 1.6; let lastP = -1, ras = null;
-  for (let i = 0; i < areas.length; i++) {
-    const a = areas[i]; busy(true, `Preparing workings… ${i + 1} of ${areas.length}`, i / areas.length);
-    if (a.p !== lastP) { if (ras) ras.width = 0; ras = await pageRaster(a.p, scale, true); lastP = a.p; }
-    const P = doc.pages[a.p], hPt = a.y1 - a.y0;
-    const c = document.createElement("canvas"); c.width = Math.round(P.w * scale); c.height = Math.round(hPt * scale);
-    const cx = c.getContext("2d"); cx.filter = "grayscale(1)"; cx.drawImage(ras, 0, a.y0 * scale, c.width, c.height, 0, 0, c.width, c.height);
-    const img = await out.embedJpg(await (await fetch(c.toDataURL("image/jpeg", 0.72))).arrayBuffer()); c.width = 0;
-    const page = out.addPage([P.w, hPt + 18]);
-    page.drawImage(img, { x: 0, y: 0, width: P.w, height: hPt });
-    page.drawText(`Page ${a.p + 1} · Question ${a.q}`, { x: 10, y: hPt + 5, size: 9, font, color: rgb(0.2, 0.2, 0.2) });
-  }
-  if (ras) ras.width = 0;
-  out.setTitle(doc.name + " – handwritten workings"); out.setCreator("TypePDF");
-  return out.save();
-}
-$("#aiBtn").onclick = async () => { await ensureOcr(); $("#aiDlg").showModal(); updateAiInfo(); };
-$("#aiQ").onchange = updateAiInfo;
-function updateAiInfo() {
-  const o = aiJSON($("#aiQ").checked); const txt = JSON.stringify(o);
-  const wk = workingsAreas();
-  $("#aiInfo").textContent = `${o.answers.length} typed answers, ${(o.blank || []).length} blank. ${wk.length ? wk.length + " area" + (wk.length > 1 ? "s" : "") + " of handwriting go in the workings PDF." : "No handwriting, so no workings PDF is needed."} About ${Math.round(txt.length / 4).toLocaleString()} tokens of text.`;
-  $("#aiWork").disabled = !wk.length;
-}
-$("#aiCopy").onclick = async () => { const t = JSON.stringify(aiJSON($("#aiQ").checked), null, 1); try { await navigator.clipboard.writeText(t); toast("Answers copied as JSON."); } catch (e) { fallbackCopy(t); } };
-$("#aiJson").onclick = () => download(new Blob([JSON.stringify(aiJSON($("#aiQ").checked), null, 1)], { type: "application/json" }), doc.name + " - answers.json");
-$("#aiWork").onclick = async () => { try { const b = await workingsPDF(); busy(false); if (b) download(new Blob([b], { type: "application/pdf" }), doc.name + " - workings.pdf"); } catch (e) { busy(false); toast("Couldn't build the workings PDF: " + e.message); } };
-$("#aiBoth").onclick = async () => { $("#aiJson").click(); if (!$("#aiWork").disabled) setTimeout(() => $("#aiWork").click(), 600); };
-$("#aiClose").onclick = () => $("#aiDlg").close();
+// the export for AI (answers JSON + workings PDF) is in aiexport.js
 function fallbackCopy(t) { const ta = document.createElement("textarea"); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); toast("Copied."); }
 
 // ---------------- backups ----------------
