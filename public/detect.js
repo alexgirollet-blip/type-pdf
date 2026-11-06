@@ -300,15 +300,23 @@ const Detect = (() => {
     const used = new Set(), out = [];
     const order = (a, b) => a.it.base - b.it.base || a.it.x - b.it.x;
     cand.sort(order);
-    const grow = a => {
+    // col: Save My Exams' table of options, a bare letter (no dot) at the start of each row, all in one column
+    const bare = c => c.it.str.trim() === c.L;
+    const grow = (a, col) => {
       const run = [a];
       for (let k = "ABCDEF".indexOf(a.L) + 1; k < 6; k++) {
         const prev = run[run.length - 1], want = "ABCDEF"[k];
         let best = null, bd = Infinity;
         for (const c of cand) {
           if (c.L !== want || used.has(c) || run.includes(c)) continue;
-          if (sme && !c.tight) continue;
           const dy = c.it.base - prev.it.base, dx = c.it.x - prev.it.x;
+          if (col) {
+            if (!bare(c) || dy <= 6 || dy > 160 || Math.abs(c.it.x - a.it.x) > 4) continue;
+            if (run.length > 1 && Math.abs(dy - (run[1].it.base - run[0].it.base)) > 0.25 * dy + 3) continue;   // rows evenly spaced
+            if (dy < bd) { bd = dy; best = c; }
+            continue;
+          }
+          if (sme && !c.tight) continue;
           const same = Math.abs(dy) <= 2.5 && dx > 4 && dx < 320;                                    // along a row
           const below = dy > 2.5 && dy < (sme ? 220 : 120) && run.some(o => Math.abs(c.it.x - o.it.x) < 14);         // under one of the others
           if (!same && !below) continue;
@@ -337,6 +345,12 @@ const Detect = (() => {
       if (strict && (run.length < 4 || !run.every(c => c.tight))) continue;
       if (!strict && run.length < (sme ? 2 : 3)) continue;
       take(run);
+    }
+    // Save My Exams: options as the rows of a table (A, B, C, D down the first column)
+    if (sme) for (const a of cand) {
+      if (used.has(a) || !bare(a)) continue;
+      const run = grow(a, true);
+      if (run.length >= 3 || (run.length >= 2 && a.L !== "A")) take(run);
     }
     // Save My Exams: the end of a question whose options started on the page before (B., C., D. at the top),
     // and an "A." alone at the bottom of a page whose other options are over the page
@@ -503,6 +517,11 @@ const Detect = (() => {
         for (const c of run) {
           if (regions.some(r => r.kind === "choice" && r.x0 < c.x1 && r.x1 > c.x0 && r.y0 < c.y1 && r.y1 > c.y0)) continue;
           regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: "ring", grp, L: c.L, opt: c.opt });
+        }
+        // a table of options: its empty corner cell (above the letters) isn't an answer space
+        if (opts.sme && run.length >= 2) {
+          const cx = (run[0].x0 + run[0].x1) / 2, step = (run[run.length - 1].y0 - run[0].y0) / (run.length - 1);
+          for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if ((r.kind === "cell" || r.kind === "box") && !regions[i].grp && r.x0 - 2 <= cx && r.x1 + 2 >= cx && r.y1 <= run[0].y0 + 2 && r.y1 > run[0].y0 - step * 1.6) regions.splice(i, 1); }
         }
       }
     }
