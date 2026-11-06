@@ -44,7 +44,7 @@ const Geo = (() => {
     const cx = clamp(((hr.left + hr.right) / 2 - r.left) / zoom, 3 * CM, doc.pages[p].w - 3 * CM), cy = clamp(((hr.top + hr.bottom) / 2 - r.top) / zoom + 3.4 * CM, 8 * CM, doc.pages[p].h - CM);   // the whole thing on screen
     P = { on: true, p, cx, cy, ang: 0, R: 7.5 * CM, needle: 60 };
     save(); place(); $("#protBtn").classList.add("on");
-    toast("Protractor: drag to move, twist with two fingers or the ⟳ handle to turn, drag ↔ to make it longer. Draw along any edge for a straight line or an arc.", 6000);
+    toast("Protractor: drag to move. Two fingers move, turn and pinch it bigger or smaller (or use ⟳ and ↔). Draw along any edge for a straight line or an arc.", 6000);
   }
   // local coordinates: origin at the centre, x along the base, y down (the semicircle is at y < 0)
   const toLocal = q => { const dx = q[0] - P.cx, dy = q[1] - P.cy, c = Math.cos(-P.ang), s = Math.sin(-P.ang); return [dx * c - dy * s, dx * s + dy * c]; };
@@ -52,6 +52,8 @@ const Geo = (() => {
   function svgFor() {
     const R = P.R, n = Math.floor(2 * R / CM * 10 + 1e-6), parts = [];
     // body: semicircle and ruler strip
+    const m = 18;   // a finger landing just off the edge still holds it
+    parts.push(`<path class="phalo" d="M${-R - m} 0 A${R + m} ${R + m} 0 0 1 ${R + m} 0 L${R + m} ${STRIP + m} L${-R - m} ${STRIP + m} Z"/>`);
     parts.push(`<path class="pbody" d="M${-R} 0 A${R} ${R} 0 0 1 ${R} 0 L${R} ${STRIP} L${-R} ${STRIP} Z"/>`);
     parts.push(`<line class="pline" x1="${-R}" y1="0" x2="${R}" y2="0"/>`);
     // degree scale along the arc: 1° ticks, longer every 5° and 10°, two rows of numbers (0 at either end)
@@ -110,7 +112,11 @@ const Geo = (() => {
       if (!hk && drawing(e)) { fwd = e.pointerId; views[P.p].ink.dispatchEvent(clone("pointerdown", e)); return; }
       if (e.pointerType === "touch") touches.set(e.pointerId, [e.clientX, e.clientY]);
       const q = pagePt(e);
-      if (touches.size === 2) { const [a, b] = [...touches.values()]; op = { kind: "twist", a0: Math.atan2(b[1] - a[1], b[0] - a[0]), ang0: P.ang, mid0: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], c0: [P.cx, P.cy] }; return; }
+      if (touches.size === 2) {
+        const [a, b] = [...touches.values()].map(t => pagePt({ clientX: t[0], clientY: t[1] }));
+        op = { kind: "twist", a0: Math.atan2(b[1] - a[1], b[0] - a[0]), d0: Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, ang0: P.ang, R0: P.R, mid0: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], c0: [P.cx, P.cy] };
+        return;
+      }
       op = { kind: hk || "move", q0: q, c0: [P.cx, P.cy], ang0: P.ang, R0: P.R, id: e.pointerId };
     });
     svg.addEventListener("pointermove", e => {
@@ -119,8 +125,17 @@ const Geo = (() => {
       if (!op) return;
       const q = pagePt(e);
       if (op.kind === "twist" && touches.size === 2) {
-        const [a, b] = [...touches.values()], an = Math.atan2(b[1] - a[1], b[0] - a[0]), mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-        P.ang = op.ang0 + an - op.a0; P.cx = op.c0[0] + (mid[0] - op.mid0[0]) / zoom; P.cy = op.c0[1] + (mid[1] - op.mid0[1]) / zoom;
+        const [a, b] = [...touches.values()].map(t => pagePt({ clientX: t[0], clientY: t[1] }));
+        const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+        // turn: snaps to 0°, 15°, 30° … when within 2° of one
+        let ang = op.ang0 + Math.atan2(b[1] - a[1], b[0] - a[0]) - op.a0;
+        const deg = ang * 180 / Math.PI, near = Math.round(deg / 15) * 15; if (Math.abs(deg - near) < 2) ang = near * Math.PI / 180;
+        // pinch: longer or shorter in half centimetres, markings stay true to the paper
+        const R = clamp(Math.round(op.R0 * (Math.hypot(b[0] - a[0], b[1] - a[1]) / op.d0) / (CM / 2)) * (CM / 2), 2 * CM, 25 * CM);
+        // the point between the fingers stays under them: its offset to the centre turns and scales with the fingers
+        const k = R / op.R0, da = ang - op.ang0, ox = op.c0[0] - op.mid0[0], oy = op.c0[1] - op.mid0[1];
+        P.ang = ang; P.R = R;
+        P.cx = mid[0] + k * (ox * Math.cos(da) - oy * Math.sin(da)); P.cy = mid[1] + k * (ox * Math.sin(da) + oy * Math.cos(da));
       } else if (op.id !== e.pointerId) return;
       else if (op.kind === "move") { P.cx = op.c0[0] + q[0] - op.q0[0]; P.cy = op.c0[1] + q[1] - op.q0[1]; }
       else if (op.kind === "turn") { const a0 = Math.atan2(op.q0[1] - P.cy, op.q0[0] - P.cx), a1 = Math.atan2(q[1] - P.cy, q[0] - P.cx); P.ang = op.ang0 + a1 - a0; if (!e.shiftKey) { const deg = P.ang * 180 / Math.PI, near = Math.round(deg / 15) * 15; if (Math.abs(deg - near) < 2) P.ang = near * Math.PI / 180; } }

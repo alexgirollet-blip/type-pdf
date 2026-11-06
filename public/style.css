@@ -374,3 +374,4 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .selbox .seldel.selfit.line{left:0}
 .selbox .seldel.selfit.curve{left:96px}
 .selbox .seldel.selfit{color:#1b4d47;border-color:#2f7d74}
+.protractor .phalo{fill:transparent;stroke:none;pointer-events:all;cursor:grab}
