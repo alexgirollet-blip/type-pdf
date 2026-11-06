@@ -7,8 +7,12 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Finds answer spaces automatically** from the page image and the text layer, so it works on most exam papers and on scans. Thin pale-grey answer lines are found wherever they fall on the pixel grid, graph paper and page frames are ignored, and short gaps in equations (including the mass and atomic numbers in nuclear equations) become answer spaces. Labelled lines ("Name …", "Description …") become separate spaces. Code answers (SQL, pseudocode, CSS) get a monospace font where Tab indents; a **</> Code** switch beside any answer (or just typing code) turns code mode on: no auto-capitals or corrections, Tab/Shift+Tab indent, and Enter keeps the indentation.
 - **Typed text sits on the printed lines.** Long answers shrink a little, then fit two lines per printed line, and only then extend the page with extra writing lines. The page is never split through printed text.
 - **Text, Pen and Smart tools**: Text only types, Pen only draws, Smart does both (tap to type, drag to draw). Laptops start on Text; iPads and devices where an Apple Pencil has been used start on Pen.
+- **Perfect shapes**: draw a line, arrow, circle, ellipse, square, rectangle, triangle or other polygon and hold the pen (or mouse) still for half a second: it becomes the perfect shape (near-level edges are levelled). Keep moving before lifting to resize it evenly (a line's end follows the pen), with its length, angle or size shown in cm beside the pen.
+- **Protractor with a ruler base** (📐): a semicircle marked 0–180° both ways on a ruler marked in cm and mm, true to the paper's size (an A4 paper measures 21 cm), so it measures printed diagrams. Drag to move; two fingers move, turn and pinch it longer or shorter all at once (or use the ⟳ and ↔ handles). Turning snaps to every 15° when close, and its length changes in half centimetres (15 cm → 30 cm and so on), markings staying true to the paper; and drag the red needle to read an angle. The Pencil draws straight through it; a stroke started on its straight edges draws a perfect line (with its length), and on its curved edge an arc.
+- **Compass**: press where the point goes and drag out the radius (whole millimetres, shown as you go); let go to draw the circle.
+- **Line of best fit**: select plotted crosses or dots with Select and press **Best-fit line** (or **Best-fit curve**).
 - **Select and move drawings**: draw a box round any ink (mouse, finger or Pencil) and drag it anywhere, even to another page; Delete removes it and arrow keys nudge it. Undo works, and moves sync live.
-- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, three-finger tap redoes, and four quick one-finger taps swap between the pen and the eraser (after rubbing something out, lifting the Pencil goes back to the pen). Mirroring a laptop screen to an iPad also works.
+- **Pen, highlighter and eraser** in four colours and three sizes, with undo/redo and Shift for straight lines. On an iPad the Pencil writes (lightly pressure-sensitive, with a hover preview) while fingers scroll and pinch to zoom; two-finger tap undoes, three-finger tap redoes, and two to four quick one-finger taps (or three quick taps of the Pencil) swap between the pen and the eraser (after rubbing something out, lifting the Pencil goes back to the pen). Mirroring a laptop screen to an iPad also works.
 - **Multiple choice**: tick boxes, ovals and pills are found automatically (small closed outlines that come in lined-up groups, named by the letter or words beside them). Click or tap to choose, as many as you like; the export ticks boxes and fills ovals in, the AI export lists each question's options and the ones chosen, and a multiple-choice question counts once in progress and Go to. Boxes → Choice adds one that was missed.
 - **Answer colour and style**: typed answers (and choices) in black, blue, dark blue, red, green or purple, and plain, highlighted, bold, highlighted + bold or in a tinted box, set per paper, synced and used in the exported PDF.
 - **Click to add a missed space**: with Text, clicking blank paper away from any answer space looks there again for lines or a box that detection missed, and otherwise adds a space fitted to the blank area. (When you're typing in an answer, the first click just leaves it.)
@@ -18,10 +22,11 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Read the question first**: Tab, and every jump, scrolls so the question's wording stays in view above the answer space instead of hiding it at the top of the screen.
 - **Live sync with an account.** Sign in on two devices and open the same paper; typing and ink appear on the other device as you go. Offline changes are kept and sent when the connection returns.
 - **Picks up where you left off**: page, zoom, tool, colour and the answer you were typing in.
+- **Topic practice** (home page, site owner only): your own Save My Exams topic-question PDFs, kept on your server, as tags by module and topic, with question type (Structured / MCQ / Exam questions) and difficulty (Easy / Medium / Hard: only those sections' pages are kept) tags. **Build practice paper** merges the chosen files into one paper, named like `SMX 4-3 Moments – Structured (Hard)`, adds it to your papers and opens it. Topics you've started or finished show a dot. Links such as `/#topics=4-3,4-5&types=Structured&diff=Medium,Hard` open it with everything chosen (the daily revision pack sends these). Setup is below.
 - **Past paper finder** (home page, signed in): search Physics & Maths Tutor's A-level past papers by typing (e.g. "AQA physics paper 1 2019 mark scheme") or picking a subject, then narrow the list with tags for level (AS or A level), exam board, paper, year, series and type (question paper, mark scheme, examiner report) and sort it. **Add & open** fetches the PDF through your account, names it properly and adds it to your papers. The Worker reads PMT's listing pages only as far as a search needs and caches them for a day (`src/pmt.js`).
 - **Open PDFs any way you like**: choose a file, drag and drop, paste a file with ⌘/Ctrl+V, or paste a link.
 - **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top. The exported file also carries the original paper and your answers, so opening it in TypePDF again brings everything back editable.
-- **Export for AI**: typed answers as compact JSON (labelled by question, optionally with the question wording; on scanned / image-only papers the question numbers are read from the margin with built-in OCR) plus a small greyscale PDF holding only the hand-drawn areas. This is far cheaper for an AI model to mark than the whole paper.
+- **Export for AI**: answers as compact JSON, one entry per question part in paper order, plus a small greyscale PDF holding only the handwriting, one image per part. Each answer is labelled with its own part (AQA's hidden "answer space for question 01.2" labels are used when the paper has them, else the nearest part printed above), gap-fills are labelled one by one (e.g. "mass number of Th"), and multiple-choice questions give their question, every option with its letter, and the letters chosen. Question text is only that part's own wording, without page furniture, and keeps its maths (`^{…}`, `_{…}`, `\frac{…}{…}`). Drawing on a figure goes to the part that asks for it ("draw an arrow on Figure 7"), handwriting outside any space goes to the nearest part number, and a part's pieces (even across a page break) are one image. "Blank" only lists parts with nothing typed, chosen or handwritten. The candidate-details cover page is left out. On scanned / image-only papers the question numbers are read from the margin with built-in OCR.
 - **Fix anything detection missed** with the Boxes tool: add, move, resize, delete or retype any answer space, or re-detect a page.
 - **Flags**: mark any answer space to come back to (to draw it on the iPad, or because it's hard). Flagged spaces show a marker, are listed under ⚑ in the toolbar, and appear in the AI export.
 - **Fonts**: answers start in the font closest to the paper's own (detected from the PDF), and you can pick another per paper: Arial, Times, Calibri or Cambria style, a clear sans, an easy-to-read font, handwriting, or Courier style. The exported PDF uses the same font.
@@ -62,6 +67,38 @@ By default the admin's storage bar counts only what TypePDF stores. To show what
 - Server storage changes are additive only: new tables and new columns are added if missing; nothing is dropped or rewritten.
 - Papers saved in the browser are upgraded in place when opened (older formats are converted, nothing is removed), and the site asks the browser to keep its storage persistent.
 - Answers not yet synced stay marked on the device and are sent when the connection returns.
+
+### Topic practice: your Save My Exams library
+
+The PDFs stay on your own server; TypePDF reads them through a Cloudflare Tunnel that only it can get through. Expected layout (as Save My Exams downloads are organised):
+
+```
+SMX AQA A level Physics/
+  2 Particles and Radiation/
+    2-1 Atomic Structure and Decay Equations - Structured.pdf
+    2-1 Atomic Structure and Decay Equations - MCQ.pdf
+  9 Astrophysics/
+    9-1 Telescopes - Exam Questions.pdf
+```
+
+1. Copy the folder to the server, e.g. `/DATA/SaveMyExams` on ZimaOS.
+2. Serve it read-only with Caddy (ZimaOS: App Store → + → Install a customized app → Docker Compose):
+   ```yaml
+   services:
+     sme-files:
+       image: caddy:2.8
+       restart: unless-stopped
+       volumes:
+         - /DATA/SaveMyExams:/srv:ro
+       command: caddy file-server --root /srv --browse --listen :8085
+       ports:
+         - "8085:8085"
+   ```
+3. Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Public hostname: `sme.<your domain>` → HTTP → `<server-ip>:8085`.
+4. Lock it: Access → Service credentials → Service Tokens → create `TypePDF` (copy the Client ID and Secret). Access → Applications → Self-hosted for `sme.<your domain>`, policy **Service Auth** including that token.
+5. On this Worker: `SME_URL` (text, `https://sme.<your domain>`), `SME_ACCESS_ID` and `SME_ACCESS_SECRET` (secrets).
+
+Only admin accounts see Topic practice. The Worker only ever fetches files that appear in the folder listing, and caches the listing for 10 minutes (↻ in the section re-reads it).
 
 ## Deploy on Cloudflare (auto-deploys from GitHub)
 

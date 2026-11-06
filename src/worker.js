@@ -3,6 +3,7 @@
 // Storage changes are additive only (new tables / new columns), so existing accounts and papers
 // carry over untouched when a new version is deployed.
 import { pmtSearch, pmtSubjects, isPmtPdf, PMT_UA } from "./pmt.js";
+import { smeOn, smeIndex, smePdf } from "./sme.js";
 import { DurableObject } from "cloudflare:workers";
 
 const MB = 1024 * 1024;
@@ -307,6 +308,20 @@ async function api(req, env, url, ctx) {
 
   // fetch a PDF from a pasted link (signed-in users only, PDFs only)
   // ---- past paper finder: Physics & Maths Tutor's A-level papers ----
+  // ---- topic practice: Save My Exams PDFs on the owner's own file server ----
+  if (path.startsWith("/api/sme/") && !who.admin) return bad("Topic practice is only for the site's owner (it's their own Save My Exams library).", 403);
+  if (path === "/api/sme/index") {
+    if (!smeOn(env)) return json({ setup: false });
+    try { return json({ setup: true, ...(await smeIndex(env, url.searchParams.get("fresh") === "1")) }); } catch (e) { return bad(String(e.message || e), 502); }
+  }
+  if (path === "/api/sme/pdf") {
+    if (!smeOn(env)) return bad("Topic practice isn't set up on this site.", 503);
+    try {
+      const f = await smePdf(env, url.searchParams.get("path") || "");
+      if (!f) return bad("That file isn't in the topic library.", 404);
+      return new Response(f.body, { headers: { "content-type": "application/pdf", "x-file-name": encodeURIComponent(f.name), "cache-control": "private, max-age=3600" } });
+    } catch (e) { return bad(String(e.message || e), 502); }
+  }
   if (path === "/api/pmt/subjects") {
     try { return json({ subjects: await pmtSubjects() }); } catch (e) { return bad(String(e.message || e), 502); }
   }

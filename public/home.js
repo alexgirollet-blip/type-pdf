@@ -68,6 +68,7 @@ async function loadEntries() {
     await DB.putMeta({ id: "__lib", folders }).catch(() => {});
   } else Home.folders = lib.folders;
   Home.entries = [...byId.values()];
+  if (window.TopicPractice) setTimeout(() => TopicPractice.refresh(), 0);   // started / done dots
   if (Home.folder && !Home.folders.some(f => f.id === Home.folder)) Home.folder = null;
 }
 
