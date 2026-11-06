@@ -86,6 +86,8 @@
         <li><b>Go to…:</b> jump straight to any question (type <b>3</b>, <b>4b</b> or <b>4b(ii)</b>) or page (<b>p5</b>), see at a glance which questions are answered, started or flagged, and hop to the <b>next empty answer</b>. Tapping the page number in the corner opens it too. Tab and jumps leave the question's wording in view above the box.</li>
         <li><b>Flags:</b> click into an answer and press ⚑ Flag to mark it to come back to, e.g. to draw it on the iPad or because it's hard. The ⚑ button in the bar lists them.</li>
         <li><b>Folders:</b> make folders (and folders inside folders), drag papers onto them, star papers to keep them at the top, and make a blank new attempt of any paper. Deleted papers stay in the Bin for 30 days.</li>
+        <li><b>Perfect shapes:</b> draw a line, arrow, circle, rectangle, triangle… and hold still for half a second: it snaps to the perfect shape. Keep moving before you lift to resize it (sizes are shown in cm).</li>
+        <li><b>Protractor and ruler (📐):</b> true to the paper's size, so it measures printed diagrams. Drag to move, twist with two fingers or ⟳ to turn, drag ↔ to make it longer, drag the red needle to read angles. Draw along an edge for a perfect line or arc. <b>Compass:</b> press the centre, drag out the radius. <b>Best fit:</b> select plotted points, then Best-fit line or curve.</li>
         <li><b>Move drawings:</b> with <b>Select</b>, drag a box round some drawing (mouse, finger or Pencil), then drag inside the dashed box to move it, even onto another page, or drag a corner to resize it (it keeps its shape and line thickness scales too). Delete removes it; arrow keys nudge it. With Select, scroll with two fingers.</li>
         <li><b>Code:</b> press <b>&lt;/&gt; Code</b> beside an answer (or just start typing code and it switches itself) for monospace text with no capitals or corrections. Tab and Shift+Tab indent (several lines at once too), and Enter keeps your indentation.</li>
         <li><b>Resize on the go:</b> while typing in a box, drag the dots on its corners to make it bigger or smaller.</li>
@@ -113,9 +115,11 @@
       <button class="tool" data-tool="smart" title="Smart: tap an answer space to type, drag to draw">Smart</button>
       <button class="tool" data-tool="hl" title="Highlighter">Highlight</button>
       <button class="tool" data-tool="eraser" title="Eraser">Eraser</button>
+      <button class="tool" data-tool="compass" title="Compass: press where the point goes, drag out the radius (shown in mm), let go to draw the circle">Compass</button>
       <button class="tool" data-tool="select" title="Select: draw a box round drawings, then drag them anywhere (even to another page)">Select</button>
       <button class="tool" data-tool="boxes" title="Edit answer spaces">Boxes</button>
     </div>
+    <button id="protBtn" title="Protractor with a ruler base, true to the paper's size: drag to move, twist to turn, ↔ to make it longer; draw along an edge">📐</button>
     <div class="grp" id="colours" role="group" aria-label="Ink colour">
       <button class="sw on" data-c="#111418" style="--c:#111418" title="Black" aria-label="Black"></button>
       <button class="sw" data-c="#1f4fbf" style="--c:#1f4fbf" title="Blue" aria-label="Blue"></button>
@@ -270,7 +274,9 @@
 <script src="fonts.js"></script>
 <script src="detect.js"></script>
 <script src="questions.js"></script>
+<script src="shapes.js"></script>
 <script src="app.js"></script>
+<script src="geom.js"></script>
 <script src="aiexport.js"></script>
 <script src="sync.js"></script>
 <script src="home.js"></script>

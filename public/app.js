@@ -660,6 +660,7 @@ function buildViews() {
   });
   host.onscroll = pageIndicator;
   pageIndicator();
+  Geo.restore();
 }
 
 function makeField(p, r) {
@@ -969,6 +970,7 @@ function layoutPage(p) {
   if (flagFor && flagFor.p === p) placeFlagFloat();
   if (handFor && handFor.p === p) placeHandles();
   if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
+  Geo.place();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
@@ -1047,6 +1049,11 @@ function tracePath(ctx, pts, k, ox = 0, oy = 0) {
   if (pts.length > 1) ctx.lineTo((pts[pts.length - 1][0] - ox) * k, (pts[pts.length - 1][1] - oy) * k);
 }
 function drawStroke(ctx, s, pts, k, ox = 0, oy = 0) {
+  if (s.sh) {                                     // a snapped shape or a ruled line: straight segments, sharp corners
+    ctx.save(); ctx.globalAlpha = s.t === "hl" ? 0.35 : 1; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * k; ctx.lineCap = s.t === "hl" ? "butt" : "round"; ctx.lineJoin = s.t === "hl" ? "miter" : "round";
+    ctx.beginPath(); pts.forEach((q, i) => { const x = (q[0] - ox) * k, y = (q[1] - oy) * k; i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); if (pts.length === 1) ctx.lineTo((pts[0][0] - ox) * k + 0.01, (pts[0][1] - oy) * k);
+    ctx.stroke(); ctx.restore(); return;
+  }
   ctx.save();
   ctx.globalAlpha = s.t === "hl" ? 0.35 : 1; ctx.strokeStyle = s.c; ctx.lineWidth = s.w * k; ctx.lineCap = s.t === "hl" ? "butt" : "round"; ctx.lineJoin = "round";
   const runs = pressureRuns(s, pts);
@@ -1168,6 +1175,7 @@ function bindInk(p, v) {
     if (e.pointerType === "mouse" && e.button !== 0) return;
     if (e.pointerType === "pen") sawPen();
     if (tool === "select") { selDown(p, e); return; }
+    if (tool === "compass" && Geo.compassDown(p, e)) return;
     const p0 = pos(e);
     // Text and Smart: a click inside the answer you're typing in places the cursor, drag selects text.
     // Text also goes straight into any answer space you click. Pen, Highlight and Eraser never touch text.
@@ -1214,12 +1222,41 @@ function bindInk(p, v) {
     let evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e]; if (!evs.length) evs = [e];
     if (st.erasing) { for (const ev of evs) eraseAt(p, pos(ev), st.erased); return; }
     if (!st.stroke) return;
+    if (st.edge) { st.stroke._live = Geo.edgePoints(st.edge, st.start, q); Geo.tag(p, q, Geo.edgeLabel(st.edge, st.stroke._live)); drawInk(p); return; }   // along the protractor
+    if (st.shape) { adjustShape(st, q); drawInk(p); return; }                                   // a snapped shape: resized until the pen lifts
     const live = st.stroke._live;
     const pr = st.stroke._pr;
     if (e.shiftKey) { st.stroke._live = [live[0], q]; if (pr) st.stroke._pr = [pr[0], e.pressure]; }
     else for (const ev of evs) { live.push(pos(ev)); if (pr) pr.push(ev.pressure); }
+    armHold(p, st, q);
     drawInk(p);
   });
+  // ---- hold to snap: draw a shape, keep the pen still for half a second, and it becomes the perfect shape ----
+  function armHold(p, s, q) {
+    if (s.holdAt && Math.hypot(q[0] - s.holdAt[0], q[1] - s.holdAt[1]) * zoom < 3) return;   // still: let the timer run
+    s.holdAt = q; clearTimeout(s.holdT);
+    s.holdT = setTimeout(() => { if (st === s && s.stroke && !s.shape) snapShape(p, s); }, 550);
+  }
+  function snapShape(p, s) {
+    const shape = Shapes.recognise(s.stroke._live); if (!shape) return;
+    s.shape = shape; s.shape0 = shape; s.shapeRef = s.holdAt;
+    s.shapeO = shape.kind === "line" || shape.kind === "arrow" ? shape.a : Shapes.centre(shape);
+    s.stroke.sh = 1; delete s.stroke._pr;
+    s.stroke._live = Shapes.points(shape, s.stroke.w);
+    if (navigator.vibrate) try { navigator.vibrate(8); } catch (e) {}
+    Geo.tag(p, s.holdAt, Geo.shapeLabel(shape)); drawInk(p);
+  }
+  function adjustShape(s, q) {
+    let shape;
+    if (s.shape0.kind === "line" || s.shape0.kind === "arrow") shape = { ...s.shape0, b: q };     // the end follows the pen
+    else {                                                                                       // resized evenly about its middle
+      const d0 = Math.hypot(s.shapeRef[0] - s.shapeO[0], s.shapeRef[1] - s.shapeO[1]) || 1;
+      const k = clamp(Math.hypot(q[0] - s.shapeO[0], q[1] - s.shapeO[1]) / d0, 0.08, 12);
+      shape = Shapes.scale(s.shape0, s.shapeO, k);
+    }
+    s.shape = shape; s.stroke._live = Shapes.points(shape, s.stroke.w);
+    Geo.tag(p, q, Geo.shapeLabel(shape));
+  }
   const finish = () => {
     const s = st.stroke; s.pts = s._live.map(q => toAnchor(p, q[0], q[1]));
     // keep pressure only if it really varied (a real pen, not a mouse reporting a flat 0.5)
@@ -1227,6 +1264,7 @@ function bindInk(p, v) {
     delete s._pr; delete s._live; return s;
   };
   const end = e => {
+    if (st && e.pointerId === st.id) { clearTimeout(st.holdT); Geo.tag(); }
     const tapNow = st && e.pointerId === st.id && st.type === "pen" && !st.moved && performance.now() - st.t0 < 300 && (tool === "pen" || tool === "hl" || tool === "eraser");
     const s0 = st && st.stroke;
     endStroke(e);
@@ -1260,13 +1298,15 @@ function bindInk(p, v) {
   };
   v.ink.addEventListener("pointerup", end);
   v.ink.addEventListener("pointerleave", e => { if (e.pointerType === "pen") hideHover(); });
-  v.ink.addEventListener("pointercancel", () => { if (st && st.stroke) { const arr = doc.strokes[p]; const i = arr.indexOf(st.stroke); if (i >= 0) { if (st.stroke._live.length < 3) arr.splice(i, 1); else { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); } } drawInk(p); } st = null; });
+  v.ink.addEventListener("pointercancel", () => { if (st) { clearTimeout(st.holdT); Geo.tag(); } if (st && st.stroke) { const arr = doc.strokes[p]; const i = arr.indexOf(st.stroke); if (i >= 0) { if (st.stroke._live.length < 3 && !st.stroke.sh) arr.splice(i, 1); else { finish(); pushUndo({ t: "add", p, s: st.stroke }); emit(`s:${p}:${st.stroke.id}`); scheduleSave(); } } drawInk(p); } st = null; });
   function beginDraw(s, p0, e) {
     if (document.activeElement && document.activeElement.classList.contains("ans")) document.activeElement.blur();
     if (tool === "eraser") { s.erasing = true; eraseAt(p, p0, s.erased); return; }
     doc.strokes[p] = doc.strokes[p] || [];
     s.stroke = tool === "hl" ? { id: rid8(), t: "hl", c: "#f2d21b", w: 9, pts: [], _live: [p0] } : { id: rid8(), t: "pen", c: colour, w: width, pts: [], _live: [p0] };
-    if (tool !== "hl" && s.type === "pen" && e) s.stroke._pr = [e.pressure];
+    s.edge = Geo.edgeAt(p, p0);                                    // starting on the protractor's edge: draw along it
+    if (s.edge) { s.stroke.sh = 1; s.stroke._live = Geo.edgePoints(s.edge, p0, p0); }
+    else if (tool !== "hl" && s.type === "pen" && e) s.stroke._pr = [e.pressure];
     doc.strokes[p].push(s.stroke);
   }
 }
@@ -1413,6 +1453,12 @@ function placeInkSel() {
     const del = document.createElement("button"); del.type = "button"; del.className = "seldel"; del.textContent = "Delete"; del.title = "Delete the selected drawing (Delete key)";
     del.addEventListener("pointerdown", e => e.stopPropagation()); del.onclick = e => { e.stopPropagation(); deleteInkSel(); };
     el.appendChild(del);
+    // plotted points selected: draw the line (or curve) of best fit through them
+    for (const [k, label] of [["line", "Best-fit line"], ["curve", "Best-fit curve"]]) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "seldel selfit " + k; b.textContent = label; b.title = "Draw the " + label.toLowerCase() + " through the selected crosses or dots";
+      b.addEventListener("pointerdown", e => e.stopPropagation()); b.onclick = e => { e.stopPropagation(); Geo.bestFit(k); };
+      el.appendChild(b);
+    }
     for (const c of ["nw", "ne", "sw", "se"]) {
       const h = document.createElement("div"); h.className = "selh " + c; h.dataset.c = c; h.title = "Drag to resize the drawing";
       h.addEventListener("pointerdown", e => selScaleDown(e, c)); el.appendChild(h);
@@ -1611,7 +1657,7 @@ function setTool(t) {
   if (t === "text") hideHover();
   saveView();
 }
-function toolClass(v) { v.el.classList.toggle("tool-eraser", tool === "eraser"); v.el.classList.toggle("tool-text", tool === "text"); v.el.classList.toggle("tool-select", tool === "select"); }
+function toolClass(v) { v.el.classList.toggle("tool-compass", tool === "compass"); v.el.classList.toggle("tool-eraser", tool === "eraser"); v.el.classList.toggle("tool-text", tool === "text"); v.el.classList.toggle("tool-select", tool === "select"); }
 $$(".tool").forEach(b => b.onclick = () => { toolAuto = false; setTool(b.dataset.tool); });
 $$(".sw").forEach(b => b.onclick = () => { colour = b.dataset.c; $$(".sw").forEach(x => x.classList.toggle("on", x === b)); if (tool !== "pen" && tool !== "smart") { toolAuto = false; setTool("pen"); } });
 // ---- which tool to start on: Pen on an iPad or anywhere an Apple Pencil has been used, Text on a laptop ----

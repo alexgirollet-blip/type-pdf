@@ -349,3 +349,28 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .pfsrc{font-size:12px;color:var(--muted);text-decoration:none;white-space:nowrap}
 .pfopen{padding:5px 10px;font-size:13px;white-space:nowrap;border-radius:7px;border:1px solid var(--accent);background:var(--accent);color:#fff}
 @media (max-width:560px){.pflist li{flex-wrap:wrap}.pfinfo{flex-basis:100%}}
+/* drawing aids: the label beside the pen, the protractor with its ruler base */
+.page .geotag{position:absolute;z-index:9;pointer-events:none;background:rgba(20,26,24,.88);color:#fff;font:600 12px var(--ui);padding:3px 8px;border-radius:6px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.page .geotag[hidden]{display:none}
+.page svg.protractor{position:absolute;z-index:7;overflow:visible;touch-action:none;pointer-events:none}
+.protractor .pbody{fill:rgba(120,190,255,.16);stroke:#2a6fb0;stroke-width:.8;pointer-events:all;cursor:grab}
+.protractor .pline{stroke:#2a6fb0;stroke-width:.6}
+.protractor .ptick{stroke:#1d4f80;stroke-width:.45;pointer-events:none}
+.protractor text{font:600 7px var(--ui);fill:#1d4f80;text-anchor:middle;pointer-events:none;dominant-baseline:middle}
+.protractor .pnum.in{font-size:5.5px;fill:#5b84ad}
+.protractor .pcm{font-size:6.5px}
+.protractor .pread{font-size:8px;fill:#0e3a63}
+.protractor .pread.small{font-size:6px;fill:#456d93}
+.protractor .pcentre{stroke:#c0392b;stroke-width:.8;pointer-events:none}
+.protractor .pneedle{stroke:#c0392b;stroke-width:.6;stroke-dasharray:3 2;pointer-events:none}
+.protractor .ph{pointer-events:all;cursor:pointer}
+.protractor .ph circle,.protractor circle.ph{fill:#fff;stroke:#2a6fb0;stroke-width:1.2}
+.protractor .ph path{stroke:#2a6fb0;stroke-width:1.2}
+.protractor .ph text{font-size:12px;fill:#2a6fb0}
+.protractor circle.pneedleh{fill:#c0392b;stroke:#fff}
+#protBtn.on{background:var(--accent-2);border-color:var(--accent-2);color:#fff}
+.page.tool-compass canvas.ink{cursor:crosshair}
+.selbox .seldel.selfit{right:auto;top:-34px}
+.selbox .seldel.selfit.line{left:0}
+.selbox .seldel.selfit.curve{left:96px}
+.selbox .seldel.selfit{color:#1b4d47;border-color:#2f7d74}
