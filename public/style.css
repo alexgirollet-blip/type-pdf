@@ -274,6 +274,7 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .jumplist .note{margin:0;font-size:13px;color:#c5d0cc}
 .jumplist>small{color:#aab6b1;font-size:12px;margin-top:4px}
 .jrow{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.jumppop .jsec{display:block;margin:8px 0 2px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;font-size:11px;opacity:.75}
 .jumppop .jq{display:grid;justify-items:start;gap:0;min-width:74px;text-align:left;padding:3px 8px;border-left:4px solid #59625f}
 .jumppop .jq small{font-size:11px;color:#aab6b1}
 .jumppop .jc{min-height:28px;min-width:34px;padding:3px 7px;font-size:13px;border-bottom:3px solid #59625f}
@@ -308,6 +309,9 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 /* multiple choice: a button over each printed box or oval; chosen ones get a tick or are filled in */
 .page .choice{position:absolute;z-index:4;margin:0;padding:0;border:0;background:transparent;cursor:pointer!important;border-radius:3px;display:grid;place-items:center;line-height:1;color:var(--ink);font-family:system-ui,sans-serif}
 .page .choice.oval:not(.inbox){border-radius:50%}
+.page .choice.ring{border-radius:50%}
+.page .choice.ring.on{box-shadow:inset 0 0 0 2.4px var(--ink),0 0 0 3px rgba(255,255,255,.55);background:transparent}
+.page .choice.ring.on:hover{box-shadow:inset 0 0 0 2.8px var(--ink)}
 .page .choice:hover{background:rgba(47,125,116,.12);box-shadow:0 0 0 1.5px rgba(47,125,116,.6)}
 .page .choice:focus-visible{outline:2px solid var(--accent-2);outline-offset:1px}
 .page .choice.box.on::after{content:"✓";font-weight:700;transform:translateY(-4%)}
@@ -387,6 +391,10 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .tpst{width:8px;height:8px;border-radius:50%;flex:none}
 .tpst.started{background:#e0b43a}.tpst.done{background:#3fb37a}
 .tphint{font-size:11.5px;color:var(--muted)}
+.tpguide{margin:2px 0 8px;padding-left:20px;font-size:13px;line-height:1.45;color:var(--muted);display:grid;gap:3px}
+.tpguide b{color:var(--fg)}
+.tpguide .tpst{display:inline-block;vertical-align:middle}
+.tpest{font-size:12.5px;color:var(--fg);font-weight:600}
 .tpbuild{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 0 12px;border-top:1px solid var(--line)}
 .tpbuild .grow{flex:1}
 .tpcount{font-size:12.5px;color:var(--muted)}

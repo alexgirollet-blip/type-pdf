@@ -178,6 +178,7 @@ async function openDoc(d, fresh = false) {
   pdf = await pdfjsLib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)), isEvalSupported: false }).promise;
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
   if (window.Sync && (Sync.user || doc.shared)) { busy(true, doc.shared ? "Joining…" : "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
+  await smxInfo().catch(e => console.warn("smx", e));
   const need = [];
   for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions || (doc.pages[i].dv !== DV && untouched(i))) need.push(i);
   for (let k = 0; k < need.length; k++) {
@@ -259,7 +260,48 @@ $("#fontSel").addEventListener("change", e => {
 });
 
 // version of the answer-space finder: pages found by an older one are found again when nothing is on them yet
-const DV = 2;
+const DV = 3;
+// ---- Save My Exams papers: what each page is. A paper built by Topic practice says so in its metadata
+// ({smx, pages: [{role, code, topic, type, sec}]}); a Save My Exams PDF opened on its own is read from its text:
+// the cover ("Multiple Choice Questions" / "Structured Questions" / "Exam Questions") and the section headings.
+// MCQ pages have no answer spaces, only lettered options; question numbers restart in every section ----
+// each paper put into a topic practice paper numbers its questions afresh: seg tells them apart, pre goes in front
+// of their labels when it's needed to (several topics: "4-2 M3(b)"; MCQ and structured together: "MCQ M2")
+function smxPre(i) {
+  const role = smxPage(i); if (!role || role.role !== "q") return { pre: "", seg: role ? "x" + i : "" };
+  const all = doc.smx.pages.filter(x => x.role === "q"), codes = new Set(all.map(x => x.code)), types = new Set(all.map(x => x.type));
+  const pre = [codes.size > 1 ? role.code : "", types.size > 1 && /mcq/i.test(role.type || "") ? "MCQ" : ""].filter(Boolean).join(" ");
+  return { pre, seg: (role.code || "") + "|" + (role.type || "") };
+}
+function smxPage(i) { return doc && doc.smx && doc.smx.pages && doc.smx.pages[i] || null; }
+async function smxInfo() {
+  if (doc.smx && doc.smx.v === 1) return;                                // read already (pages: null when it isn't one)
+  let pages = null, est = null;
+  try {
+    const m = await pdf.getMetadata(), sub = m && m.info && m.info.Subject;
+    if (sub && /^\s*\{/.test(sub)) { const j = JSON.parse(sub); if (j && j.smx && Array.isArray(j.pages) && j.pages.length === pdf.numPages) { pages = j.pages; est = j.est || null; } }
+  } catch (e) {}
+  if (!pages) {
+    const txt = []; for (let i = 0; i < pdf.numPages; i++) { try { txt.push((await (await pdf.getPage(i + 1)).getTextContent()).items.map(t => t.str).join(" ").replace(/\s+/g, " ")); } catch (e) { txt.push(""); } }
+    if (txt.some(t => /save\s*my\s*exams/i.test(t))) {
+      pages = []; let type = "", sec = null;
+      txt.forEach(t => {
+        const cover = /scan here to return|total marks/i.test(t) && /(multiple choice|structured|exam) questions/i.test(t) && t.length < 1600;
+        if (cover) {
+          type = /multiple choice/i.test(t) ? "MCQ" : /structured/i.test(t) ? "Structured" : "Exam questions"; sec = null; pages.push({ role: "cover", type });
+          const tm = t.match(/total marks\s*\/?\s*(\d+)/i); if (tm && !est) est = { marks: +tm[1], mins: Math.max(5, Math.round(+tm[1] * 1.2 / 5) * 5) };
+          return;
+        }
+        const h = t.match(/\b(Very Hard|Easy|Medium|Hard)\s+Questions?\b/i);
+        if (h) sec = h[1][0].toUpperCase() + h[1].slice(1).toLowerCase();
+        pages.push({ role: "q", type, sec });
+      });
+    }
+  }
+  doc.smx = { v: 1, pages, est };
+  // the suggested time goes on the timer, ready to start (once: a timer you reset stays reset)
+  if (pages && est && est.mins && !doc.timer && !doc.smx.timed) { doc.timer = { total: est.mins * 60, up: false, acc: 0, run: false, since: 0 }; doc.smx.timed = true; }
+}
 function untouched(i) {
   const P = doc.pages[i]; if (!P || !P.regions) return true;
   if ((doc.strokes[i] || []).length) return false;
@@ -273,7 +315,8 @@ async function detectPage(i, prev) {
   const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
   await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
   let tc = null; try { tc = await page.getTextContent(); } catch (e) {}
-  const res = Detect.page(c, vp, tc);
+  const role = smxPage(i);
+  const res = Detect.page(c, vp, tc, { mcq: !!role && /mcq/i.test(role.type || ""), none: !!role && (role.role === "cover" || role.role === "contents") });
   // a scanned / image-only page has no text to read question numbers from: read the left margin instead
   if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
@@ -553,7 +596,7 @@ async function findChoices() {
     P.cv = CV; if (canEdit()) emit("page:" + p);
   }
 }
-const QV = 3;   // version of the question finder: pages found by an older one are looked at again
+const QV = 4;   // version of the question finder: pages found by an older one are looked at again
 const needsQuestions = P => !!P && (!Array.isArray(P.qs) || P.qv !== QV);
 // each text item with whether its font is bold or monospace (question numbers are nearly always bold;
 // line numbers in code listings are monospace)
@@ -583,7 +626,9 @@ async function findQuestions() {
     const P = doc.pages[i]; if (!P) { pages.push(null); continue; }
     let items = P.items || [];
     if (P.hasText && pdf) { try { items = await textWithFonts(i); } catch (e) { console.warn(e); } }
-    pages.push({ w: P.w, h: P.h, items });
+    const role = smxPage(i);
+    // a cover or contents page has no questions; a paper of several topics numbers each topic's questions afresh
+    pages.push({ w: P.w, h: P.h, items: role && (role.role === "cover" || role.role === "contents") ? [] : items, ...smxPre(i) });
   }
   const found = Questions.detect(pages);
   doc.pages.forEach((P, p) => { if (needsQuestions(P)) { P.qs = found[p] || []; P.qv = QV; if (canEdit()) emit("page:" + p); } });
@@ -667,7 +712,7 @@ function makeField(p, r) {
   const v = views[p];
   if (r.kind === "choice") {
     const b = document.createElement("button"); b.type = "button";
-    b.className = "choice " + (r.shape === "oval" ? "oval" : "box") + (Array.isArray(r.mark) ? " inbox" : ""); b.dataset.rid = r.id;
+    b.className = "choice " + (r.shape === "oval" ? "oval" : r.shape === "ring" ? "ring" : "box") + (Array.isArray(r.mark) ? " inbox" : ""); b.dataset.rid = r.id;
     b.title = r.opt ? "Choose: " + r.opt : "Choose this answer"; b.setAttribute("aria-label", b.title);
     b.addEventListener("pointerdown", e => { if (e.pointerType === "pen") sawPen(); e.stopPropagation(); });
     b.addEventListener("click", e => { e.preventDefault(); toggleChoice(p, r); });
@@ -744,9 +789,14 @@ function looksLikeCode(v) {
 }
 function orderedRegions(withChoices) { const out = []; doc.pages.forEach((P, p) => [...P.regions].filter(r => withChoices || r.kind !== "choice").sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0).forEach(r => out.push([p, r]))); return out; }
 // ---- multiple choice: click a box or oval to choose it (as many as you like); click again to un-choose ----
+// a lettered option (a ring round the letter) is one answer per question: choosing it un-chooses the others
 function toggleChoice(p, r) {
   if (doc.shared && doc.shared.role === "view") return;
-  if (doc.text[r.id]) delete doc.text[r.id]; else doc.text[r.id] = "x";
+  if (doc.text[r.id]) delete doc.text[r.id];
+  else {
+    if (r.grp) for (const o of doc.pages[p].regions) if (o !== r && o.kind === "choice" && o.grp === r.grp && doc.text[o.id]) { delete doc.text[o.id]; paintChoice(o); emit("text:" + o.id); }
+    doc.text[r.id] = "x";
+  }
   paintChoice(r); updateCount(); scheduleSave(); emit("text:" + r.id);
 }
 // the part of a choice that's filled in: the capsule inside AQA's answer box, or the oval itself (slightly inset)
@@ -796,7 +846,7 @@ function tabMove(dir, from) {
     tabAt = n.m;
     target = clamp(pageTop(n.p) + disp(n.p, n.y) * zoom - host.clientHeight * 0.15, 0, host.scrollHeight - host.clientHeight);
     requestAnimationFrame(() => { const mk = $(`.qmark[data-qid="${n.m.id}"]`); if (mk) { mk.classList.remove("flash"); void mk.offsetWidth; mk.classList.add("flash"); } });
-    toast(`Q${n.label}: answer this one on the paper (Pen or Smart).`, 1800);
+    toast(`${qName(n.label)}: answer this one on the paper (Pen or Smart).`, 1800);
   } else {
     tabAt = null;
     const el = n.r._el; el.focus({ preventScroll: true });
@@ -1705,7 +1755,7 @@ function answerUnits() {
   doc.pages.forEach((P, p) => { if (!P) return; for (const r of P.regions) {
     if (r.kind !== "choice") { units.push({ ids: [r.id] }); continue; }
     idx ||= labelIndex();
-    const key = labelAt(idx, p, r.y0 + 2) + "|" + (idx.length ? "" : p);
+    const key = r.grp ? "g" + p + "|" + r.grp : labelAt(idx, p, r.y0 + 2) + "|" + (idx.length ? "" : p);
     if (!groups.has(key)) { const u = { ids: [], choice: true }; groups.set(key, u); units.push(u); }
     groups.get(key).ids.push(r.id);
   } });
@@ -1889,6 +1939,8 @@ document.addEventListener("pointerdown", e => { const pop = $("#timerPop"); if (
 // ---------------- question labels ----------------
 // the question markers (questions.js), in reading order, with their full labels ("4(b)(ii)")
 function labelIndex() { return Questions.index(doc.pages); }
+// "3(b)" → "Q3(b)"; a section label (E1(a), 4-2 M3) reads fine as it is
+const qName = l => /^\d+(\(|\.|$)/.test(l) ? "Q" + l : l;
 function labelAt(idx, p, y) { let lab = "?"; for (const e of idx) { if (e.p < p || (e.p === p && e.y <= y)) lab = e.label; else break; } return lab; }
 // ---------------- export: filled-in PDF ----------------
 let fontCache = null;
@@ -1962,6 +2014,7 @@ async function exportPDF() {
         const raw = doc.text[r.id]; if (!raw || !raw.trim()) continue;
         if (r.kind === "choice") {                                       // a chosen box gets a tick, a chosen oval is filled in
           const R = regionRect(p, r), w = R.x1 - R.x0, h = R.y1 - R.y0;
+          if (r.shape === "ring") { page.drawEllipse({ x: tx((R.x0 + R.x1) / 2), y: ty((R.y0 + R.y1) / 2), xScale: w / 2, yScale: h / 2, borderColor: ansCol, borderWidth: Math.max(1.2, h * 0.09) }); continue; }
           if (r.shape === "oval") { const m = choiceMark(r), mx0 = R.x0 + w * m[0], mx1 = R.x0 + w * m[2], my0 = R.y0 + h * m[1], my1 = R.y0 + h * m[3]; page.drawEllipse({ x: tx((mx0 + mx1) / 2), y: ty((my0 + my1) / 2), xScale: (mx1 - mx0) / 2, yScale: (my1 - my0) / 2, color: ansCol }); }
           else page.drawSvgPath(`M${R.x0 + w * 0.2} ${R.y0 + h * 0.55} L${R.x0 + w * 0.42} ${R.y0 + h * 0.8} L${R.x0 + w * 0.85} ${R.y0 + h * 0.18}`, { x: tx(0), y: ty(0), borderColor: ansCol, borderWidth: Math.max(1, h * 0.12), borderLineCap: LineCapStyle.Round });
           continue;
@@ -2122,7 +2175,7 @@ $("#flagsBtn").onclick = e => {
   pop.innerHTML = rows.length ? `<b>Flagged answer spaces</b>` : `<b>No flags yet</b><p>Click into an answer space and press ⚑ Flag to mark it to come back to.</p>`;
   for (const x of rows) {
     const b = document.createElement("button"); const t = (doc.text[x.r.id] || "").trim();
-    b.innerHTML = `<span>Q${x.q}${x.r.label && x.r.label !== "label" ? " · " + x.r.label.replace(/[.\s]+$/, "") : ""}</span><small>page ${x.p + 1}${t ? " · " + t.slice(0, 40).replace(/</g, "&lt;") : " · not answered"}</small>`;
+    b.innerHTML = `<span>${qName(x.q)}${x.r.label && x.r.label !== "label" ? " · " + x.r.label.replace(/[.\s]+$/, "") : ""}</span><small>page ${x.p + 1}${t ? " · " + t.slice(0, 40).replace(/</g, "&lt;") : " · not answered"}</small>`;
     b.onclick = () => { pop.hidden = true; const ta = x.r._el; ta.scrollIntoView({ block: "center", behavior: "smooth" }); ta.focus({ preventScroll: true }); };
     pop.appendChild(b);
   }
@@ -2157,7 +2210,7 @@ function unitChecker() {
 }
 function questionMap() {
   const idx = labelIndex(), U = unitChecker(), byLabel = new Map();
-  for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.q, p: e.p, y: e.y, m: e.m, regions: [] });
+  for (const e of idx) if (!byLabel.has(e.label)) byLabel.set(e.label, { label: e.label, q: e.q, sec: e.sec || "", p: e.p, y: e.y, m: e.m, regions: [] });
   for (const [p, r] of orderedRegions(true)) { const lab = labelAt(idx, p, r.y0 + (r.kind === "choice" ? 2 : 6)); const e = byLabel.get(lab); if (e) e.regions.push([p, r]); }
   const list = [...byLabel.values()];
   for (const e of list) {
@@ -2200,7 +2253,9 @@ function jumpTo(text) {
   const pm = t.match(/^p(?:age|g)?\.?\s*(\d+)$/i);
   if (pm) return goToPage(+pm[1]);
   const want = normQ(t), list = questionMap();
-  const hit = list.find(e => normQ(e.label) === want) || list.find(e => normQ(e.label).startsWith(want));
+  // on a paper of several topics, "m3b" finds the first M3(b) (in any topic); "4-2 m3b" a particular one
+  const bare = e => normQ(e.label).replace(/^\d+-\d+/, "");
+  const hit = list.find(e => normQ(e.label) === want) || list.find(e => bare(e) === want) || list.find(e => normQ(e.label).startsWith(want)) || list.find(e => bare(e).startsWith(want));
   if (hit) return goToQuestion(hit);
   if (/^\d+$/.test(t) && !list.length) return goToPage(+t);    // no question numbers on this paper: a number means a page
   toast(list.length ? `There's no question ${t} on this paper. Type p${t} to go to page ${t}.` : "No question numbers were found on this paper. Type p and a page number, e.g. p3.", 4000);
@@ -2214,12 +2269,16 @@ function openJump(anchorEl) {
   list.innerHTML = "";
   if (qs.length) {
     // one row per question number, with its parts as chips
-    const groups = []; for (const e of qs) { const g = groups[groups.length - 1]; if (g && g.q === e.q) g.items.push(e); else groups.push({ q: e.q, items: [e] }); }
+    const groups = []; for (const e of qs) { const g = groups[groups.length - 1]; if (g && g.q === e.q) g.items.push(e); else groups.push({ q: e.q, sec: e.sec || "", items: [e] }); }
+    let lastSec = "";
     for (const g of groups) {
+      // papers in sections that number afresh (Easy, Medium, Hard …): a heading over each
+      if (g.sec && g.sec !== lastSec) { const h = document.createElement("small"); h.className = "jsec"; h.textContent = g.sec; list.appendChild(h); }
+      lastSec = g.sec;
       const row = document.createElement("div"); row.className = "jrow";
       const n = g.items.reduce((s, e) => s + e.total, 0), done = g.items.reduce((s, e) => s + e.done, 0);
       const head = document.createElement("button"); head.type = "button"; head.className = "jq " + (n && done === n ? "done" : done ? "part" : "") + (g.items.some(e => e.flag) ? " flag" : "") + (g.items.some(e => e.label === lastJump) ? " last" : "");
-      head.innerHTML = `<b>Q${g.q}</b><small>${n ? `${done}/${n}` : "–"} · p${g.items[0].p + 1}</small>`;
+      head.innerHTML = `<b>${/^\d/.test(g.q) && !g.sec ? "Q" : ""}${g.q}</b><small>${n ? `${done}/${n}` : "–"} · p${g.items[0].p + 1}</small>`;
       head.title = `Question ${g.q}, page ${g.items[0].p + 1}` + (n ? `: ${done} of ${n} answer spaces answered` : "");
       head.onclick = () => goToQuestion(g.items[0]);
       row.appendChild(head);
@@ -2268,7 +2327,7 @@ function nextEmpty() {
     { const host = $("#pages"), t = readableScroll(p, r); if (Math.abs(t - host.scrollTop) < host.clientHeight * 6) glideTo(host, t); else host.scrollTop = t; } flashRegions([[p, r]]);
     if (canFocusOnJump() && r.kind !== "choice") { r._el.focus({ preventScroll: true }); }
     const lab = labelAt(labelIndex(), p, r.y0 + 6);
-    toast((lab !== "?" ? `Q${lab} · ` : "") + `page ${p + 1}` + (wrapped ? " (back to the start)" : ""), 1600);
+    toast((lab !== "?" ? `${qName(lab)} · ` : "") + `page ${p + 1}` + (wrapped ? " (back to the start)" : ""), 1600);
     return;
   }
   toast("Every answer space has something in it.", 2500);

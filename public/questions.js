@@ -80,20 +80,31 @@ const Questions = (() => {
     return { bold: known.length ? known.every(c => c.b) : null, mono: cs.some(c => c.mo) };
   }
 
-  // every marker on every page. pages: [{w, h, items}] (items may carry b: bold and mo: monospace)
+  // sections whose numbering starts again at 1 (Save My Exams: "Easy Questions", "Medium Questions" …)
+  const SEC_RE = /^(Very\s+Hard|Easy|Medium|Hard)\s+Questions?\b/i;
+  const SEC_LETTER = { easy: "E", medium: "M", hard: "H", "very hard": "VH" };
+  // every marker on every page. pages: [{w, h, items, pre?}] (items may carry b: bold and mo: monospace;
+  // pre: the topic code of a paper built from several topics, whose numbering starts again with each)
   function detect(pages) {
     // 1. the numbers at the start of every line
     const rows = [];
+    let curPre = null, curSeg = null, sec = "";
     pages.forEach((P, p) => {
       if (!P || !P.items) return;
       const W = P.w || 595, H = P.h || 842;
+      const sg = P.seg !== undefined && P.seg !== "" ? P.seg : P.pre || "";
+      if (sg !== curSeg) { curSeg = sg; curPre = P.pre || ""; sec = ""; }
       for (const L of lines(P.items, W, H)) {
+        const h = L.text.trim().match(SEC_RE);
+        if (h) { sec = h[1].toLowerCase().replace(/\s+/, " "); continue; }
         if (L.x > W * 0.42) continue;
         const toks = leading(L.text);
         if (!toks.length) continue;
         toks.forEach(t => Object.assign(t, style(L, t)));
         if (toks[0].mono) continue;                                     // line numbers in a code listing (01, 02 …)
-        rows.push({ p, L, W, toks });
+        const pre = (curPre ? curPre + " " : "") + (sec ? SEC_LETTER[sec] : curPre ? "Q" : "");
+        const name = (curPre ? curPre + (sec ? " · " : "") : "") + (sec ? sec[0].toUpperCase() + sec.slice(1) : "");
+        rows.push({ p, L, W, toks, seg: curSeg + "|" + sec, pre, name });
       }
     });
     // 2. which of the line-start numbers are question numbers: the best run that counts up (1, 2, 3 …, allowing the
@@ -110,24 +121,28 @@ const Questions = (() => {
     for (const x of xs) freq[x] = (freq[x] || 0) + 1;
     const modeX = cand.length ? +Object.entries(freq).sort((m, n) => n[1] - m[1])[0][0] * 4 : 0;
     const off = r => Math.abs(r.L.chars[r.toks[0].a].x0 - modeX) > 8 ? 0.5 : 0;
-    const best = [], prev = [];
-    cand.forEach((r, k) => {
-      const n = +r.toks[0].tok;
-      best[k] = (n === 1 ? 1 : n <= 3 ? 0.6 : 0.3) - off(r); prev[k] = -1;
-      for (let j = 0; j < k; j++) {
-        const d = n - +cand[j].toks[0].tok; if (d < 1 || d > 15) continue;
-        const v = best[j] + (d === 1 ? 1 : d <= 3 ? 0.4 : 0.1) - off(r);
-        if (v > best[k]) { best[k] = v; prev[k] = j; }
-      }
-    });
+    // one run per section (the whole paper is one section unless it has headings or topics that start again)
     const chosen = new Set();
-    let k = best.length ? best.indexOf(Math.max(...best)) : -1;
-    while (k >= 0) { chosen.add(cand[k]); k = prev[k]; }
+    for (const seg of [...new Set(cand.map(r => r.seg))]) {
+      const cs = cand.filter(r => r.seg === seg), best = [], prev = [];
+      cs.forEach((r, k) => {
+        const n = +r.toks[0].tok;
+        best[k] = (n === 1 ? 1 : n <= 3 ? 0.6 : 0.3) - off(r); prev[k] = -1;
+        for (let j = 0; j < k; j++) {
+          const d = n - +cs[j].toks[0].tok; if (d < 1 || d > 15) continue;
+          const v = best[j] + (d === 1 ? 1 : d <= 3 ? 0.4 : 0.1) - off(r);
+          if (v > best[k]) { best[k] = v; prev[k] = j; }
+        }
+      });
+      let k = best.length ? best.indexOf(Math.max(...best)) : -1;
+      while (k >= 0) { chosen.add(cs[k]); k = prev[k]; }
+    }
     // 3. walk the lines in order, keeping track of the question, part and sub-part
     const all = pages.map(() => []);
-    let q = 0, a = "", aNum = false, r = "";
+    let q = 0, a = "", aNum = false, r = "", seg = null;
     for (const row of rows) {
       const { p, L, W, toks } = row;
+      if (row.seg !== seg) { seg = row.seg; q = 0; a = ""; aNum = false; r = ""; }   // a new section: its first question starts it
       let start = 0;
       if (toks[0].lvl === 0) {
         if (chosen.has(row)) { q = +toks[0].tok; a = ""; aNum = false; r = ""; }
@@ -153,24 +168,25 @@ const Questions = (() => {
         }
         if (!ok) break;
         const c0 = L.chars[t.a], c1 = L.chars[Math.max(t.a, t.b - 1)];
-        all[p].push({ id: "q" + p + "_" + all[p].length + "_" + Math.random().toString(36).slice(2, 6), lvl, tok: lvl === 0 ? String(q) : t.tok, x0: +(c0.x0 - 1.5).toFixed(1), y0: +(L.y - L.h * 0.85).toFixed(1), x1: +(c1.x1 + 1.5).toFixed(1), y1: +(L.y + L.h * 0.25).toFixed(1), ...(t.num ? { num: true } : {}) });
+        all[p].push({ id: "q" + p + "_" + all[p].length + "_" + Math.random().toString(36).slice(2, 6), lvl, tok: lvl === 0 ? String(q) : t.tok, x0: +(c0.x0 - 1.5).toFixed(1), y0: +(L.y - L.h * 0.85).toFixed(1), x1: +(c1.x1 + 1.5).toFixed(1), y1: +(L.y + L.h * 0.25).toFixed(1), ...(t.num ? { num: true } : {}), ...(lvl === 0 && row.pre ? { pre: row.pre, sec: row.name } : {}) });
       }
     }
     return all;
   }
 
-  // labels for every marker in reading order: [{p, y, x, label, q, m}]
+  // labels for every marker in reading order: [{p, y, x, label, q, m, sec}]. A question in a section that starts
+  // its numbering again carries the section: E1(a), M3, 4-2 H2(b)
   function index(pages) {
-    const out = []; let q = "", a = "", aNum = false, r = "";
+    const out = []; let q = "", a = "", aNum = false, r = "", pre = "", sec = "";
     pages.forEach((P, p) => {
       const qs = ((P && P.qs) || []).slice().sort((m, n) => m.y0 - n.y0 || m.x0 - n.x0);
       for (const m of qs) {
-        if (m.lvl === 0) { q = m.tok; a = ""; aNum = false; r = ""; }
+        if (m.lvl === 0) { if (m.pre !== undefined) { pre = m.pre; sec = m.sec || ""; } q = pre + m.tok; a = ""; aNum = false; r = ""; }
         else if (m.lvl === 1) { a = m.tok; aNum = !!m.num || /^\d+$/.test(m.tok); r = ""; }
         else r = m.tok;
         if (!q) continue;
         const label = q + (a ? (aNum ? "." + a : `(${a})`) : "") + (r ? `(${r})` : "");
-        out.push({ p, y: m.y0, x: m.x0, label, q, m });
+        out.push({ p, y: m.y0, x: m.x0, label, q, m, sec });
       }
     });
     return out;

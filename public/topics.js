@@ -10,7 +10,18 @@
   const note = (t, err) => { const n = el("tpNote"); n.textContent = t || ""; n.classList.toggle("err", !!err); };
   try { const s = JSON.parse(localStorage.getItem("tpPrefs") || "{}"); T.sel = new Set(s.sel || []); T.types = new Set(s.types || []); T.diffs = new Set(s.diffs || []); } catch (e) {}
   const save = () => { try { localStorage.setItem("tpPrefs", JSON.stringify({ sel: [...T.sel], types: [...T.types], diffs: [...T.diffs] })); } catch (e) {} };
-  const allowed = () => !!(window.Sync && Sync.user && Sync.info && Sync.info.admin);
+  const allowed = () => !!(window.Sync && Sync.user);                  // anyone signed in
+  // suggested time: about 1.2 minutes a mark (an A-level paper's pace), rounded to 5 minutes
+  const minsFor = marks => Math.max(5, Math.round(marks * 1.2 / 5) * 5);
+  const fmtMins = m => m >= 60 ? `${Math.floor(m / 60)} h${m % 60 ? " " + (m % 60) + " min" : ""}` : `${m} min`;
+  // marks per section, from each paper's cover ("Easy (5 questions) /43"), remembered once a paper has been read;
+  // before that, what Save My Exams papers usually have
+  let marksSeen = {}; try { marksSeen = JSON.parse(localStorage.getItem("tpMarks") || "{}"); } catch (e) {}
+  const TYPICAL = { Structured: { Easy: 43, Medium: 54, Hard: 43 }, MCQ: { Easy: 11, Medium: 11, Hard: 10 } };
+  function marksOf(f) {
+    const m = marksSeen[f.path] || TYPICAL[f.type] || { Easy: 15, Medium: 18, Hard: 17 };
+    return Object.entries(m).filter(([d]) => !T.diffs.size || T.diffs.has(d === "Very Hard" ? "Hard" : d)).reduce((t, [, v]) => t + v, 0);
+  }
 
   // what you've done already: papers in your library made here are named "SMX 2-1 …"
   function statusOf(code) {
@@ -87,7 +98,7 @@
     // build
     const files = chosenFiles();
     const row = document.createElement("div"); row.className = "tpbuild";
-    row.innerHTML = `<button type="button" class="pfclear" id="tpClear">Clear</button><button type="button" id="tpRandom" title="Pick three topics at random from the modules shown">Random 3</button><span class="grow"></span><span class="tpcount">${T.sel.size} topic${T.sel.size === 1 ? "" : "s"} · ${files.length} file${files.length === 1 ? "" : "s"}</span><button type="button" class="pfopen" id="tpGo" ${files.length ? "" : "disabled"}>Build practice paper</button>`;
+    row.innerHTML = `<button type="button" class="pfclear" id="tpClear">Clear</button><button type="button" id="tpRandom" title="Pick three topics at random from the modules shown">Random 3</button><span class="grow"></span><span class="tpcount">${T.sel.size} topic${T.sel.size === 1 ? "" : "s"} · ${files.length} file${files.length === 1 ? "" : "s"}${files.length ? (() => { const mk = files.reduce((t, f) => t + marksOf(f), 0), exact = files.every(f => marksSeen[f.path]); return ` · <span class="tpest" title="${exact ? "From the papers' covers" : "An estimate until the papers have been opened once"}">${exact ? "" : "≈ "}${mk} marks · about ${fmtMins(minsFor(mk))}</span>`; })() : ""}</span><button type="button" class="pfopen" id="tpGo" ${files.length ? "" : "disabled"}>Build practice paper</button>`;
     box.appendChild(row);
     el("tpClear").onclick = () => { T.sel.clear(); save(); render(); };
     el("tpRandom").onclick = () => { const pool = modules().flatMap(m => m.topics.filter(t => !q || (t.code + " " + t.topic + " " + m.name).toLowerCase().includes(q))); T.sel.clear(); for (let i = 0; i < 3 && pool.length; i++) T.sel.add(pool.splice(Math.floor(Math.random() * pool.length), 1)[0].code); save(); render(); };
@@ -102,47 +113,102 @@
     return out;
   }
 
-  // the pages of one paper that are in the chosen difficulty sections (Save My Exams heads each section
-  // "Easy Questions", "Medium Questions", "Hard Questions"); everything when none is chosen or none is found
-  async function pagesFor(bytes) {
+  // what each page of a Save My Exams paper is: the cover (with each section's marks) and the questions of each
+  // section, headed "Easy Questions", "Medium Questions", "Hard Questions"
+  const SEC = /\b(Very Hard|Easy|Medium|Hard)\s+Questions?\b/i;
+  const cap = s => s.toLowerCase().replace(/(^|\s)\w/g, c => c.toUpperCase());
+  async function analyse(bytes) {
     const d = await pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)), isEvalSupported: false }).promise;
-    const all = Array.from({ length: d.numPages }, (_, i) => i);
-    if (!T.diffs.size) { d.destroy(); return all; }
-    let cur = null, found = false; const keep = [];
+    const pages = [], marks = {}; let sec = null;
     for (let i = 0; i < d.numPages; i++) {
       const tc = await (await d.getPage(i + 1)).getTextContent();
       const txt = tc.items.map(it => it.str).join(" ").replace(/\s+/g, " ");
-      const m = txt.match(/\b(Very Hard|Easy|Medium|Hard)\s+Questions?\b/i);
-      if (m && i > 0) { cur = m[1].replace(/^\w/, c => c.toUpperCase()).replace("Very hard", "Very Hard"); found = true; }
-      if (cur && (T.diffs.has(cur) || (cur === "Very Hard" && T.diffs.has("Hard")))) keep.push(i);
+      const secs = [...txt.matchAll(/(Very Hard|Easy|Medium|Hard)\s*\(\s*\d+\s*questions?\s*\)\s*\/?\s*(\d+)/gi)];
+      if (secs.length >= 2 || (i === 0 && /total marks/i.test(txt))) { for (const m of secs) marks[cap(m[1])] = +m[2]; pages.push({ role: "cover" }); continue; }
+      const h = txt.match(SEC); if (h) sec = cap(h[1]);
+      pages.push({ role: "q", sec });
     }
     d.destroy();
-    return found ? keep : all;
+    return { pages, marks };
+  }
+  const wantSec = sec => !T.diffs.size || (sec && T.diffs.has(sec === "Very Hard" ? "Hard" : sec));
+  // ASCII-ish text for the contents page's standard font
+  const plain = t => String(t).replace(/[–—]/g, "-").replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[^\x20-\x7E\xA0-\xFF]/g, "");
+  async function contentsPage(out, title, rows, marks, mins) {
+    const { StandardFonts, rgb } = PDFLib;
+    const pg = out.insertPage(0, [595.28, 841.89]);
+    const f = await out.embedFont(StandardFonts.Helvetica), fb = await out.embedFont(StandardFonts.HelveticaBold);
+    const ink = rgb(0.1, 0.12, 0.13), mid = rgb(0.4, 0.44, 0.43), line = rgb(0.82, 0.85, 0.84);
+    let y = 780;
+    pg.drawText("Topic practice", { x: 56, y, size: 11, font: fb, color: rgb(0.18, 0.49, 0.45) }); y -= 26;
+    for (const ln of wrap(plain(title), fb, 18, 483)) { pg.drawText(ln, { x: 56, y, size: 18, font: fb, color: ink }); y -= 23; }
+    y -= 4;
+    pg.drawText(plain(`${marks} marks  ·  suggested time ${fmtMins(mins)}  ·  ${new Date().toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" })}`), { x: 56, y, size: 11, font: f, color: mid }); y -= 34;
+    const cols = [56, 262, 445, 500];
+    ["Topic", "Questions", "Pages", "Marks"].forEach((h, k) => pg.drawText(h, { x: cols[k], y, size: 10, font: fb, color: mid }));
+    y -= 8; pg.drawLine({ start: { x: 56, y }, end: { x: 539, y }, thickness: 0.8, color: line }); y -= 16;
+    for (const r of rows) {
+      if (y < 90) break;
+      const tl = wrap(plain(`${r.code} ${r.topic}`), f, 10.5, 196), wl = wrap(plain(r.what), f, 10.5, 172);
+      tl.forEach((ln, k) => pg.drawText(ln, { x: cols[0], y: y - k * 13, size: 10.5, font: f, color: ink }));
+      wl.forEach((ln, k) => pg.drawText(ln, { x: cols[1], y: y - k * 13, size: 10.5, font: f, color: ink }));
+      pg.drawText(r.from === r.to ? `${r.from}` : `${r.from}-${r.to}`, { x: cols[2], y, size: 10.5, font: f, color: ink });
+      pg.drawText(r.marks ? String(r.marks) : "-", { x: cols[3], y, size: 10.5, font: f, color: ink });
+      y -= 13 * Math.max(tl.length, wl.length) + 7;
+      pg.drawLine({ start: { x: 56, y: y + 3 }, end: { x: 539, y: y + 3 }, thickness: 0.4, color: line }); y -= 8;
+    }
+    y = Math.min(y - 14, 150);
+    const tips = ["How to use this paper in TypePDF:", "-  Type in the answer spaces, or write on the paper with the pen.", "-  Multiple choice: tap a letter to circle it (tap another to change your mind).",
+      "-  Go to lists every question by section: E = Easy, M = Medium, H = Hard (E1, M2(b) ...).", "-  The timer is set to the suggested time: press it, then Start."];
+    tips.forEach((t, k) => pg.drawText(plain(t), { x: 56, y: y - k * 15, size: 10, font: k ? f : fb, color: k ? mid : ink }));
+  }
+  function wrap(t, font, size, w) {
+    const out = []; let cur = "";
+    for (const word of t.split(/\s+/)) { const nx = cur ? cur + " " + word : word; if (cur && font.widthOfTextAtSize(nx, size) > w) { out.push(cur); cur = word; } else cur = nx; }
+    if (cur) out.push(cur); return out.slice(0, 3);
   }
   async function build() {
     const files = chosenFiles(); if (!files.length) return;
     const btn = el("tpGo"); btn.disabled = true;
     try {
-      const out = await PDFLib.PDFDocument.create();
+      const out = await PDFLib.PDFDocument.create(), meta = [], rows = [];
+      let marks = 0;
       for (let i = 0; i < files.length; i++) {
         const f = files[i]; busy(true, `Getting ${f.code} ${f.type}… (${i + 1} of ${files.length})`, i / files.length);
         const res = await Sync.api("/api/sme/pdf?path=" + encodeURIComponent(f.path));
         if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `couldn't get ${f.code} (${res.status})`); }
         const bytes = await res.arrayBuffer();
-        const pages = await pagesFor(bytes);
-        if (!pages.length) continue;
+        const info = await analyse(bytes);
+        if (Object.keys(info.marks).length) { marksSeen[f.path] = info.marks; try { localStorage.setItem("tpMarks", JSON.stringify(marksSeen)); } catch (e) {} }
+        // the question pages in the chosen sections (all of them when the paper has no section headings)
+        const headed = info.pages.some(p => p.sec);
+        const keep = info.pages.map((p, k) => k).filter(k => info.pages[k].role === "q" && (!headed || wantSec(info.pages[k].sec)));
+        if (!keep.length) continue;
         const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true });
-        for (const pg of await out.copyPages(src, pages)) out.addPage(pg);
+        const from = out.getPageCount() + 2;                         // page numbers after the contents page
+        for (const pg of await out.copyPages(src, keep)) out.addPage(pg);
+        keep.forEach(k => meta.push({ role: "q", code: f.code, topic: f.topic, type: f.type, sec: info.pages[k].sec || "" }));
+        const secs = headed ? [...new Set(keep.map(k => info.pages[k].sec).filter(Boolean))] : [];
+        const mk = Object.keys(info.marks).length ? Object.entries(info.marks).filter(([d]) => !headed || secs.includes(d)).reduce((t, [, v]) => t + v, 0) : 0;
+        marks += mk;
+        rows.push({ code: f.code, topic: f.topic, what: f.type + (secs.length && secs.length < 3 ? " (" + secs.join(", ") + ")" : ""), from, to: from + keep.length - 1, marks: mk });
       }
       if (!out.getPageCount()) { busy(false); toast("None of those papers has pages in the difficulty you chose.", 4000); return; }
       const codes = [...T.sel].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
       const one = codes.length === 1 && files[0];
       const types = [...new Set(files.map(f => f.type))].join(" + "), diffs = T.diffs.size ? " (" + DIFFS.filter(d => T.diffs.has(d)).join(", ") + ")" : "";
       const name = (one ? `SMX ${one.code} ${one.topic} – ${types}` : `SMX ${codes.slice(0, 6).join(", ")}${codes.length > 6 ? " …" : ""} – ${types}`) + diffs;
+      if (!marks) marks = files.reduce((t, f) => t + marksOf(f), 0);
+      const mins = minsFor(marks);
+      await contentsPage(out, name, rows, marks, mins);
+      // what each page is, for TypePDF when the paper is opened (MCQ pages, sections, topics)
       out.setTitle(name); out.setCreator("TypePDF");
+      out.setSubject(JSON.stringify({ smx: 1, est: { marks, mins }, pages: [{ role: "contents" }, ...meta] }));
       const bytes = await out.save();
       busy(false);
       await openFile(new File([bytes], name.replace(/[\\/:*?"<>|]+/g, " ") + ".pdf", { type: "application/pdf" }));
+      toast(`${marks} marks · suggested time ${fmtMins(mins)} (the timer is set: press it, then Start)`, 5000);
+      render();
     } catch (e) { busy(false); toast("Couldn't build the paper: " + (e.message || e), 6000); }
     finally { btn.disabled = false; }
   }
@@ -164,7 +230,7 @@
   el("tpQ").addEventListener("input", e => { T.q = e.target.value.trim(); render(); });
   el("tpRefresh").onclick = () => load(true);
   try { if (localStorage.getItem("tpOpen") === "1") sec.open = true; } catch (e) {}
-  // shown once we know who's signed in (the library is the owner's)
+  // shown once we know who's signed in
   let tries = 0; const wait = setInterval(() => { if ((window.Sync && Sync.info) || ++tries > 40) { clearInterval(wait); show(); } }, 250);
   window.addEventListener("hashchange", () => { if (/topics=/.test(location.hash)) { if (T.idx) { fromHash(); render(); } else show(); } });
   window.TopicPractice = { refresh: render, show };
