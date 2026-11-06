@@ -175,7 +175,7 @@ function aiJSON(withQuestion) {
         const cy = (r.y0 + r.y1) / 2, near = ch.filter(([q, o]) => q === p && o !== r && Math.min(o.x1, r.x1) - Math.max(o.x0, r.x0) > 0).map(([, o]) => Math.abs((o.y0 + o.y1) / 2 - cy)).filter(d => d > 2);
         const band = Math.max(6, Math.min(near.length ? Math.min(...near) / 2 : 16, 22));
         const its = aiPage(p).items.filter(it => it.y > cy - band && it.y <= cy + band && !isFurniture(it, doc.pages[p]) && !(it.x >= r.x0 && it.x1 <= r.x1));
-        let t = richText(its) || r.opt || "";
+        let t = r.shape === "ring" && r.opt ? r.opt : richText(its) || r.opt || "";     // a lettered option knows its own words
         const L = "ABCDEFGH"[k];
         if (!/^[A-H]\b/.test(t)) t = (L + " " + t).trim();
         return { t: t.slice(0, 300), letter: t[0], chosen: done(r.id), inked: M.inked.has(r.id) };

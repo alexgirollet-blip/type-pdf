@@ -270,11 +270,60 @@ const Detect = (() => {
     return out.filter(c => c.mark || c.opt);
   }
 
+  // ---- multiple choice without boxes: lettered options ("A. 6%", "B) 12%", a bold "C") ----
+  // a run A, B, C (, D …) in reading order, each letter starting its own piece of text, close together:
+  // the letter itself is what's clicked, and gets a ring drawn round it. strict: needs all of A–D with a dot or bracket
+  function letters(items, strict) {
+    const OPT = /^\(?([A-F])(?:[.)]|\s*$)/;
+    const cand = items.map(it => { const m = it.str.trim().match(OPT); return m ? { it, L: m[1], tight: /^\(?[A-F][.)]/.test(it.str.trim()) } : null; }).filter(Boolean);
+    const glyph = c => {
+      const it = c.it, t = it.str.replace(/^\s+/, ""), lead = it.str.length - t.length, n = Math.max(1, it.str.length), cw = (it.x1 - it.x) / n;
+      const k = t[0] === "(" ? 1 : 0, x = it.x + (lead + k) * cw, w = Math.max(it.fh * 0.55, Math.min(cw * 1.15, it.fh * 0.8));
+      return { x, x1: x + w, cy: it.base - it.fh * 0.36 };
+    };
+    const used = new Set(), out = [];
+    const order = (a, b) => a.it.base - b.it.base || a.it.x - b.it.x;
+    cand.sort(order);
+    for (const a of cand) {
+      if (a.L !== "A" || used.has(a)) continue;
+      const run = [a];
+      for (let k = 1; k < 6; k++) {
+        const prev = run[run.length - 1], want = "ABCDEF"[k];
+        let best = null, bd = Infinity;
+        for (const c of cand) {
+          if (c.L !== want || used.has(c) || run.includes(c)) continue;
+          const dy = c.it.base - prev.it.base, dx = c.it.x - prev.it.x;
+          const same = Math.abs(dy) <= 2.5 && dx > 4 && dx < 320;                        // along a row
+          const below = dy > 2.5 && dy < 90 && Math.abs(c.it.x - a.it.x) < 260;           // down a column / the next row of a grid
+          if (!same && !below) continue;
+          const d = same ? dx : dy * 3 + Math.abs(c.it.x - a.it.x);
+          if (d < bd) { bd = d; best = c; }
+        }
+        if (!best) break;
+        run.push(best);
+      }
+      if (run.length < 3) continue;
+      if (strict && (run.length < 4 || !run.every(c => c.tight))) continue;
+      run.forEach(c => used.add(c));
+      out.push(run.map(c => {
+        const g = glyph(c), r = Math.max(c.it.fh * 0.72, (g.x1 - g.x) * 0.85);
+        // what the option says: the rest of its line, up to the next option on the same row
+        const nxt = run.find(o => o !== c && Math.abs(o.it.base - c.it.base) <= 2.5 && o.it.x > c.it.x);
+        const txt = items.filter(it => Math.abs(it.base - c.it.base) <= 2.5 && it.x >= c.it.x - 1 && (!nxt || it.x < nxt.it.x - 1)).sort((p, q) => p.x - q.x)
+          .map(it => it.str).join(" ").replace(/^\s*\(?[A-F][.)]?\s*/, "").replace(/\s+/g, " ").trim();
+        const cx = (g.x + g.x1) / 2;
+        return { x0: cx - r, x1: cx + r, y0: g.cy - r, y1: g.cy + r, opt: c.L + (txt ? " " + txt.slice(0, 60) : "") };
+      }));
+    }
+    return out;
+  }
+
   const CODE_RE = /\b(write|complete|rewrite|amend|modify|give)\b[^.]{0,80}\b(pseudo-?code|code|function|procedure|sub-?routine|algorithm|program|sql|statement|query|method|class|css|html|javascript|python)\b/i;
 
   // ---- main ----
   // canvas: page rendered at scale S. viewport: pdf.js viewport at scale 1.
-  function page(canvas, viewport, tc) {
+  // opts.none: a cover or contents page (nothing to answer). opts.mcq: only multiple choice, no answer spaces
+  function page(canvas, viewport, tc, opts = {}) {
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     const G = grey(ctx.getImageData(0, 0, canvas.width, canvas.height));
     const I = integral(G);
@@ -292,6 +341,7 @@ const Detect = (() => {
       return inkPt(it.x, y0, it.x1, y1) > Math.max(2, w * (y1 - y0) * S * S * 0.015);
     });
 
+    if (opts.none) return { regions: [], items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1), h: +it.fh.toFixed(1) })), hasText: items.length > 0 };
     // rules touched by two or more vertical lines are table/box borders
     const touching = l => V.filter(v => v.x >= l.x0 - 3 && v.x <= l.x1 + 3 && v.y0 <= l.y + 3 && v.y1 >= l.y - 3).length;
     const IF = integral(G, 238);   // any visible ink, however faint
@@ -303,7 +353,7 @@ const Detect = (() => {
     const insideBox = (l) => boxes.some(b => l.x0 >= b.x0 - 2 && l.x1 <= b.x1 + 2 && l.y > b.y0 + 4 && l.y < b.y1 - 4);
 
     // answer lines: thin, long, blank band above, not a table border
-    let lines = H.filter(l => {
+    let lines = opts.mcq ? [] : H.filter(l => {
       if (l.th > 3.5) return false;
       if (l.y < 25 || l.y > PH - 20) return false;                 // header/footer rules
       if (l.x1 - l.x0 > 0.92 * PW) return false;                     // full-width separators
@@ -345,7 +395,9 @@ const Detect = (() => {
         const okSpacing = dy >= 11 && dy <= 50 && (g.lines.length < 2 || Math.abs(dy - g.sp) <= 3.5);
         const okX = l.x0 <= minx + 6 && l.x1 > minx + 40 && Math.min(l.x1, Math.max(...g.lines.map(q => q.x1))) - Math.max(l.x0, minx) > 60;
         // nothing printed between the two rules apart from the rules themselves
-        const between = items.some(it => it.base > last.y + 3 && it.base < l.y - 1 && it.x < Math.max(l.x1, last.x1) && it.x1 > Math.min(l.x0, last.x0) && !/^\.*$/.test(it.str.replace(/\s/g, "")));
+        // (a "(2 marks)" or "[3]" printed beside the lines doesn't count: it belongs to them)
+        const btw = items.filter(it => it.base > last.y + 3 && it.base < l.y - 1 && it.x < Math.max(l.x1, last.x1) && it.x1 > Math.min(l.x0, last.x0) && !/^\.*$/.test(it.str.replace(/\s/g, "")));
+        const between = btw.length > 0 && !/^[\s.]*([(\[]?\s*\d+\s*(marks?)?\s*[)\]]?[\s.]*)+$/i.test(btw.map(it => it.str).join(" "));
         if (okSpacing && okX && !between) { g.lines.push(l); if (g.lines.length === 2) g.sp = dy; continue; }
       }
       groups.push({ lines: [l], sp: 0 });
@@ -380,7 +432,7 @@ const Detect = (() => {
 
     // empty enclosed areas → cells or boxes (skip ones already holding answer lines)
     for (const b of boxes) {
-      if (!b.empty) continue;
+      if (!b.empty || opts.mcq) continue;
       if (regions.some(r => r.kind === "lines" && r.x0 >= b.x0 - 2 && r.x1 <= b.x1 + 2 && r.ys[0] > b.y0 && r.ys[r.ys.length - 1] < b.y1)) continue;
       const hgt = b.y1 - b.y0;
       regions.push({ kind: hgt <= 36 ? "cell" : "box", x0: b.x0 + 1.5, x1: b.x1 - 1.5, y0: b.y0 + 1.5, y1: b.y1 - 1.5 });
@@ -389,7 +441,7 @@ const Detect = (() => {
     // gaps for the mass and atomic numbers in a nuclear equation: two short stacked blanks just left of an element symbol
     const shortH = Hall.filter(l => l.x1 - l.x0 >= 6 && l.x1 - l.x0 <= 24 && l.th <= 1.5 && l.solid);
     const usedShort = new Set();
-    for (const a of shortH) for (const b of shortH) {
+    if (!opts.mcq) for (const a of shortH) for (const b of shortH) {
       if (a === b || usedShort.has(a) || usedShort.has(b)) continue;
       const dy = b.y - a.y; if (dy < 7 || dy > 26) continue;
       if (Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0) < 0.7 * Math.min(a.x1 - a.x0, b.x1 - b.x0)) continue;
@@ -407,6 +459,17 @@ const Detect = (() => {
     for (const c of ch) {
       for (let i = regions.length - 1; i >= 0; i--) { const r = regions[i]; if (r.kind !== "lines" && r.x0 < c.x1 && r.x1 > c.x0 && r.y0 < c.y1 && r.y1 > c.y0 && (r.x1 - r.x0) < 40 && (r.y1 - r.y0) < 36) regions.splice(i, 1); }
       regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: c.shape, opt: c.opt || "", ...(c.mark ? { mark: c.mark } : {}) });
+    }
+    // lettered options with nothing to fill in: on an MCQ page always; elsewhere only a clear A. B. C. D. run with no boxes
+    if (opts.mcq || !ch.length) {
+      let gi = 0;
+      for (const run of letters(items, !opts.mcq)) {
+        const grp = "L" + Math.round(run[0].y0) + "_" + (gi++);
+        for (const c of run) {
+          if (regions.some(r => r.kind === "choice" && r.x0 < c.x1 && r.x1 > c.x0 && r.y0 < c.y1 && r.y1 > c.y0)) continue;
+          regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: "ring", grp, opt: c.opt });
+        }
+      }
     }
 
     // geometry common to all kinds: top/bottom in pt
@@ -431,5 +494,5 @@ const Detect = (() => {
     return { regions, items: items.map(it => ({ s: it.str, x: +it.x.toFixed(1), y: +it.base.toFixed(1), x1: +it.x1.toFixed(1), h: +it.fh.toFixed(1) })), hasText: items.length > 0 };
   }
 
-  return { page, S, textItems, choices, grey, _debug: { grey, integral, hRules, vRules, pairUp } };
+  return { page, S, textItems, choices, letters, grey, _debug: { grey, integral, hRules, vRules, pairUp } };
 })();

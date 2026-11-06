@@ -309,7 +309,7 @@ async function api(req, env, url, ctx) {
   // fetch a PDF from a pasted link (signed-in users only, PDFs only)
   // ---- past paper finder: Physics & Maths Tutor's A-level papers ----
   // ---- topic practice: Save My Exams PDFs on the owner's own file server ----
-  if (path.startsWith("/api/sme/") && !who.admin) return bad("Topic practice is only for the site's owner (it's their own Save My Exams library).", 403);
+  // (any signed-in user: the files are read-only, and only ones in the index can be fetched)
   if (path === "/api/sme/index") {
     if (!smeOn(env)) return json({ setup: false });
     try { return json({ setup: true, ...(await smeIndex(env, url.searchParams.get("fresh") === "1")) }); } catch (e) { return bad(String(e.message || e), 502); }
