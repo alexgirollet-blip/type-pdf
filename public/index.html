@@ -36,6 +36,12 @@
       <input id="joinName" placeholder="Your name" aria-label="Your name" autocomplete="nickname" maxlength="40">
       <button type="submit">Join</button>
     </form>
+    <details class="finder" id="topics" hidden>
+      <summary>Topic practice <small>your Save My Exams library</small></summary>
+      <div class="pfrow"><input id="tpQ" type="search" placeholder="Search topics, e.g. moments, photoelectric" aria-label="Search topics" autocomplete="off"><button type="button" id="tpRefresh" title="Look at the library again (after adding files)">↻</button></div>
+      <p class="pfnote" id="tpNote"></p>
+      <div class="pftags" id="tpBody"></div>
+    </details>
     <details class="finder" id="finder">
       <summary>Past paper finder <small>A-level papers from Physics &amp; Maths Tutor</small></summary>
       <form class="pfrow" id="pfForm">
@@ -281,5 +287,6 @@
 <script src="sync.js"></script>
 <script src="home.js"></script>
 <script src="finder.js"></script>
+<script src="topics.js"></script>
 </body>
 </html>

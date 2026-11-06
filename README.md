@@ -22,6 +22,7 @@ Fill in any PDF paper in the browser. Open a PDF and TypePDF finds the answer sp
 - **Read the question first**: Tab, and every jump, scrolls so the question's wording stays in view above the answer space instead of hiding it at the top of the screen.
 - **Live sync with an account.** Sign in on two devices and open the same paper; typing and ink appear on the other device as you go. Offline changes are kept and sent when the connection returns.
 - **Picks up where you left off**: page, zoom, tool, colour and the answer you were typing in.
+- **Topic practice** (home page, site owner only): your own Save My Exams topic-question PDFs, kept on your server, as tags by module and topic, with question type (Structured / MCQ / Exam questions) and difficulty (Easy / Medium / Hard: only those sections' pages are kept) tags. **Build practice paper** merges the chosen files into one paper, named like `SMX 4-3 Moments – Structured (Hard)`, adds it to your papers and opens it. Topics you've started or finished show a dot. Links such as `/#topics=4-3,4-5&types=Structured&diff=Medium,Hard` open it with everything chosen (the daily revision pack sends these). Setup is below.
 - **Past paper finder** (home page, signed in): search Physics & Maths Tutor's A-level past papers by typing (e.g. "AQA physics paper 1 2019 mark scheme") or picking a subject, then narrow the list with tags for level (AS or A level), exam board, paper, year, series and type (question paper, mark scheme, examiner report) and sort it. **Add & open** fetches the PDF through your account, names it properly and adds it to your papers. The Worker reads PMT's listing pages only as far as a search needs and caches them for a day (`src/pmt.js`).
 - **Open PDFs any way you like**: choose a file, drag and drop, paste a file with ⌘/Ctrl+V, or paste a link.
 - **Export PDF** keeps the original paper sharp (vector) and adds typed text and ink on top. The exported file also carries the original paper and your answers, so opening it in TypePDF again brings everything back editable.
@@ -66,6 +67,38 @@ By default the admin's storage bar counts only what TypePDF stores. To show what
 - Server storage changes are additive only: new tables and new columns are added if missing; nothing is dropped or rewritten.
 - Papers saved in the browser are upgraded in place when opened (older formats are converted, nothing is removed), and the site asks the browser to keep its storage persistent.
 - Answers not yet synced stay marked on the device and are sent when the connection returns.
+
+### Topic practice: your Save My Exams library
+
+The PDFs stay on your own server; TypePDF reads them through a Cloudflare Tunnel that only it can get through. Expected layout (as Save My Exams downloads are organised):
+
+```
+SMX AQA A level Physics/
+  2 Particles and Radiation/
+    2-1 Atomic Structure and Decay Equations - Structured.pdf
+    2-1 Atomic Structure and Decay Equations - MCQ.pdf
+  9 Astrophysics/
+    9-1 Telescopes - Exam Questions.pdf
+```
+
+1. Copy the folder to the server, e.g. `/DATA/SaveMyExams` on ZimaOS.
+2. Serve it read-only with Caddy (ZimaOS: App Store → + → Install a customized app → Docker Compose):
+   ```yaml
+   services:
+     sme-files:
+       image: caddy:2.8
+       restart: unless-stopped
+       volumes:
+         - /DATA/SaveMyExams:/srv:ro
+       command: caddy file-server --root /srv --browse --listen :8085
+       ports:
+         - "8085:8085"
+   ```
+3. Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Public hostname: `sme.<your domain>` → HTTP → `<server-ip>:8085`.
+4. Lock it: Access → Service credentials → Service Tokens → create `TypePDF` (copy the Client ID and Secret). Access → Applications → Self-hosted for `sme.<your domain>`, policy **Service Auth** including that token.
+5. On this Worker: `SME_URL` (text, `https://sme.<your domain>`), `SME_ACCESS_ID` and `SME_ACCESS_SECRET` (secrets).
+
+Only admin accounts see Topic practice. The Worker only ever fetches files that appear in the folder listing, and caches the listing for 10 minutes (↻ in the section re-reads it).
 
 ## Deploy on Cloudflare (auto-deploys from GitHub)
 

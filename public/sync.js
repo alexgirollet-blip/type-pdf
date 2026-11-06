@@ -274,7 +274,7 @@ window.Sync = (() => {
   function flashLive() { const pill = $("#syncPill"); if (!pill) return; pill.classList.remove("flash"); void pill.offsetWidth; pill.classList.add("flash"); }
 
   return {
-    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, apiGet, openAuth, signIn, refreshInfo, admin, share, focus,
+    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, apiGet, api, openAuth, signIn, refreshInfo, admin, share, focus,
     get user() { return S.user; }, get info() { return S.info; }, get people() { return S.people; }, get sid() { return S.sid; },
   };
 })();
