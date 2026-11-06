@@ -36,10 +36,16 @@ function fileOf(s) {
   return { code: `${+m[1]}-${+m[2]}`, mod: +m[1], sub: +m[2], topic: m[3].trim(), type };
 }
 
-// every PDF in the share, up to three folders deep: [{ module, mod, code, topic, type, path, size }]
+// "Mock Paper 1 - Set A.pdf" → { paper: "1", set: "A" } (Save My Exams mock exams, mark scheme at the end)
+function mockOf(s) {
+  const m = s.replace(/\.pdf$/i, "").match(/^mock\s*(?:exam|paper)?\s*([0-9]+[a-z]?)\s*(?:[-–]\s*)?(?:set\s*([a-z0-9]+))?\s*$/i);
+  return m ? { paper: m[1].toUpperCase(), set: (m[2] || "").toUpperCase() } : null;
+}
+
+// every PDF in the share, up to three folders deep: [{ module, mod, code, topic, type, path, size }], and the mocks
 export async function smeIndex(env, fresh) {
   if (!fresh && cache && Date.now() - cache.at < TTL) return cache.index;
-  const files = [], dirs = [["", 0, null]];
+  const files = [], mocks = [], dirs = [["", 0, null]];
   let reads = 0;
   while (dirs.length && reads < 45) {
     const [rel, depth, mod] = dirs.shift(); reads++;
@@ -49,13 +55,16 @@ export async function smeIndex(env, fresh) {
       const path = rel ? rel + "/" + name : name;
       if (it.is_dir) { if (depth < 3) dirs.push([path, depth + 1, modOf(name) || mod]); continue; }
       if (!/\.pdf$/i.test(name)) continue;
+      const mk = mockOf(name);
+      if (mk) { mocks.push({ ...mk, path, size: it.size || 0 }); continue; }
       const f = fileOf(name); if (!f) continue;
       const m = mod && mod.n === f.mod ? mod : (mod || { n: f.mod, name: "" });
       files.push({ module: m.name, mod: f.mod, code: f.code, sub: f.sub, topic: f.topic, type: f.type, path, size: it.size || 0 });
     }
   }
   files.sort((a, b) => a.mod - b.mod || a.sub - b.sub || a.type.localeCompare(b.type));
-  const index = { files, at: Date.now() };
+  mocks.sort((a, b) => a.paper.localeCompare(b.paper, undefined, { numeric: true }) || a.set.localeCompare(b.set));
+  const index = { files, mocks, at: Date.now() };
   cache = { at: Date.now(), index };
   return index;
 }
@@ -63,7 +72,7 @@ export async function smeIndex(env, fresh) {
 // one PDF, only if it's in the index (nothing else on the server can be asked for)
 export async function smePdf(env, path) {
   const idx = await smeIndex(env);
-  const f = idx.files.find(x => x.path === path);
+  const f = idx.files.find(x => x.path === path) || (idx.mocks || []).find(x => x.path === path);
   if (!f) return null;
   const r = await fetch(base(env) + f.path.split("/").map(encodeURIComponent).join("/"), { headers: headers(env) });
   if (!r.ok) throw new Error(`Your file server answered ${r.status}.`);

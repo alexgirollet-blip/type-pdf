@@ -310,8 +310,8 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .page .choice{position:absolute;z-index:4;margin:0;padding:0;border:0;background:transparent;cursor:pointer!important;border-radius:3px;display:grid;place-items:center;line-height:1;color:var(--ink);font-family:system-ui,sans-serif}
 .page .choice.oval:not(.inbox){border-radius:50%}
 .page .choice.ring{border-radius:50%}
-.page .choice.ring.on{box-shadow:inset 0 0 0 2.4px var(--ink),0 0 0 3px rgba(255,255,255,.55);background:transparent}
-.page .choice.ring.on:hover{box-shadow:inset 0 0 0 2.8px var(--ink)}
+.page .choice.ring.on{box-shadow:inset 0 0 0 3.2px #1c5fd9,0 0 0 1.5px rgba(255,255,255,.7);background:transparent}
+.page .choice.ring.on:hover{box-shadow:inset 0 0 0 3.6px #1c5fd9}
 .page .choice:hover{background:rgba(47,125,116,.12);box-shadow:0 0 0 1.5px rgba(47,125,116,.6)}
 .page .choice:focus-visible{outline:2px solid var(--accent-2);outline-offset:1px}
 .page .choice.box.on::after{content:"✓";font-weight:700;transform:translateY(-4%)}
