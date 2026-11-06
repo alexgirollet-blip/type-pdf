@@ -271,49 +271,78 @@ const Detect = (() => {
   }
 
   // ---- multiple choice without boxes: lettered options ("A. 6%", "B) 12%", a bold "C") ----
-  // a run A, B, C (, D …) in reading order, each letter starting its own piece of text, close together:
-  // the letter itself is what's clicked, and gets a ring drawn round it. strict: needs all of A–D with a dot or bracket
-  function letters(items, strict) {
+  // a run A, B, C (, D …) in reading order, each letter starting its own piece of text and lined up with the
+  // others (one under another, or along a row): the letter itself is what's clicked, and gets a ring round it.
+  // strict (other papers): needs all of A–D with a dot or bracket. sme (Save My Exams): a question's options may
+  // run onto the next page, so a run can stop before D (it ends the page) or start after A (it carries on)
+  function letters(items, strict, G, sme) {
     const OPT = /^\(?([A-F])(?:[.)]|\s*$)/;
     const cand = items.map(it => { const m = it.str.trim().match(OPT); return m ? { it, L: m[1], tight: /^\(?[A-F][.)]/.test(it.str.trim()) } : null; }).filter(Boolean);
+    // where the letter's ink actually is (text widths are only a guide): the first run of inked columns
     const glyph = c => {
       const it = c.it, t = it.str.replace(/^\s+/, ""), lead = it.str.length - t.length, n = Math.max(1, it.str.length), cw = (it.x1 - it.x) / n;
-      const k = t[0] === "(" ? 1 : 0, x = it.x + (lead + k) * cw, w = Math.max(it.fh * 0.55, Math.min(cw * 1.15, it.fh * 0.8));
-      return { x, x1: x + w, cy: it.base - it.fh * 0.36 };
+      const k = t[0] === "(" ? 1 : 0, gx = it.x + (lead + k) * cw, gw = Math.max(it.fh * 0.55, Math.min(cw * 1.15, it.fh * 0.8));
+      const est = { x: gx, x1: gx + gw, y0: it.base - it.fh * 0.72, y1: it.base };
+      if (!G) return est;
+      const { g, w, h } = G, ink = (x, y) => x >= 0 && y >= 0 && x < w && y < h && g[y * w + x] < DARK;
+      const ya = Math.round((it.base - it.fh * 0.85) * S), yb = Math.round((it.base + it.fh * 0.05) * S);
+      const col = x => { for (let y = ya; y <= yb; y++) if (ink(x, y)) return true; return false; };
+      let x = Math.round((gx - 1.5) * S); const xe = Math.round((gx + it.fh) * S);
+      while (x < xe && !col(x)) x++;
+      if (x >= xe) return est;
+      const xa = x; while (x < xe && col(x)) x++;
+      const xb = x - 1;
+      if ((xb - xa + 1) / S < it.fh * 0.3) return est;                 // a speck, not the letter
+      let y0 = yb, y1 = ya;
+      for (let y = ya; y <= yb; y++) for (let xx = xa; xx <= xb; xx++) if (ink(xx, y)) { if (y < y0) y0 = y; if (y > y1) y1 = y; break; }
+      return { x: xa / S, x1: (xb + 1) / S, y0: y0 / S, y1: (y1 + 1) / S };
     };
     const used = new Set(), out = [];
     const order = (a, b) => a.it.base - b.it.base || a.it.x - b.it.x;
     cand.sort(order);
-    for (const a of cand) {
-      if (a.L !== "A" || used.has(a)) continue;
+    const grow = a => {
       const run = [a];
-      for (let k = 1; k < 6; k++) {
+      for (let k = "ABCDEF".indexOf(a.L) + 1; k < 6; k++) {
         const prev = run[run.length - 1], want = "ABCDEF"[k];
         let best = null, bd = Infinity;
         for (const c of cand) {
           if (c.L !== want || used.has(c) || run.includes(c)) continue;
+          if (sme && !c.tight) continue;
           const dy = c.it.base - prev.it.base, dx = c.it.x - prev.it.x;
-          const same = Math.abs(dy) <= 2.5 && dx > 4 && dx < 320;                        // along a row
-          const below = dy > 2.5 && dy < 90 && Math.abs(c.it.x - a.it.x) < 260;           // down a column / the next row of a grid
+          const same = Math.abs(dy) <= 2.5 && dx > 4 && dx < 320;                                    // along a row
+          const below = dy > 2.5 && dy < (sme ? 220 : 120) && run.some(o => Math.abs(c.it.x - o.it.x) < 14);         // under one of the others
           if (!same && !below) continue;
-          const d = same ? dx : dy * 3 + Math.abs(c.it.x - a.it.x);
+          const d = same ? dx : dy * 3 + Math.abs(c.it.x - prev.it.x);
           if (d < bd) { bd = d; best = c; }
         }
         if (!best) break;
         run.push(best);
       }
-      if (run.length < 3) continue;
-      if (strict && (run.length < 4 || !run.every(c => c.tight))) continue;
+      return run;
+    };
+    const take = run => {
       run.forEach(c => used.add(c));
       out.push(run.map(c => {
-        const g = glyph(c), r = Math.max(c.it.fh * 0.72, (g.x1 - g.x) * 0.85);
+        const g = glyph(c), cx = (g.x + g.x1) / 2, cy = (g.y0 + g.y1) / 2, r = Math.max(g.x1 - g.x, g.y1 - g.y0) / 2 + Math.max(2.5, c.it.fh * 0.28);
         // what the option says: the rest of its line, up to the next option on the same row
         const nxt = run.find(o => o !== c && Math.abs(o.it.base - c.it.base) <= 2.5 && o.it.x > c.it.x);
-        const txt = items.filter(it => Math.abs(it.base - c.it.base) <= 2.5 && it.x >= c.it.x - 1 && (!nxt || it.x < nxt.it.x - 1)).sort((p, q) => p.x - q.x)
+        const txt = items.filter(it => Math.abs(it.base - c.it.base) <= 4 && it.x >= c.it.x - 1 && (!nxt || it.x < nxt.it.x - 1)).sort((p, q) => p.x - q.x)
           .map(it => it.str).join(" ").replace(/^\s*\(?[A-F][.)]?\s*/, "").replace(/\s+/g, " ").trim();
-        const cx = (g.x + g.x1) / 2;
-        return { x0: cx - r, x1: cx + r, y0: g.cy - r, y1: g.cy + r, opt: c.L + (txt ? " " + txt.slice(0, 60) : "") };
+        return { x0: cx - r, x1: cx + r, y0: cy - r, y1: cy + r, L: c.L, opt: c.L + (txt ? " " + txt.slice(0, 60) : "") };
       }));
+    };
+    for (const a of cand) {
+      if (a.L !== "A" || used.has(a) || (sme && !a.tight)) continue;
+      const run = grow(a);
+      if (strict && (run.length < 4 || !run.every(c => c.tight))) continue;
+      if (!strict && run.length < (sme ? 2 : 3)) continue;
+      take(run);
+    }
+    // Save My Exams: the end of a question whose options started on the page before (B., C., D. at the top),
+    // and an "A." alone at the bottom of a page whose other options are over the page
+    if (sme) {
+      for (const a of cand) if (!used.has(a) && a.tight && a.L !== "A") { const run = grow(a); if (run.length >= 1) take(run); }
+      for (const a of cand) if (!used.has(a) && a.tight && a.L === "A" && !cand.some(c => c !== a && c.it.base > a.it.base + 2 && c.L === "A" && c.tight)) take([a]);
     }
     return out;
   }
@@ -370,8 +399,11 @@ const Detect = (() => {
       const onText = items.some(it => Math.abs(it.base - l.y) < 2.6 && !/\.{4,}|_{4,}|…{2,}/.test(it.str) &&
         Math.min(it.x1, l.x1) - Math.max(it.x, l.x0) > 0.3 * (l.x1 - l.x0));
       if (onText) return false;
-      const band = inkPt(l.x0 + 2, l.y - 11, l.x1 - 2, l.y - 2.5);
-      const area = (l.x1 - l.x0 - 4) * 8.5 * S * S;
+      // Save My Exams: a "(2 marks)" sitting at the end of the line, just above it, isn't something printed over the line
+      let bx1 = l.x1;
+      if (opts.sme) { const mk = items.filter(it => it.base > l.y - 14 && it.base < l.y + 1 && it.x > l.x0 + 0.5 * (l.x1 - l.x0) && /^\(?\d*\s*marks?\)?$|^\(\d+$/i.test(it.str.trim())); if (mk.length) bx1 = Math.min(l.x1, Math.min(...mk.map(it => it.x)) - 3); }
+      const band = inkPt(l.x0 + 2, l.y - 11, bx1 - 2, l.y - 2.5);
+      const area = (bx1 - l.x0 - 4) * 8.5 * S * S;
       return band / area < 0.012;
     });
 
@@ -397,7 +429,10 @@ const Detect = (() => {
         // nothing printed between the two rules apart from the rules themselves
         // (a "(2 marks)" or "[3]" printed beside the lines doesn't count: it belongs to them)
         const btw = items.filter(it => it.base > last.y + 3 && it.base < l.y - 1 && it.x < Math.max(l.x1, last.x1) && it.x1 > Math.min(l.x0, last.x0) && !/^\.*$/.test(it.str.replace(/\s/g, "")));
-        const between = btw.length > 0 && !/^[\s.]*([(\[]?\s*\d+\s*(marks?)?\s*[)\]]?[\s.]*)+$/i.test(btw.map(it => it.str).join(" "));
+        // Save My Exams prints "(3 marks)" at the end of the last line, beyond where that line stops: anything out past
+        // the shorter line's end doesn't count either
+        const btw2 = opts.sme ? btw.filter(it => it.x < Math.min(l.x1, last.x1) - 4) : btw;
+        const between = btw2.length > 0 && !/^[\s.]*([(\[]?\s*\d+\s*(marks?)?\s*[)\]]?[\s.]*)+$/i.test(btw2.map(it => it.str).join(" "));
         if (okSpacing && okX && !between) { g.lines.push(l); if (g.lines.length === 2) g.sp = dy; continue; }
       }
       groups.push({ lines: [l], sp: 0 });
@@ -461,13 +496,13 @@ const Detect = (() => {
       regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: c.shape, opt: c.opt || "", ...(c.mark ? { mark: c.mark } : {}) });
     }
     // lettered options with nothing to fill in: on an MCQ page always; elsewhere only a clear A. B. C. D. run with no boxes
-    if (opts.mcq || !ch.length) {
+    if (opts.mcq || opts.sme || !ch.length) {
       let gi = 0;
-      for (const run of letters(items, !opts.mcq)) {
+      for (const run of letters(items, !(opts.mcq || opts.sme), G, !!opts.sme)) {
         const grp = "L" + Math.round(run[0].y0) + "_" + (gi++);
         for (const c of run) {
           if (regions.some(r => r.kind === "choice" && r.x0 < c.x1 && r.x1 > c.x0 && r.y0 < c.y1 && r.y1 > c.y0)) continue;
-          regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: "ring", grp, opt: c.opt });
+          regions.push({ kind: "choice", x0: +c.x0.toFixed(1), y0: +c.y0.toFixed(1), x1: +c.x1.toFixed(1), y1: +c.y1.toFixed(1), shape: "ring", grp, L: c.L, opt: c.opt });
         }
       }
     }

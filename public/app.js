@@ -188,6 +188,7 @@ async function openDoc(d, fresh = false) {
     emit("page:" + i);
   }
   if (doc.pages.some(P => P && P.cv !== CV)) await findChoices().catch(e => console.warn("choices", e));
+  linkChoicesAcrossPages();
   if (doc.pages.some(needsQuestions)) { busy(true, "Finding the questions…"); await findQuestions().catch(e => console.warn("questions", e)); }
   if (!doc.font) { const name = await detectFont().catch(() => ""); doc.font = { key: matchFont(name) || FONT_DEFAULT, auto: true, detected: name || "" }; emit("font"); }
   await applyFont(false); applyAnsStyle();
@@ -260,7 +261,7 @@ $("#fontSel").addEventListener("change", e => {
 });
 
 // version of the answer-space finder: pages found by an older one are found again when nothing is on them yet
-const DV = 3;
+const DV = 4;
 // ---- Save My Exams papers: what each page is. A paper built by Topic practice says so in its metadata
 // ({smx, pages: [{role, code, topic, type, sec}]}); a Save My Exams PDF opened on its own is read from its text:
 // the cover ("Multiple Choice Questions" / "Structured Questions" / "Exam Questions") and the section headings.
@@ -275,7 +276,7 @@ function smxPre(i) {
 }
 function smxPage(i) { return doc && doc.smx && doc.smx.pages && doc.smx.pages[i] || null; }
 async function smxInfo() {
-  if (doc.smx && doc.smx.v === 1) return;                                // read already (pages: null when it isn't one)
+  if (doc.smx && doc.smx.v === 2) return;                                // read already (pages: null when it isn't one)
   let pages = null, est = null;
   try {
     const m = await pdf.getMetadata(), sub = m && m.info && m.info.Subject;
@@ -284,12 +285,16 @@ async function smxInfo() {
   if (!pages) {
     const txt = []; for (let i = 0; i < pdf.numPages; i++) { try { txt.push((await (await pdf.getPage(i + 1)).getTextContent()).items.map(t => t.str).join(" ").replace(/\s+/g, " ")); } catch (e) { txt.push(""); } }
     if (txt.some(t => /save\s*my\s*exams/i.test(t))) {
-      pages = []; let type = "", sec = null;
-      txt.forEach(t => {
-        const cover = /scan here to return|total marks/i.test(t) && /(multiple choice|structured|exam) questions/i.test(t) && t.length < 1600;
+      pages = []; let type = "", sec = null, ms = false;
+      txt.forEach((t, i) => {
+        // a mock exam's mark scheme comes after its questions: nothing to answer there
+        if (ms || (i > 0 && /mark\s*scheme/i.test(t.slice(0, 260)))) { ms = true; pages.push({ role: "ms" }); return; }
+        const mock = /mock exam|paper\s*\d+\s*\(set/i.test(t);
+        const cover = /scan here to|total marks/i.test(t) && (mock || /(multiple choice|structured|exam) questions/i.test(t)) && t.length < 2500;
         if (cover) {
-          type = /multiple choice/i.test(t) ? "MCQ" : /structured/i.test(t) ? "Structured" : "Exam questions"; sec = null; pages.push({ role: "cover", type });
-          const tm = t.match(/total marks\s*\/?\s*(\d+)/i); if (tm && !est) est = { marks: +tm[1], mins: Math.max(5, Math.round(+tm[1] * 1.2 / 5) * 5) };
+          type = mock ? "Mock" : /multiple choice/i.test(t) ? "MCQ" : /structured/i.test(t) ? "Structured" : "Exam questions"; sec = null; pages.push({ role: "cover", type });
+          const tm = t.match(/total marks\s*\/?\s*(\d+)/i), hm = t.match(/time:?\s*(\d+)\s*hours?\s*(?:(\d+)\s*min)?/i);
+          if (!est && (tm || hm)) est = { marks: tm ? +tm[1] : 0, mins: hm ? +hm[1] * 60 + (+hm[2] || 0) : Math.max(5, Math.round(+tm[1] * 1.2 / 5) * 5) };
           return;
         }
         const h = t.match(/\b(Very Hard|Easy|Medium|Hard)\s+Questions?\b/i);
@@ -298,7 +303,7 @@ async function smxInfo() {
       });
     }
   }
-  doc.smx = { v: 1, pages, est };
+  doc.smx = { v: 2, pages, est };
   // the suggested time goes on the timer, ready to start (once: a timer you reset stays reset)
   if (pages && est && est.mins && !doc.timer && !doc.smx.timed) { doc.timer = { total: est.mins * 60, up: false, acc: 0, run: false, since: 0 }; doc.smx.timed = true; }
 }
@@ -316,11 +321,11 @@ async function detectPage(i, prev) {
   await page.render({ canvasContext: ctx, viewport: vp2 }).promise;
   let tc = null; try { tc = await page.getTextContent(); } catch (e) {}
   const role = smxPage(i);
-  const res = Detect.page(c, vp, tc, { mcq: !!role && /mcq/i.test(role.type || ""), none: !!role && (role.role === "cover" || role.role === "contents") });
+  const res = Detect.page(c, vp, tc, { sme: !!role, mcq: !!role && /mcq/i.test(role.type || ""), none: !!role && /^(cover|contents|ms)$/.test(role.role) });
   // a scanned / image-only page has no text to read question numbers from: read the left margin instead
   if (!res.hasText) { try { res.items = await ocrMargin(c, vp); res.ocr = true; } catch (e) { console.warn("OCR failed", e); } }
   c.width = c.height = 0;
-  res.regions.forEach((r, k) => r.id = `${i}:${k}`);
+  res.regions.forEach((r, k) => { r.id = `${i}:${k}`; if (r.grp) r.grp = i + ":" + r.grp; });
   return { w: vp.width, h: vp.height, rot: page.rotate || 0, regions: res.regions, items: res.items, hasText: res.hasText, ocr: !!res.ocr, cv: CV, dv: DV, gaps: (prev && prev.gaps) || {} };
 }
 // ---- reading question numbers off image-only papers (Tesseract, bundled and only loaded when needed) ----
@@ -628,7 +633,7 @@ async function findQuestions() {
     if (P.hasText && pdf) { try { items = await textWithFonts(i); } catch (e) { console.warn(e); } }
     const role = smxPage(i);
     // a cover or contents page has no questions; a paper of several topics numbers each topic's questions afresh
-    pages.push({ w: P.w, h: P.h, items: role && (role.role === "cover" || role.role === "contents") ? [] : items, ...smxPre(i) });
+    pages.push({ w: P.w, h: P.h, items: role && /^(cover|contents|ms)$/.test(role.role) ? [] : items, ...smxPre(i) });
   }
   const found = Questions.detect(pages);
   doc.pages.forEach((P, p) => { if (needsQuestions(P)) { P.qs = found[p] || []; P.qv = QV; if (canEdit()) emit("page:" + p); } });
@@ -794,10 +799,21 @@ function toggleChoice(p, r) {
   if (doc.shared && doc.shared.role === "view") return;
   if (doc.text[r.id]) delete doc.text[r.id];
   else {
-    if (r.grp) for (const o of doc.pages[p].regions) if (o !== r && o.kind === "choice" && o.grp === r.grp && doc.text[o.id]) { delete doc.text[o.id]; paintChoice(o); emit("text:" + o.id); }
+    if (r.grp) for (const P of doc.pages) for (const o of (P && P.regions) || []) if (o !== r && o.kind === "choice" && o.grp === r.grp && doc.text[o.id]) { delete doc.text[o.id]; paintChoice(o); emit("text:" + o.id); }
     doc.text[r.id] = "x";
   }
   paintChoice(r); updateCount(); scheduleSave(); emit("text:" + r.id);
+}
+// a question whose lettered options run onto the next page ("A." at the bottom, "B. C. D." over the page) is one
+// question: the two runs share a group, so choosing one un-chooses the rest
+function linkChoicesAcrossPages() {
+  const runs = p => { const m = new Map(); for (const r of (doc.pages[p] && doc.pages[p].regions) || []) if (r.kind === "choice" && r.shape === "ring" && r.grp && r.L) { if (!m.has(r.grp)) m.set(r.grp, []); m.get(r.grp).push(r); } return [...m.values()].map(a => a.sort((x, y) => x.L.localeCompare(y.L))).sort((a, b) => a[0].y0 - b[0].y0); };
+  for (let p = 0; p + 1 < doc.pages.length; p++) {
+    const A = runs(p), B = runs(p + 1); if (!A.length || !B.length) continue;
+    const last = A[A.length - 1], first = B[0], end = last[last.length - 1].L, start = first[0].L;
+    if (start === "A" || start.charCodeAt(0) !== end.charCodeAt(0) + 1) continue;
+    for (const r of first) r.grp = last[0].grp;
+  }
 }
 // the part of a choice that's filled in: the capsule inside AQA's answer box, or the oval itself (slightly inset)
 function choiceMark(r) { return Array.isArray(r.mark) && r.mark.length === 4 ? r.mark : [0.16, 0.16, 0.84, 0.84]; }
@@ -1755,7 +1771,7 @@ function answerUnits() {
   doc.pages.forEach((P, p) => { if (!P) return; for (const r of P.regions) {
     if (r.kind !== "choice") { units.push({ ids: [r.id] }); continue; }
     idx ||= labelIndex();
-    const key = r.grp ? "g" + p + "|" + r.grp : labelAt(idx, p, r.y0 + 2) + "|" + (idx.length ? "" : p);
+    const key = r.grp ? "g|" + (/^\d+:/.test(r.grp) ? "" : p + "|") + r.grp : labelAt(idx, p, r.y0 + 2) + "|" + (idx.length ? "" : p);
     if (!groups.has(key)) { const u = { ids: [], choice: true }; groups.set(key, u); units.push(u); }
     groups.get(key).ids.push(r.id);
   } });
@@ -2014,7 +2030,7 @@ async function exportPDF() {
         const raw = doc.text[r.id]; if (!raw || !raw.trim()) continue;
         if (r.kind === "choice") {                                       // a chosen box gets a tick, a chosen oval is filled in
           const R = regionRect(p, r), w = R.x1 - R.x0, h = R.y1 - R.y0;
-          if (r.shape === "ring") { page.drawEllipse({ x: tx((R.x0 + R.x1) / 2), y: ty((R.y0 + R.y1) / 2), xScale: w / 2, yScale: h / 2, borderColor: ansCol, borderWidth: Math.max(1.2, h * 0.09) }); continue; }
+          if (r.shape === "ring") { page.drawEllipse({ x: tx((R.x0 + R.x1) / 2), y: ty((R.y0 + R.y1) / 2), xScale: w / 2 - 0.8, yScale: h / 2 - 0.8, borderColor: rgb(0.11, 0.37, 0.85), borderWidth: Math.max(1.8, h * 0.11) }); continue; }
           if (r.shape === "oval") { const m = choiceMark(r), mx0 = R.x0 + w * m[0], mx1 = R.x0 + w * m[2], my0 = R.y0 + h * m[1], my1 = R.y0 + h * m[3]; page.drawEllipse({ x: tx((mx0 + mx1) / 2), y: ty((my0 + my1) / 2), xScale: (mx1 - mx0) / 2, yScale: (my1 - my0) / 2, color: ansCol }); }
           else page.drawSvgPath(`M${R.x0 + w * 0.2} ${R.y0 + h * 0.55} L${R.x0 + w * 0.42} ${R.y0 + h * 0.8} L${R.x0 + w * 0.85} ${R.y0 + h * 0.18}`, { x: tx(0), y: ty(0), borderColor: ansCol, borderWidth: Math.max(1, h * 0.12), borderLineCap: LineCapStyle.Round });
           continue;

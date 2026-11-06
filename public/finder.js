@@ -15,16 +15,70 @@
     if (F.subjects || !(window.Sync && Sync.user)) return;
     try {
       const j = await apiGet("/api/pmt/subjects"); F.subjects = j.subjects || [];
-      const s = el("pfSubj"); s.innerHTML = `<option value="">Subject…</option>` + F.subjects.map(x => `<option value="${esc(x.href)}">${esc(x.name.replace(/^a[- ]level\s*/i, ""))}</option>`).join("");
+      const s = el("pfSubj"); s.innerHTML = `<option value="">Subject…</option>` + F.subjects.map(x => `<option value="${esc(x.href)}">${esc(x.name.replace(/^a[- ]level\s*/i, ""))}</option>`
+        + (/^(a[- ]level\s*)?physics$/i.test(x.name.trim()) ? `<option value="${MOCKS}">Physics mock papers (Save My Exams)</option>` : "")).join("");
+      if (!F.subjects.some(x => /^(a[- ]level\s*)?physics$/i.test(x.name.trim()))) s.insertAdjacentHTML("beforeend", `<option value="${MOCKS}">Physics mock papers (Save My Exams)</option>`);
       if (F.subj) s.value = F.subj;
-    } catch (e) { note("Couldn't load the subjects: " + e.message, true); }
+    } catch (e) {
+      note("Couldn't load the subjects: " + e.message, true);
+      el("pfSubj").insertAdjacentHTML("beforeend", `<option value="${MOCKS}">Physics mock papers (Save My Exams)</option>`);
+    }
   }
   // the account's API helper (adds the sign-in token); falls back to a plain fetch
   const apiGet = path => window.Sync && Sync.apiGet ? Sync.apiGet(path) : call(path);
 
+  // ---- Save My Exams mock papers, from the same library as topic practice (src/sme.js). Each PDF has its mark
+  // scheme at the end: "Paper" opens the question pages, "Mark scheme" the rest ----
+  const MOCKS = "smx:mocks";
+  async function mocks(q) {
+    F.q = q; F.subj = MOCKS; note("Reading your mock papers…"); el("pfList").innerHTML = ""; el("pfTags").innerHTML = "";
+    try {
+      const j = await apiGet("/api/sme/index");
+      if (!j.setup) { note("The Save My Exams library isn't set up on this site (see Topic practice in the README).", true); return; }
+      const results = [];
+      for (const m of j.mocks || []) for (const kind of ["Question paper", "Mark scheme"])
+        results.push({ board: "Save My Exams", level: "A level", paper: "Mock paper " + m.paper, series: m.set ? "Set " + m.set : "", year: "", kind, title: `Mock Paper ${m.paper}${m.set ? " · Set " + m.set : ""}`, smx: m, name: `SMX Mock Paper ${m.paper}${m.set ? " Set " + m.set : ""}${kind === "Mark scheme" ? " – Mark scheme" : ""}` });
+      const words = q.toLowerCase().split(/\s+/).filter(w => w && !/^(physics|mock|mocks|papers?|sme|smx|save|my|exams?)$/.test(w));
+      F.res = { subject: "Physics mock papers", results: results.filter(x => words.every(w => (x.title + " " + x.kind + " set" + (x.smx.set || "")).toLowerCase().replace(/\s+/g, " ").includes(w) || ("set" + x.smx.set).toLowerCase() === w)) };
+      F.sel = {}; render(); savePf();
+      if (!results.length) note("No mock papers found. They should be named like “Mock Paper 1 - Set A.pdf”.");
+    } catch (e) { note(e.message, true); }
+  }
+  // the question pages (or the mark scheme) of one mock, with what each page is, then open it
+  async function openMock(x) {
+    try {
+      busy(true, `Getting ${x.title}…`, 0.1);
+      const res = await Sync.api("/api/sme/pdf?path=" + encodeURIComponent(x.smx.path));
+      if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || `couldn't get it (${res.status})`); }
+      const bytes = await res.arrayBuffer();
+      const d = await pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)), isEvalSupported: false }).promise;
+      const txt = []; for (let i = 0; i < d.numPages; i++) txt.push((await (await d.getPage(i + 1)).getTextContent()).items.map(t => t.str).join(" ").replace(/\s+/g, " "));
+      d.destroy();
+      // the mark scheme starts on the first page (after the cover) whose heading says so
+      let ms = txt.findIndex((t, i) => i > 0 && /mark\s*scheme|^\s*(answers|solutions)\b/i.test(t.slice(0, 260)));
+      if (ms < 0) ms = txt.length;
+      const isMs = x.kind === "Mark scheme";
+      if (isMs && ms >= txt.length) { busy(false); toast("Couldn't find where the mark scheme starts in this paper, so the whole PDF is opened.", 5000); }
+      const keep = isMs ? (ms < txt.length ? range(ms, txt.length) : range(0, txt.length)) : range(0, ms);
+      const cover = t => /scan here|total marks/i.test(t) && t.length < 2500;
+      const tm = (txt[0] || "").match(/time:?\s*(\d+)\s*hours?\s*(?:(\d+)\s*min)?/i), mk = (txt[0] || "").match(/\/\s*(\d{2,3})\b/);
+      const mins = tm ? +tm[1] * 60 + (+tm[2] || 0) : mk ? Math.round(+mk[1] * 1.2 / 5) * 5 : 0;
+      const pages = keep.map(i => isMs ? { role: "ms" } : i === 0 && cover(txt[0]) ? { role: "cover", type: "Mock" } : { role: "q", type: "Mock" });
+      const src = await PDFLib.PDFDocument.load(bytes, { ignoreEncryption: true }), out = await PDFLib.PDFDocument.create();
+      for (const pg of await out.copyPages(src, keep)) out.addPage(pg);
+      out.setTitle(x.name); out.setCreator("TypePDF");
+      out.setSubject(JSON.stringify({ smx: 1, mock: true, pages, ...(!isMs && mins ? { est: { marks: mk ? +mk[1] : 0, mins } } : {}) }));
+      const b = await out.save();
+      busy(false);
+      await openFile(new File([b], x.name.replace(/[\\/:*?"<>|]+/g, " ") + ".pdf", { type: "application/pdf" }));
+    } catch (e) { busy(false); toast("Couldn't open the mock: " + (e.message || e), 6000); }
+  }
+  const range = (a, b) => Array.from({ length: Math.max(0, b - a) }, (_, i) => a + i);
+
   async function search() {
     if (!(window.Sync && Sync.user)) { note("Sign in to use the past paper finder (papers are fetched through your account)."); return; }
     const q = el("pfQ").value.trim(), subj = el("pfSubj").value;
+    if (subj === MOCKS || /\bmocks?\b/i.test(q) && /physics|sme|save my exams/i.test(q)) { el("pfSubj").value = MOCKS; return mocks(subj === MOCKS ? q : ""); }
     if (!q && !subj) { note("Pick a subject or type a search."); return; }
     F.q = q; F.subj = subj; F.loading = true; note("Looking on Physics & Maths Tutor…"); el("pfList").innerHTML = ""; el("pfTags").innerHTML = "";
     try {
@@ -73,15 +127,16 @@
     // results
     const list = r.results.filter(x => matches(x));
     const by = { new: (a, b) => (+b.year || 0) - (+a.year || 0), old: (a, b) => (+a.year || 9999) - (+b.year || 9999), paper: (a, b) => (a.board + a.paper).localeCompare(b.board + b.paper, undefined, { numeric: true }), kind: (a, b) => a.kind.localeCompare(b.kind) };
-    const tie = (a, b) => (a.board + a.paper + a.series + a.kind).localeCompare(b.board + b.paper + b.series + b.kind, undefined, { numeric: true });
+    const kq = k => /question/i.test(k) ? "0" : "1" + k;                // question papers before their mark schemes
+    const tie = (a, b) => (a.board + a.paper + a.series + kq(a.kind)).localeCompare(b.board + b.paper + b.series + kq(b.kind), undefined, { numeric: true });
     list.sort((a, b) => by[F.sort](a, b) || tie(a, b));
     const ul = el("pfList"); ul.innerHTML = "";
     for (const x of list.slice(0, 120)) {
       const li = document.createElement("li");
       const head = [x.board, [x.level === "AS" ? "AS" : "", x.paper].filter(Boolean).join(" ") || (x.level === "AS" ? "AS" : ""), [x.series, x.year].filter(Boolean).join(" ")].filter(Boolean).join(" · ") || x.title;
       li.innerHTML = `<div class="pfinfo"><b>${esc(head)}</b><span class="pfkind k-${esc(x.kind.split(" ")[0].toLowerCase())}">${esc(x.kind)}</span><small>${esc(r.subject)} · ${esc(x.title)}</small></div>
-        <a class="pfsrc" href="${esc(x.url)}" target="_blank" rel="noopener" title="Open on Physics &amp; Maths Tutor">PMT ↗</a><button type="button" class="pfopen">Add &amp; open</button>`;
-      li.querySelector(".pfopen").onclick = () => openLink(x.url, x.name);
+        ${x.smx ? "" : `<a class="pfsrc" href="${esc(x.url)}" target="_blank" rel="noopener" title="Open on Physics &amp; Maths Tutor">PMT ↗</a>`}<button type="button" class="pfopen">Add &amp; open</button>`;
+      li.querySelector(".pfopen").onclick = () => x.smx ? openMock(x) : openLink(x.url, x.name);
       ul.appendChild(li);
     }
     note(list.length ? `${list.length} paper${list.length === 1 ? "" : "s"}${list.length > 120 ? " (showing 120)" : ""} · ${r.subject}${r.partial ? " · some pages weren't looked at; add a board or paper to the search" : ""}` : (r.results.length ? "Nothing matches those tags." : el("pfNote").textContent));
