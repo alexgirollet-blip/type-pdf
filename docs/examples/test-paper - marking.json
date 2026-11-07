@@ -7,16 +7,18 @@
   "marker": "Claude",
   "markedAt": "2026-11-07T18:05:00.000Z",
   "summary": {
-    "score": 6,
-    "outOf": 10,
-    "grade": "B",
+    "score": 7,
+    "outOf": 14,
+    "grade": "C",
     "gradeNote": "estimated from June 2025 boundaries",
-    "comment": "Good use of F = ma. Ray diagrams need the normal drawn in. Explain the forces changing, not just the end state.",
+    "comment": "Good use of F = ma. Ray diagrams need the normal drawn in. Learn which quantities are vectors, and that NOT (A AND B) is one NAND gate.",
     "perQuestion": [
       { "q": "1", "awarded": 3, "max": 4 },
       { "q": "2", "awarded": 1, "max": 3 },
-      { "q": "3", "awarded": 1, "max": 1 },
-      { "q": "4", "awarded": 1, "max": 2 }
+      { "q": "3", "awarded": 0, "max": 1 },
+      { "q": "4", "awarded": 1, "max": 2 },
+      { "q": "5", "awarded": 1, "max": 2 },
+      { "q": "6", "awarded": 1, "max": 2 }
     ]
   },
   "parts": [
@@ -47,8 +49,9 @@
     },
     { "id": "2", "q": "2", "awarded": 0, "max": 0, "verdict": "excluded", "comment": "Skipped on purpose." },
     {
-      "id": "3", "q": "3", "awarded": 1, "max": 1, "verdict": "correct",
-      "annotations": [ { "type": "tick", "anchor": { "kind": "part" } } ]
+      "id": "3", "q": "3", "awarded": 0, "max": 1, "verdict": "wrong",
+      "correctOptions": ["C"],
+      "working": ["A vector has size and direction.", "Speed has only size: it's a scalar.", "Velocity is speed in a given direction, so C."]
     },
     {
       "id": "4", "q": "4", "awarded": 1, "max": 2, "verdict": "partial",
@@ -58,6 +61,21 @@
         { "type": "note", "anchor": { "kind": "text", "match": "speeds up" }, "text": "why does it stop speeding up?" },
         { "type": "cross", "anchor": { "kind": "text", "match": "not in the answer" } },
         { "type": "note", "anchor": { "kind": "page", "page": 3, "x": 0.5, "y": 0.85 }, "text": "Nice clear answers overall." }
+      ]
+    },
+    { "id": "5-gap1", "q": "5", "verdict": "correct", "annotations": [ { "type": "tick", "anchor": { "kind": "part" } } ] },
+    { "id": "5-gap2", "q": "5", "verdict": "correct", "annotations": [ { "type": "tick", "anchor": { "kind": "part" } } ] },
+    { "id": "5-gap3", "q": "5", "verdict": "wrong", "annotations": [ { "type": "cross", "anchor": { "kind": "part" }, "text": "0" } ] },
+    { "id": "5-gap4", "q": "5", "verdict": "correct", "annotations": [ { "type": "tick", "anchor": { "kind": "part" } } ] },
+    {
+      "id": "6", "q": "6", "awarded": 1, "max": 2, "verdict": "partial",
+      "comment": "You drew an AND gate: the output needs inverting.",
+      "working": ["NOT (A AND B) inverts the AND output.", "An AND gate followed by NOT is one NAND gate: AND shape with a small circle on the output."],
+      "annotations": [
+        { "type": "circle", "anchor": { "kind": "workings", "x": 0.29, "y": 0.24, "w": 0.33, "h": 0.34 } },
+        { "type": "arrow", "anchor": { "kind": "workings", "x": 0.6, "y": 0.41 }, "from": { "x": 0.7, "y": 0.2 }, "text": "needs a NOT here" },
+        { "type": "symbol", "symbol": "nand", "anchor": { "kind": "workings", "x": 0.68, "y": 0.62, "w": 0.18, "h": 0.2 } },
+        { "type": "sketch", "path": "M0 0.5 Q0.125 0 0.25 0.5 Q0.375 1 0.5 0.5 Q0.625 0 0.75 0.5 Q0.875 1 1 0.5", "anchor": { "kind": "workings", "x": 0.33, "y": 0.6, "w": 0.22, "h": 0.04 } }
       ]
     },
     { "id": "9z", "q": "9", "awarded": 0, "max": 1, "verdict": "blank" }

@@ -29,8 +29,12 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
     set(L(1, 0), "Force is equal to mass times acceleration, F = ma");
     set(L(1, 1), "F = 2.0 x 3.0 = 6 N");
     set(L(2, 0), "The skydiver speeds up until air resistance equals weight.");
-    toggleChoice(2, doc.pages[2].regions.find(r => r.kind === "choice" && r.L === "C"));
+    toggleChoice(2, doc.pages[2].regions.find(r => r.kind === "choice" && r.L === "B"));          // the wrong one
     doc.strokes[1] = [{ id: "s1", t: "pen", c: "#111418", w: 1.3, pts: [[230, 360], [300, 420], [370, 450], [420, 520]] }]; layoutPage(1);
+    // page 4: the truth table (one wrong) and a circuit drawn by hand (an AND gate, not the NAND asked for)
+    doc.pages[3].regions.filter(r => r.kind === "cell").forEach((r, k) => set(r, ["0", "0", "1", "1"][k]));
+    doc.strokes[3] = [[[180, 400], [240, 400]], [[180, 440], [240, 440]], [[240, 380], [240, 460], [300, 420], [240, 380]], [[300, 420], [360, 420]]].map((pts, k) => ({ id: "g" + k, t: "pen", c: "#111418", w: 1.3, pts }));
+    layoutPage(3);
   });
   await pg.waitForTimeout(400);
 
@@ -40,7 +44,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(ex.paperId && ex.exported, "has paperId and exported");
   const ids = ex.answers.map(a => a.id);
   ok(new Set(ids).size === ids.length, "ids are unique", ids);
-  ok(["1a", "1b", "2-drawn", "3", "4"].every(i => ids.includes(i)), "ids are the expected ones", ids);
+  ok(["1a", "1b", "2-drawn", "3", "4", "5-gap1", "5-gap2", "5-gap3", "5-gap4", "6"].every(i => ids.includes(i)), "ids are the expected ones", ids);
   const drawn = ex.answers.find(a => a.id === "2-drawn");
   ok(drawn && drawn.workings && drawn.workings.crops[0].page === 2 && drawn.workings.crops[0].y1 > drawn.workings.crops[0].y0, "handwritten part records its crop rectangle", drawn && drawn.workings);
 
@@ -55,7 +59,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(st.warn.some(w => /9z/.test(w)), "unknown id is reported", st.warn);
   ok(st.warn.some(w => /not in the answer/.test(w)), "text that isn't there is reported (and placed beside the part)", st.warn);
   ok(st.warn.some(w => /export made/.test(w)), "an older export is warned about", st.warn);
-  ok(st.svg.join() === "0,1,2", "a marks layer on every page", st.svg);
+  ok(st.svg.join() === "0,1,2,3", "a marks layer on every page", st.svg);
 
   // where each mark is
   const g = await pg.evaluate(() => {
@@ -85,12 +89,50 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(Math.abs(wy + 4.7 - want) < 3, "workings mark is at its spot on the drawing (55% down the crop)", { wy, want });
   const br = S(`a:${pi("2-drawn")}:1`)[0];
   ok(br && br.k === "path", "bracket (workings anchor)", br);
-  const pt3 = S(`a:${pi("3")}:0`)[0];
-  ok(P(`a:${pi("3")}:0`) === 2 && pt3 && pt3.k === "path", "tick (part anchor) on page 3", pt3);
+  console.log("Multiple choice: the right answer and the working");
+  const optB = await pg.evaluate(() => regionRect(2, doc.pages[2].regions.find(r => r.L === "B"))), optC = await pg.evaluate(() => regionRect(2, doc.pages[2].regions.find(r => r.L === "C")));
+  const xB = S(`o:${pi("3")}:B`)[0];
+  ok(P(`o:${pi("3")}:B`) === 2 && xB && xB.stroke === "#cc1f1a" && Math.abs(+xB.d.split(" ")[1] + 4.7 - (optB.y0 + optB.y1) / 2) < 3, "your wrong choice (B) is crossed in red", xB);
+  const rC = S(`o:${pi("3")}:C`);
+  ok(rC.some(s => s.k === "ell" && s.stroke === "#17853b" && Math.abs(s.cy - (optC.y0 + optC.y1) / 2) < 1) && rC.some(s => s.k === "path" && s.stroke === "#17853b"), "the right one (C) is circled and ticked in green", rC);
+  const wk3 = S(`w:${pi("3")}`);
+  ok(wk3.some(s => s.k === "text" && /size and direction/.test(s.s)) && wk3.some(s => s.k === "rect"), "the working is written out", wk3.filter(s => s.k === "text").map(s => s.s));
+  const q4top = await pg.evaluate(() => { const e = labelIndex().find(e => e.label === "4"); return disp(2, e.y); });
+  const wbox = wk3.find(s => s.k === "rect");
+  ok(wbox && wbox.y + wbox.h < q4top, "and stays with question 3 (not under question 4)", { wbox, q4top });
   const pgNoteAt = S(`a:${pi("4")}:3`);
   ok(P(`a:${pi("4")}:3`) === 2 && pgNoteAt.some(s => s.k === "text" && /Nice clear/.test(s.s) && Math.abs(s.y - 0.85 * g.H2) < 3), "note (page anchor) written at its spot on page 3", pgNoteAt);
   const fb = S(`a:${pi("4")}:2`)[0];
   ok(fb && fb.k === "path", "unfound text falls back to the part", fb);
+  console.log("Tables, gaps and drawings (logic gates)");
+  const gap = await pg.evaluate(() => doc.pages[3].regions.filter(r => r.kind === "cell").map(r => regionRect(3, r)));
+  const t1 = S(`a:${pi("5-gap1")}:0`)[0];
+  ok(P(`a:${pi("5-gap1")}:0`) === 3 && t1 && t1.stroke === "#17853b" && +t1.d.slice(1).split(" ")[0] > gap[0].x1, "a gap's tick goes just after it, not over the answer", { t1, cell: gap[0] });
+  const x3 = S(`a:${pi("5-gap3")}:0`);
+  ok(x3.some(s => s.k === "path" && s.stroke === "#cc1f1a") && x3.some(s => s.k === "text" && s.s === "0"), "the wrong gap is crossed, with the right value beside it", x3);
+  ok(S("t:5").some(s => s.k === "text" && /Q5: 1\/2/.test(s.s)), "question 5's total from the marker's own figures", S("t:5"));
+  const ring6 = S(`a:${pi("6")}:0`)[0];
+  ok(P(`a:${pi("6")}:0`) === 3 && ring6 && ring6.k === "ell" && Math.abs(ring6.cx - 270) < 25 && Math.abs(ring6.cy - 420) < 25, "the drawn gate is circled (workings anchor)", ring6);
+  const arr = S(`a:${pi("6")}:1`);
+  ok(arr.some(s => s.k === "path" && (s.d.match(/M/g) || []).length >= 2) && arr.some(s => s.k === "text" && /NOT here/.test(s.s)), "an arrow points at it, with its label", arr);
+  const gate = S(`a:${pi("6")}:2`);
+  ok(gate.some(s => s.k === "path" && /Q/.test(s.d)) && gate.some(s => s.k === "ell"), "a NAND gate symbol is drawn (body and output circle)", gate.map(s => s.k));
+  const sk = S(`a:${pi("6")}:3`)[0];
+  ok(sk && sk.k === "path" && sk.stroke === "#cc1f1a", "a sketch is drawn in its box", sk);
+  const wk6 = S(`w:${pi("6")}`), box6 = await pg.evaluate(() => regionRect(3, doc.pages[3].regions.find(r => r.kind === "box")));
+  ok(wk6.some(s => s.k === "rect" && s.y > box6.y1 - 1) && wk6.some(s => s.k === "text" && /NAND/.test(s.s)), "the circuit's working is in the space under the drawing", { wk6: wk6.map(s => s.k + ":" + Math.round(s.y)), box6 });
+  // a table answer (several columns): marks on a cell by its number
+  const cellChk = await pg.evaluate(() => {
+    const cells = doc.pages[3].regions.filter(r => r.kind === "cell");
+    doc.marking.map["5-table"] = { q: "5", type: "table", r: cells.map(r => r.id) };
+    doc.marking.parts.push({ id: "5-table", q: "5", awarded: null, max: null, verdict: "partial", comment: "", correction: "", correctOptions: [], working: [], annotations: [{ type: "cross", anchor: { kind: "cell", index: 2 }, text: "" }, { type: "tick", anchor: { kind: "option", letter: "Z" }, text: "" }] });
+    const L = Marking.layout(), i = doc.marking.parts.length - 1, sh = L.pages[3].filter(s => s.g === `a:${i}:0`)[0], R = regionRect(3, cells[2]);
+    const warned = L.warn.some(w => /no option Z/.test(w));
+    doc.marking.parts.pop(); delete doc.marking.map["5-table"]; Marking.refresh();
+    return { y: sh && +sh.d.split(" ")[1] + 4.7, x: sh && +sh.d.slice(1).split(" ")[0], R, warned };
+  });
+  ok(cellChk.y > cellChk.R.y0 && cellChk.y < cellChk.R.y1 && cellChk.x > cellChk.R.x1, "a table cell anchor marks that cell", cellChk);
+  ok(cellChk.warned, "a missing option letter is reported", cellChk);
   console.log("Margin, totals, summary");
   const sc = S(`s:${pi("1a")}`);
   ok(sc.some(s => s.k === "ell") && sc.some(s => s.k === "text" && s.s === "1/2"), "score circle 1/2 beside 1(a)", sc);
@@ -103,17 +145,19 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   const notes = Object.entries(g.out).filter(([k, v]) => v.p === 1 && (k.startsWith("c:") || k.endsWith(":n"))).map(([, v]) => v.shapes.find(s => s.k === "rect")).filter(Boolean);
   const overlap = notes.some((a, i) => notes.some((c, j) => j > i && a.y < c.y + c.h && c.y < a.y + a.h));
   ok(!overlap, "margin notes on a page don't overlap", notes);
-  ok(S("sum").some(s => s.k === "text" && s.s === "6/10") && P("sum") === 0, "summary box on the cover with 6/10", S("sum").filter(s => s.k === "text").map(s => s.s));
-  ok(S("sum").some(s => s.k === "text" && s.s === "B"), "grade in the summary", null);
-  ok(S("spot").some(s => s.k === "text" && s.s === "6"), "score written in the cover's Total Marks box", S("spot"));
+  ok(S("sum").some(s => s.k === "text" && s.s === "7/14") && P("sum") === 0, "summary box on the cover with 7/14", S("sum").filter(s => s.k === "text").map(s => s.s));
+  ok(S("sum").some(s => s.k === "text" && s.s === "C"), "grade in the summary", null);
+  ok(S("spot").some(s => s.k === "text" && s.s === "7"), "score written in the cover's Total Marks box", S("spot"));
   const allShapes = Object.values(g.out).flatMap(v => v.shapes);
   ok(!allShapes.some(s => /^#(1c5fd9|0000ff|2563eb)/i.test(s.stroke || s.fill || "")), "no blue anywhere in the marking", null);
+  const rows3 = await pg.$$eval("#marksList .mkrow", r => r.map(x => x.textContent).find(t => /Answer: C/.test(t)));
+  ok(!!rows3, "the Marks panel shows the right option", rows3);
 
   console.log("Panel, toggle, edit, undo, export");
   const rows = await pg.$$eval("#marksList .mkrow", r => r.map(x => x.textContent));
   ok(rows.length === marking.parts.length, "Marks panel lists every part", rows);
   await pg.evaluate(() => { $("#pages").scrollTop = 0; }); await pg.waitForTimeout(300);
-  await pg.click("#marksList .mkrow:nth-child(6)"); await pg.waitForTimeout(1500);
+  await pg.click("#marksList .mkrow:nth-child(6)"); await pg.waitForTimeout(1500);   // question 4
   const jumped = await pg.evaluate(() => { const r = doc.pages[2].regions.find(r => r.kind === "lines")._el.getBoundingClientRect(), h = $("#pages").getBoundingClientRect(); return { top: r.top - h.top, height: h.height }; });
   ok(jumped.top > 0 && jumped.top < jumped.height, "tapping a row jumps to that part (question 4 on screen)", jumped);
   await pg.evaluate(() => { const c = document.querySelector('#marksHead [data-a="on"]'); c.checked = false; c.dispatchEvent(new Event("change", { bubbles: true })); });
@@ -133,7 +177,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(await pg.evaluate(() => doc.marking.parts.length) === marking.parts.length, "undo brings the previous marking back", null);
   // screenshots for a person to look at
   await pg.evaluate(() => { document.getElementById("marksPop").hidden = true; }); await pg.setViewportSize({ width: 1000, height: 1500 }); await pg.waitForTimeout(500);
-  for (const p of [0, 1, 2]) { await pg.evaluate(p => { $("#pages").scrollTop = pageTop(p) - 8; }, p); await pg.waitForTimeout(400); await pg.screenshot({ path: path.join(process.env.SHOTS || "/tmp", `marked-p${p + 1}.png`) }); }
+  for (const p of [0, 1, 2, 3]) { await pg.evaluate(p => { $("#pages").scrollTop = pageTop(p) - 8; }, p); await pg.waitForTimeout(400); await pg.screenshot({ path: path.join(process.env.SHOTS || "/tmp", `marked-p${p + 1}.png`) }); }
   const [dl] = await Promise.all([pg.waitForEvent("download", { timeout: 30000 }), pg.evaluate(() => exportPDF(true))]);
   const out = path.join(process.env.SHOTS || "/tmp", "marked.pdf"); await dl.saveAs(out);
   ok(/marked\.pdf$/.test(dl.suggestedFilename()) && fs.statSync(out).size > 5000, "Export marked PDF", dl.suggestedFilename());

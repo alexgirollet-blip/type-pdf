@@ -15,7 +15,8 @@ const Marking = window.Marking = (() => {
   const RED = "#cc1f1a", GREEN = "#17853b", GREY = "#8c9290", PAPER = "#ffffff";     // never blue: blue is your own pen
   const HAND = '"TP-hand", "Patrick Hand", cursive', SANS = "system-ui, -apple-system, Segoe UI, sans-serif";
   const VERDICTS = ["correct", "partial", "wrong", "blank", "excluded"];
-  const TYPES = ["tick", "cross", "underline", "circle", "caret", "note", "bracket"];
+  const TYPES = ["tick", "cross", "underline", "circle", "caret", "note", "bracket", "arrow", "sketch", "symbol"];
+  const GATES = ["and", "or", "not", "nand", "nor", "xor", "xnor", "buffer"];
   let lay = null;                  // { pages: [[shape]], warn, parts } for the current marking
   let editMode = false, addType = null, sel = null;
   const $ = s => document.querySelector(s);
@@ -38,7 +39,12 @@ const Marking = window.Marking = (() => {
       if (pt.verdict && !VERDICTS.includes(pt.verdict)) warn.push(`${id || pt.q}: unknown verdict "${pt.verdict}", read as ${verdict}.`);
       const anns = (Array.isArray(pt.annotations) ? pt.annotations : []).filter(a => a && TYPES.includes(a.type));
       if (Array.isArray(pt.annotations) && anns.length < pt.annotations.length) warn.push(`${id || pt.q}: ${pt.annotations.length - anns.length} mark(s) of an unknown type skipped.`);
-      parts.push({ id, q: String(pt.q || id), awarded: num(pt.awarded), max: num(pt.max), verdict, comment: str(pt.comment), correction: str(pt.correction), annotations: anns.map(a => ({ type: a.type, anchor: a.anchor && typeof a.anchor === "object" ? a.anchor : { kind: "part" }, text: str(a.text) })) });
+      const co = [].concat(pt.correctOptions ?? pt.correctOption ?? pt.correctAnswer ?? []).map(x => String(x).trim().toUpperCase()).filter(x => /^[A-H]$/.test(x));
+      const working = [].concat(pt.working ?? []).map(str).filter(x => x.trim());
+      for (const a of anns) if (a.type === "symbol" && !GATES.includes(String(a.symbol || "").toLowerCase())) warn.push(`${id || pt.q}: unknown symbol "${a.symbol}" (use ${GATES.join(", ")}).`);
+      parts.push({ id, q: String(pt.q || id), awarded: num(pt.awarded), max: num(pt.max), verdict, comment: str(pt.comment), correction: str(pt.correction), correctOptions: co, working,
+        annotations: anns.map(a => ({ type: a.type, anchor: a.anchor && typeof a.anchor === "object" ? a.anchor : { kind: "part" }, text: str(a.text),
+          ...(a.from && typeof a.from === "object" ? { from: { x: +a.from.x, y: +a.from.y } } : {}), ...(a.path ? { path: String(a.path).slice(0, 4000) } : {}), ...(a.symbol ? { symbol: String(a.symbol).toLowerCase() } : {}) })) });
     });
     const sm = j.summary && typeof j.summary === "object" ? j.summary : {};
     return {
@@ -64,7 +70,7 @@ const Marking = window.Marking = (() => {
     const map = { ...((ex && ex.ids) || {}) };
     const missing = m.parts.filter(pt => !map[pt.id]);
     if (missing.length && typeof aiJSON === "function") {
-      try { await aiPrep(); const fresh = aiJSON(false); for (const e of fresh._all || fresh.answers) if (!map[e.id]) map[e.id] = { q: e.q, type: e.type, r: (e._r || []).map(x => x.id), page: e.page, ...(e.workings ? { w: e.workings } : {}) }; } catch (e) { console.warn(e); }
+      try { await aiPrep(); const fresh = aiJSON(false); for (const e of fresh._all || fresh.answers) if (!map[e.id]) map[e.id] = { q: e.q, type: e.type, r: (e._r || []).map(x => x.id), page: e.page, ...(e._L ? { L: e._L } : {}), ...(e.workings ? { w: e.workings } : {}) }; } catch (e) { console.warn(e); }
     }
     for (const pt of m.parts) {
       if (map[pt.id]) continue;
@@ -94,9 +100,30 @@ const Marking = window.Marking = (() => {
       if (r.kind === "choice" && out.some(o => o.r && o.r.kind === "choice")) { if (doc.text[r.id]) { const k = out.findIndex(o => o.r && o.r.kind === "choice"); out[k] = { p, r, ...regionRect(p, r) }; } continue; }
       out.push({ p, r, ...regionRect(p, r) });
     }
-    if (!out.length && m.w && m.w.crops) for (const c of m.w.crops) { const p = c.page - 1, P = doc.pages[p]; if (!P) continue; out.push({ p, x0: 40, x1: P.w - 40, y0: disp(p, c.y0), y1: disp(p, c.y1) }); }
+    if (!out.length && m.w && m.w.crops) for (const c of m.w.crops) {
+      const p = c.page - 1, P = doc.pages[p]; if (!P) continue;
+      const y0 = disp(p, c.y0), y1 = disp(p, c.y1), xs = [], ys = [];
+      for (const st of doc.strokes[p] || []) { if (st.t !== "pen") continue; for (const q of dispPts(p, st)) if (q[1] >= y0 - 2 && q[1] <= y1 + 2) { xs.push(q[0]); ys.push(q[1]); } }
+      out.push(xs.length ? { p, x0: Math.min(...xs) - 6, x1: Math.max(...xs) + 6, y0: Math.min(...ys) - 6, y1: Math.max(...ys) + 6, drawn: true } : { p, x0: 40, x1: P.w - 40, y0, y1 });
+    }
     if (!out.length) { const e = labelIndex().find(x => x.label === (m.q || pt.q)); if (e) out.push({ p: e.p, x0: e.x, x1: doc.pages[e.p].w - 50, y0: disp(e.p, e.y), y1: disp(e.p, e.y) + 26 }); }
     return out;
+  }
+  function optionRects(pt) {
+    const m = (doc.marking.map || {})[pt.id]; if (!m) return [];
+    const out = [];
+    (m.r || []).forEach((rid, k) => {
+      const p = pageOf(rid); if (p < 0) return;
+      const r = doc.pages[p].regions.find(q => q.id === rid); if (!r || r.kind !== "choice") return;
+      const L = (m.L && m.L[k]) || r.L || ((String(r.opt || "").match(/^\(?([A-H])\b/) || [])[1]) || "ABCDEFGH"[out.length];
+      out.push({ L, p, r, chosen: !!doc.text[r.id], ...regionRect(p, r) });
+    });
+    return out;
+  }
+  // the cells of a table part, in the export's order
+  function cellRects(pt) {
+    const m = (doc.marking.map || {})[pt.id]; if (!m) return [];
+    return (m.r || []).map(rid => { const p = pageOf(rid); if (p < 0) return null; const r = doc.pages[p].regions.find(q => q.id === rid); return r ? { p, r, ...regionRect(p, r) } : null; }).filter(Boolean);
   }
   // a text anchor: the lines a phrase of your typed answer takes up, found where it's printed in its answer space
   function findText(pt, rects, a) {
@@ -144,12 +171,24 @@ const Marking = window.Marking = (() => {
       }
       warn.push(`${pt.id}: this answer has no workings image, so a workings mark is beside the whole answer.`);
     }
+    if (an.kind === "option") {
+      const o = optionRects(pt).find(o => o.L === String(an.letter || "").toUpperCase());
+      if (o) return { kind: "box", p: o.p, x: o.x0 - 12, y: (o.y0 + o.y1) / 2, box: { x0: o.x0, y0: o.y0, x1: o.x1, y1: o.y1 }, opt: true };
+      warn.push(`${pt.id}: no option ${an.letter}, so that mark is beside the whole answer.`);
+    }
+    if (an.kind === "cell") {
+      const c = cellRects(pt)[(+an.index || 0)];
+      if (c) return { kind: "box", p: c.p, x: c.x1 + 7, y: (c.y0 + c.y1) / 2, box: { x0: c.x0, y0: c.y0, x1: c.x1, y1: c.y1 }, cell: true };
+      warn.push(`${pt.id}: no cell ${an.index}, so that mark is beside the whole answer.`);
+    }
     if (an.kind === "page") {
       const p = (+an.page || 1) - 1, P = doc.pages[p];
       if (P) return { kind: "point", p, x: clamp01(+an.x) * P.w, y: disp(p, clamp01(+an.y) * P.h) };
     }
     const R = rects[0]; if (!R) return null;
     if (R.r && R.r.kind === "choice") return { kind: "point", p: R.p, x: R.x0 - 12, y: (R.y0 + R.y1) / 2 };
+    if (R.r && R.r.kind === "cell" || (R.y1 - R.y0 < 30 && R.x1 - R.x0 < 120)) return { kind: "box", p: R.p, x: R.x1 + 7, y: (R.y0 + R.y1) / 2, box: { x0: R.x0, y0: R.y0, x1: R.x1, y1: R.y1 }, cell: true };
+    if (R.drawn) return { kind: "box", p: R.p, x: R.x1 + 4, y: R.y0 + 8, box: { x0: R.x0, y0: R.y0, x1: R.x1, y1: R.y1 } };
     return { kind: "part", p: R.p, x: Math.max(R.x0 + 10, R.x1 - 14), y: R.y0 + Math.min(10, (R.y1 - R.y0) / 2), box: { x0: R.x0, y0: R.y0, x1: R.x1, y1: R.y1 } };
   }
   const an0 = a => (a.anchor && a.anchor.kind) || "part";
@@ -177,7 +216,7 @@ const Marking = window.Marking = (() => {
   const tickD = (x, y, s = 1) => `M${x - 5 * s} ${y - 0.5 * s} L${x - 1.5 * s} ${y + 4 * s} L${x + 6 * s} ${y - 7 * s}`;
   const crossD = (x, y, s = 1) => `M${x - 4.5 * s} ${y - 4.5 * s} L${x + 4.5 * s} ${y + 4.5 * s} M${x + 4.5 * s} ${y - 4.5 * s} L${x - 4.5 * s} ${y + 4.5 * s}`;
   function layout() {
-    const M = doc.marking, warn = [], pages = doc.pages.map(() => []), notes = doc.pages.map(() => []), circles = doc.pages.map(() => []);
+    const M = doc.marking, warn = [], pages = doc.pages.map(() => []), notes = doc.pages.map(() => []), circles = doc.pages.map(() => []), workings = [];
     const ed = M.edits || {};
     const add = (p, g, sh) => { if (pages[p] && !(ed[g] && ed[g].del)) pages[p].push({ ...sh, g }); };
     const geo = {};
@@ -196,7 +235,7 @@ const Marking = window.Marking = (() => {
         const g = `a:${i}:${k}`, at = resolve(pt, rects, a, warn); if (!at) return;
         const p = at.p, c = ex ? GREY : a.type === "tick" ? GREEN : RED;
         if (a.type === "tick" || a.type === "cross") {
-          const x = at.kind === "text" ? at.ex + 8 : at.kind === "box" && at.box.x1 > at.box.x0 ? at.box.x1 + 6 : at.x, y = at.kind === "text" ? at.ey - 1 : at.y;
+          const x = at.kind === "text" ? at.ex + 8 : at.opt || at.cell ? at.x : at.kind === "box" && at.box.x1 > at.box.x0 ? at.box.x1 + 6 : at.x, y = at.kind === "text" ? at.ey - 1 : at.y;
           add(p, g, { k: "path", d: a.type === "tick" ? tickD(x, y, 1.15) : crossD(x, y, 1.05), stroke: c, w: 1.8 });
         } else if (a.type === "underline") {
           if (at.segs) for (const sg of at.segs) add(p, g, { k: "path", d: `M${sg.x0} ${sg.y + sg.h * 0.92} Q${(sg.x0 + sg.x1) / 2} ${sg.y + sg.h * 0.92 + 1.6} ${sg.x1} ${sg.y + sg.h * 0.9}`, stroke: c, w: 1.2 });
@@ -209,6 +248,24 @@ const Marking = window.Marking = (() => {
         } else if (a.type === "caret") {
           const x = at.x, y = at.segs ? at.segs[0].y + at.segs[0].h : at.y + 6;
           add(p, g, { k: "path", d: `M${x - 3.5} ${y + 5} L${x} ${y - 1} L${x + 3.5} ${y + 5}`, stroke: c, w: 1.3 });
+        } else if (a.type === "arrow") {
+          // pointing at the spot; from where "from" says (same units as the anchor), else from up and to the right
+          let fx = at.x + 34, fy = at.y - 26;
+          if (a.from && !isNaN(a.from.x)) { const f = resolve(pt, rects, { anchor: { ...(a.anchor || {}), x: a.from.x, y: a.from.y, w: 0, h: 0 } }, []); if (f && f.p === p) { fx = f.x; fy = f.y; } }
+          const tx2 = at.box && at.kind === "box" && !at.opt && !at.cell ? (at.box.x0 + at.box.x1) / 2 : at.x, ty2 = at.box && at.kind === "box" && !at.opt && !at.cell ? (at.box.y0 + at.box.y1) / 2 : at.y;
+          const ang = Math.atan2(ty2 - fy, tx2 - fx), hl = 6;
+          add(p, g, { k: "path", d: `M${fx} ${fy} L${tx2} ${ty2} M${tx2 - hl * Math.cos(ang - 0.45)} ${ty2 - hl * Math.sin(ang - 0.45)} L${tx2} ${ty2} L${tx2 - hl * Math.cos(ang + 0.45)} ${ty2 - hl * Math.sin(ang + 0.45)}`, stroke: c, w: 1.3 });
+          at.tail = { x: fx, y: fy, right: fx >= tx2 };
+        } else if (a.type === "sketch" || a.type === "symbol") {
+          // drawn into the anchor's box: a sketch's path is in 0–1 of the box; a gate symbol keeps its shape (1.6 : 1)
+          let b = at.box && at.box.x1 - at.box.x0 > 4 && at.box.y1 - at.box.y0 > 4 ? at.box : { x0: at.x, y0: at.y - 16, x1: at.x + 52, y1: at.y + 16 };
+          if (a.type === "sketch" && a.path) add(p, g, { k: "path", d: mapPath(a.path, (x, y) => [b.x0 + x * (b.x1 - b.x0), b.y0 + y * (b.y1 - b.y0)]), stroke: c, w: 1.4 });
+          if (a.type === "symbol" && GATES.includes(a.symbol)) {
+            const h = Math.min(b.y1 - b.y0, (b.x1 - b.x0) / 1.6), ox = (b.x0 + b.x1) / 2 - h * 0.8, oy = (b.y0 + b.y1) / 2 - h / 2;
+            const G = gate(a.symbol);
+            add(p, g, { k: "path", d: mapPath(G.d, (x, y) => [ox + x * h, oy + y * h]), stroke: c, w: 1.4 });
+            if (G.bub) add(p, g, { k: "ell", cx: ox + G.bub * h, cy: oy + 0.5 * h, rx: 0.07 * h, ry: 0.07 * h, stroke: c, w: 1.3 });
+          }
         } else if (a.type === "bracket") {
           let y0 = at.y - 7, y1 = at.y + 7, x = at.x - 6;
           if (at.segs) { y0 = at.segs[0].y; y1 = at.segs[at.segs.length - 1].y + at.segs[at.segs.length - 1].h; x = Math.min(...at.segs.map(s => s.x0)) - 5; }
@@ -219,17 +276,69 @@ const Marking = window.Marking = (() => {
         if (a.text && a.type !== "note" && a.text.length <= 28) {
           const size = 11, lx = a.type === "caret" ? at.x - 4 : a.type === "tick" || a.type === "cross" ? (at.kind === "text" ? at.ex + 18 : (at.kind === "box" && at.box.x1 > at.box.x0 ? at.box.x1 + 18 : at.x + 10)) : at.x;
           const ly = a.type === "caret" ? (at.segs ? at.segs[0].y - 1 : at.y - 9) : a.type === "tick" || a.type === "cross" ? (at.kind === "text" ? at.ey + 3 : at.y + 4) : (at.segs ? at.segs[0].y - 1 : at.y - 8);
-          const P2 = doc.pages[p], w2 = textW(a.text, size), x2 = Math.min(lx, P2.w - 40 - w2);
-          add(p, g, { k: "rect", x: x2 - 2, y: ly - size + 1, w: w2 + 4, h: size + 2, fill: PAPER, op: 0.75 });
-          add(p, g, { k: "text", x: x2, y: ly, s: a.text, size, font: "hand", fill: c });
+          const P2 = doc.pages[p], w2 = textW(a.text, size);
+          let x2 = Math.min(lx, P2.w - 40 - w2), ly2 = ly;
+          if (a.type === "arrow" && at.tail) {
+            // at the tail, clear of the comment column down the right of the page
+            const lim = P2.w - 170 - w2; x2 = at.tail.right ? at.tail.x + 3 : at.tail.x - w2 - 3;
+            if (x2 > lim) x2 = Math.max(8, at.tail.x - w2 - 3 > lim ? lim : at.tail.x - w2 - 3);
+            ly2 = at.tail.y - 3;
+          }
+          add(p, g, { k: "rect", x: x2 - 2, y: ly2 - size + 1, w: w2 + 4, h: size + 2, fill: PAPER, op: 0.75 });
+          add(p, g, { k: "text", x: x2, y: ly2, s: a.text, size, font: "hand", fill: c });
         } else if (a.type === "note" && an0(a) === "page") {
           const P2 = doc.pages[p], ls = wrap(a.text || "", 11.5, Math.min(220, P2.w - at.x - 30));
           ls.forEach((l, k2) => add(p, g, { k: "text", x: Math.min(at.x, P2.w - 30 - textW(l, 11.5)), y: at.y + k2 * 14, s: l, size: 11.5, font: "hand", fill: c }));
         } else if (a.text || a.type === "note") notes[p].push({ g: g + ":n", ay: at.y, ax: at.kind === "text" ? at.ex : at.x, lines: a.text || "", corr: "", col: c });
       });
+      // multiple choice with the right answer given: your choice ticked (right) or crossed (wrong), and the right one
+      // circled with a tick in green, so you can see it at a glance
+      if (pt.correctOptions.length && !ex) {
+        const opts = optionRects(pt), right = new Set(pt.correctOptions);
+        for (const o of opts) {
+          const g = "o:" + i + ":" + o.L, cy = (o.y0 + o.y1) / 2;
+          if (o.chosen && right.has(o.L)) add(o.p, g, { k: "path", d: tickD(o.x0 - 12, cy, 1.15), stroke: GREEN, w: 1.8 });
+          else if (o.chosen) add(o.p, g, { k: "path", d: crossD(o.x0 - 12, cy, 1.05), stroke: RED, w: 1.8 });
+          else if (right.has(o.L)) {
+            const w = o.x1 - o.x0, h = o.y1 - o.y0;
+            add(o.p, g, { k: "ell", cx: o.x0 + w / 2, cy, rx: w / 2 + 3.5, ry: h / 2 + 3.5, stroke: GREEN, w: 1.6 });
+            add(o.p, g, { k: "path", d: tickD(o.x0 - 12, cy, 1.15), stroke: GREEN, w: 1.8 });
+            if (!opts.some(x => x.chosen)) add(o.p, g, { k: "text", x: o.x0 - 34, y: cy + 3.5, s: "ans", size: 9, font: "hand", fill: GREEN });
+          }
+        }
+        if (!opts.length) warn.push(`${pt.id}: has correctOptions but isn't a multiple-choice answer on this paper.`);
+      }
+      if (pt.working.length && pt.verdict !== "correct" && !ex) workings.push({ i, pt, rects });
       // the part's comment (and the right answer) in the margin, pointing at the start of the answer
       if (pt.comment || pt.correction) notes[R0.p].push({ g: "c:" + i, ay: R0.y0 + 8, ax: R0.x1 - 4, lines: pt.comment, corr: pt.correction, col: ex ? GREY : RED });
     });
+    const taken = doc.pages.map(() => []);
+    for (const { i, pt, rects } of workings) {
+      const last = rects.reduce((a, b) => (b.p > a.p || (b.p === a.p && b.y1 > a.y1)) ? b : a), p = last.p, P = doc.pages[p];
+      const X0 = Math.max(56, Math.min(...rects.filter(r => r.p === p).map(r => r.x0))), X1 = P.w - 170, W = X1 - X0;
+      const steps = pt.working.length > 1 ? pt.working.map((t, k) => `${k + 1}. ${t}`) : pt.working;
+      const g = "w:" + i;
+      // never past the start of the next question: the working belongs with this one
+      const lastSrc = src(p, last.y1), next = labelIndex().filter(e => e.p === p && e.y > lastSrc + 2).map(e => disp(p, e.y) - 14), limit = next.length ? Math.min(...next) : null;
+      const first = rects.filter(r => r.p === p).reduce((a, b) => b.y0 < a.y0 ? b : a);
+      const box = (x0, w, top0) => { const ls = steps.flatMap(t => wrap(t, 11, w - 16)), h = 20 + ls.length * 13.5 + 6; const top = findSpace(p, top0, h, x0, x0 + w, taken[p], limit); return top == null ? null : { x0, w, top, h, ls }; };
+      // under the answer if there's room before the next question; else beside it (where a multiple-choice question's
+      // options leave the right of the page empty); else in the margin
+      let at = W >= 180 ? box(X0, W, last.y1 + 4) : null;
+      if (!at) {
+        const P2 = doc.pages[p], band = (P2.items || []).filter(it => disp(p, it.y) > first.y0 - 4 && disp(p, it.y) < last.y1 + 4 && it.x < P2.w - 170).map(it => it.x1);
+        const xr = Math.max(first.x1, ...band) + 22, w2 = P2.w - 170 - xr;
+        if (w2 >= 150) at = box(xr, w2, Math.max(16, first.y0 - 6));
+      }
+      if (at) {
+        taken[p].push([at.top, at.top + at.h]);
+        add(p, g, { k: "rect", x: at.x0, y: at.top, w: at.w, h: at.h, fill: PAPER, op: 0.9, stroke: RED, sw: 0.8, dash: true });
+        add(p, g, { k: "text", x: at.x0 + 8, y: at.top + 14, s: "Working", size: 9.5, font: "sans", fill: "#8f1713", bold: true });
+        at.ls.forEach((l, k) => add(p, g, { k: "text", x: at.x0 + 8, y: at.top + 28 + k * 13.5, s: l, size: 11, font: "hand", fill: RED }));
+        continue;
+      }
+      notes[last.p].push({ g, ay: last.y1 - 6, ax: last.x1, lines: "Working: " + steps.join("  "), corr: "", col: RED });
+    }
     // a bracket with each question's total, at the end of its last part
     for (const qt of questionTotals(M)) {
       const rs = qt.parts.flatMap(pt => geo[pt.id] || []); if (!rs.length) continue;
@@ -286,6 +395,30 @@ const Marking = window.Marking = (() => {
     return lay;
   }
   const fmt = v => v == null ? "–" : Math.round(v * 10) / 10;
+  // the first band of the page from y0 down (within the next 320 pt) at least h tall, between x0 and x1, with
+  // nothing printed, written, drawn or answered in it
+  function findSpace(p, y0, h, x0, x1, extra, limit) {
+    const P = doc.pages[p], H = P.h + totalGap(p), occ = [...(extra || [])];
+    for (const it of P.items || []) if (it.x < x1 && it.x1 > x0) occ.push([disp(p, it.y - (it.h || 10)), disp(p, it.y + 3)]);
+    for (const r of P.regions || []) { const R = regionRect(p, r); if (R.x0 < x1 && R.x1 > x0) occ.push([R.y0, R.y1]); }
+    for (const st of doc.strokes[p] || []) { const q = dispPts(p, st), xs = q.map(v => v[0]), ys = q.map(v => v[1]); if (q.length && Math.min(...xs) < x1 && Math.max(...xs) > x0) occ.push([Math.min(...ys) - 3, Math.max(...ys) + 3]); }
+    for (let top = y0; top + h <= Math.min(H - 36, y0 + 320, limit ?? 1e9); top += 2) if (!occ.some(([a, b]) => a < top + h + 3 && b > top - 3)) return top;
+    return null;
+  }
+  // every x y pair in a path (absolute M L Q C commands), moved by f
+  const mapPath = (d, f) => String(d).replace(/(-?\d*\.?\d+)[\s,]+(-?\d*\.?\d+)/g, (_, a, b) => { const [x, y] = f(+a, +b); return `${+x.toFixed(2)} ${+y.toFixed(2)}`; });
+  // logic gates in a 1.6 × 1 box: inputs on the left (at 0.3 and 0.7, or 0.5 for NOT), output on the right at 0.5
+  function gate(n) {
+    const AND = "M0.35 0.1 L0.8 0.1 Q1.2 0.1 1.2 0.5 Q1.2 0.9 0.8 0.9 L0.35 0.9 Z", OR = "M0.3 0.1 Q0.52 0.5 0.3 0.9 Q0.9 0.9 1.2 0.5 Q0.9 0.1 0.3 0.1 Z";
+    const IN2 = " M0 0.3 L0.4 0.3 M0 0.7 L0.4 0.7", XB = " M0.2 0.1 Q0.42 0.5 0.2 0.9", TRI = "M0.35 0.15 L0.35 0.85 L1.1 0.5 Z M0 0.5 L0.35 0.5";
+    const out = x => ` M${x} 0.5 L1.6 0.5`;
+    return {
+      and: { d: AND + IN2 + out(1.2) }, nand: { d: AND + IN2 + out(1.34), bub: 1.27 },
+      or: { d: OR + IN2 + out(1.2) }, nor: { d: OR + IN2 + out(1.34), bub: 1.27 },
+      xor: { d: OR + XB + IN2 + out(1.2) }, xnor: { d: OR + XB + IN2 + out(1.34), bub: 1.27 },
+      not: { d: TRI + out(1.24), bub: 1.17 }, buffer: { d: TRI + out(1.1) },
+    }[n];
+  }
   // question totals: the marker's own per-question figures when given, else the sum of the parts
   const topQ = q => { const s = String(q); const m = s.match(/^(.*?\d+)(?=[.(]|$)/); return m ? m[1] : s; };
   function questionTotals(M) {
@@ -382,7 +515,7 @@ const Marking = window.Marking = (() => {
     if (sh.k === "path") return set(el("path"), { d: sh.d, fill: "none", stroke: sh.stroke, "stroke-width": sh.w, "stroke-linecap": "round", "stroke-linejoin": "round" });
     if (sh.k === "line") return set(el("line"), { x1: sh.x1, y1: sh.y1, x2: sh.x2, y2: sh.y2, stroke: sh.stroke, "stroke-width": sh.w });
     if (sh.k === "ell") return set(el("ellipse"), { cx: sh.cx, cy: sh.cy, rx: sh.rx, ry: sh.ry, fill: sh.fill || "none", "fill-opacity": sh.op, stroke: sh.stroke, "stroke-width": sh.w });
-    if (sh.k === "rect") return set(el("rect"), { x: sh.x, y: sh.y, width: sh.w, height: sh.h, rx: 2, fill: sh.fill || "none", "fill-opacity": sh.op, stroke: sh.stroke || "none", "stroke-width": sh.sw });
+    if (sh.k === "rect") return set(el("rect"), { x: sh.x, y: sh.y, width: sh.w, height: sh.h, rx: 2, fill: sh.fill || "none", "fill-opacity": sh.op, stroke: sh.stroke || "none", "stroke-width": sh.sw, "stroke-dasharray": sh.dash ? "3 2" : null });
     const t = set(el("text"), { x: sh.x, y: sh.y, fill: sh.fill, "font-size": sh.size, "font-weight": sh.bold ? 700 : null });
     t.style.fontFamily = sh.font === "sans" ? SANS : HAND; t.textContent = sh.s; return t;
   }
@@ -455,7 +588,7 @@ const Marking = window.Marking = (() => {
     for (const pt of M.parts) {
       const b = document.createElement("button"); b.type = "button"; b.className = "mkrow v-" + pt.verdict;
       const where = (lay && lay.geo[pt.id] || [])[0];
-      b.innerHTML = `<span class="mkq">${esc(qName(pt.q))}</span><span class="mkv">${pt.verdict}</span><span class="mkm">${pt.verdict === "excluded" ? "–" : `${fmt(pt.awarded)}/${fmt(pt.max)}`}</span>${pt.comment ? `<small>${esc(pt.comment)}</small>` : ""}`;
+      b.innerHTML = `<span class="mkq">${esc(qName(pt.q))}</span><span class="mkv">${pt.verdict}</span><span class="mkm">${pt.verdict === "excluded" ? "–" : `${fmt(pt.awarded)}/${fmt(pt.max)}`}</span>${pt.comment ? `<small>${esc(pt.comment)}</small>` : ""}${pt.correctOptions.length ? `<small class="mkans">Answer: ${pt.correctOptions.join(", ")}</small>` : ""}${pt.working.length ? `<small class="mkwork">${pt.working.map(esc).join("<br>")}</small>` : ""}`;
       if (where) b.onclick = () => { scrollToPoint(where.p, src(where.p, where.y0), 0.2); flash(pt); if (matchMedia("(max-width: 700px)").matches) $("#marksPop").hidden = true; };
       else { b.disabled = true; b.title = "Not found on this paper"; }
       list.appendChild(b);
@@ -531,7 +664,7 @@ const Marking = window.Marking = (() => {
       if (sh.k === "path") page.drawSvgPath(shiftPath(sh.d, dx, dy), { x: tx(0), y: ty(0), borderColor: col(sh.stroke), borderWidth: sh.w, borderLineCap: LineCapStyle.Round });
       else if (sh.k === "line") page.drawLine({ start: { x: X(sh.x1), y: Y(sh.y1) }, end: { x: X(sh.x2), y: Y(sh.y2) }, thickness: sh.w, color: col(sh.stroke) });
       else if (sh.k === "ell") page.drawEllipse({ x: X(sh.cx), y: Y(sh.cy), xScale: sh.rx, yScale: sh.ry, ...(sh.fill ? { color: col(sh.fill), opacity: sh.op ?? 1 } : {}), borderColor: col(sh.stroke), borderWidth: sh.w });
-      else if (sh.k === "rect") page.drawRectangle({ x: X(sh.x), y: Y(sh.y + sh.h), width: sh.w, height: sh.h, ...(sh.fill ? { color: col(sh.fill), opacity: sh.op ?? 1 } : {}), ...(sh.stroke ? { borderColor: col(sh.stroke), borderWidth: sh.sw || 1 } : {}) });
+      else if (sh.k === "rect") page.drawRectangle({ x: X(sh.x), y: Y(sh.y + sh.h), width: sh.w, height: sh.h, ...(sh.fill ? { color: col(sh.fill), opacity: sh.op ?? 1 } : {}), ...(sh.stroke ? { borderColor: col(sh.stroke), borderWidth: sh.sw || 1, ...(sh.dash ? { borderDashArray: [3, 2] } : {}) } : {}) });
       else if (sh.k === "text") {
         const font = sh.font === "sans" ? (sh.bold ? out._tpSansB : out._tpSans) : out._tpHand;
         const ok = new Set(font.getCharacterSet ? font.getCharacterSet() : []), s = sh.font === "sans" ? sh.s.replace(/[^\x20-\x7E\xA0-\xFF]/g, "?") : [...sh.s].map(ch => !ok.size || ok.has(ch.codePointAt(0)) ? ch : "?").join("");

@@ -59,3 +59,18 @@ A marker reads both, then sends back `<paper> - marking.json` (see [marking-sche
 - An answer that carries on over the page (lines at the bottom of one page and the top of the next) is one answer. Its text is joined back up exactly as typed.
 
 TypePDF remembers the latest export of each paper, including which answer spaces each id is. It keeps that with the paper and syncs it, so a marking can be imported on another device.
+
+## Marking things that aren't typed text
+
+The marking file ([marking-schema.json](marking-schema.json)) has ways in for every kind of answer:
+
+| answer | how the marker points at it | what TypePDF draws |
+|---|---|---|
+| typed words | `{kind:"text", match:"…"}` | tick/cross after the words, underline, circle, caret with the missing word |
+| multiple choice | `correctOptions: ["C"]` on the part, or `{kind:"option", letter:"C"}` | your choice ticked green or crossed red; the right one circled and ticked green |
+| a gap-fill | the gap's own id (`4a-gap3`) with `{kind:"part"}` | tick/cross just after the gap, label (the right value) beside it |
+| a table | `{kind:"cell", index: n}` (the order of `cells`) | tick/cross beside that cell |
+| drawing, graph, circuit | `{kind:"workings", x, y, w, h}` (0–1 of that part's workings image) | circle, cross, arrow (`from`), bracket at that spot; `sketch` (a path) or `symbol` (a logic gate) drawn in red in that box |
+| anything else | `{kind:"part"}` or `{kind:"page", page, x, y}` | beside the answer, or at that spot on the page |
+
+`working` (a list of steps) is shown in a dashed box near the answer whenever the part isn't fully right.

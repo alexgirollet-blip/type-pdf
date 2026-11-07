@@ -51,4 +51,23 @@ c.setFont("Helvetica-Bold", 11); c.drawString(50, H - 260, "4"); c.setFont("Helv
 c.drawString(68, H - 260, "Explain why a skydiver reaches terminal velocity.")
 c.drawRightString(W - 60, H - 278, "[2]"); rules(H - 305, 3)
 footer(3)
+
+# 4. logic gates: a truth table to complete and a circuit to draw
+c.setFont("Helvetica-Bold", 11); c.drawString(50, H - 70, "5"); c.setFont("Helvetica", 11)
+c.drawString(68, H - 70, "Complete the truth table for an AND gate.")
+c.drawRightString(W - 60, H - 88, "[2]")
+x0, top, cw, rh = 150, H - 110, 70, 26
+c.setLineWidth(0.8)
+for i in range(6): c.line(x0, top - i * rh, x0 + 3 * cw, top - i * rh)
+for j in range(4): c.line(x0 + j * cw, top, x0 + j * cw, top - 5 * rh)
+c.setFont("Helvetica-Bold", 11)
+for j, t in enumerate("ABQ"): c.drawCentredString(x0 + j * cw + cw / 2, top - 18, t)
+c.setFont("Helvetica", 11)
+for i, (a, b) in enumerate([(0, 0), (0, 1), (1, 0), (1, 1)]):
+    c.drawCentredString(x0 + cw / 2, top - (i + 1) * rh - 18, str(a)); c.drawCentredString(x0 + cw * 1.5, top - (i + 1) * rh - 18, str(b))
+c.setFont("Helvetica-Bold", 11); c.drawString(50, H - 290, "6"); c.setFont("Helvetica", 11)
+c.drawString(68, H - 290, "Draw a logic circuit for Q = NOT (A AND B) using one logic gate.")
+c.drawRightString(W - 60, H - 308, "[2]")
+c.setLineWidth(1); c.rect(100, H - 560, 400, 230)
+footer(4)
 c.save()

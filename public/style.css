@@ -437,3 +437,5 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 #markDlg textarea{width:100%;box-sizing:border-box;font:12px ui-monospace,monospace;min-height:110px}
 .filebtn{display:inline-flex;align-items:center;cursor:pointer;border:1px solid var(--line);border-radius:8px;padding:7px 14px}
 .filebtn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.mkrow .mkans{color:#7fdca5}
+.mkrow .mkwork{color:#ffcfcb;font:400 14px/1.3 "TP-hand",cursive}

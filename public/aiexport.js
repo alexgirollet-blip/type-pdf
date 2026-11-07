@@ -185,6 +185,7 @@ function aiJSON(withQuestion) {
         return { t: t.slice(0, 300), letter: t[0], chosen: done(r.id), inked: M.inked.has(r.id) };
       });
       const e = withRegions({ ...base, type: "multiple choice", options: opts.map(o => o.t), answer: opts.filter(o => o.chosen).map(o => o.letter) }, ch);
+      Object.defineProperty(e, "_L", { value: opts.map(o => o.letter), enumerable: false });
       if (opts.some(o => o.inked)) e.handwritten = "marked by hand on the paper: see the workings PDF";
       list.push(e);
     }
@@ -234,6 +235,7 @@ function aiJSON(withQuestion) {
     seen.add(id);
     const ordered = { id }; for (const k of Object.keys(e)) ordered[k] = e[k];
     Object.defineProperty(ordered, "_r", { value: e._r || [], enumerable: false });
+    if (e._L) Object.defineProperty(ordered, "_L", { value: e._L, enumerable: false });
     list[list.indexOf(e)] = ordered;
   }
   // where each part's handwriting is in the workings PDF: which image, and the strip of the page each piece of it shows
@@ -249,7 +251,7 @@ function aiJSON(withQuestion) {
   if (doc.timer) o.time_used = fmtT(timerUsed(doc.timer)) + (doc.timer.up ? "" : " of " + fmtT(doc.timer.total));
   o.note = "Each answer has a unique id (use it to refer to that answer, e.g. in a marking file). Answers are listed by question part in paper order. Maths is written with ^{…} for superscripts, _{…} for subscripts and \\frac{a}{b} for fractions. Multiple-choice answers give the letters chosen. Anything marked 'handwritten' is in the separate workings PDF, one image per part, captioned with the part and page.";
   // so a marker knows what to send back (see docs/marking-schema.json)
-  o.marking = { file: `${doc.name} - marking.json`, format: "typepdf-marking", version: 1, how: "To mark, return JSON {format, version:1, paperId, exported (both copied from here), marker, markedAt, summary:{score,outOf,grade,gradeNote,comment,perQuestion:[{q,awarded,max}]}, parts:[{id (from here), q, awarded, max, verdict: correct|partial|wrong|blank|excluded, comment, correction, annotations:[{type: tick|cross|underline|circle|caret|note|bracket, anchor: {kind:'text', match:'words from the answer', occurrence} | {kind:'workings', x,y,w,h (0-1 of that part's workings image)} | {kind:'part'} | {kind:'page', page, x, y}, text}]}]}." };
+  o.marking = { file: `${doc.name} - marking.json`, format: "typepdf-marking", version: 1, how: "To mark, return JSON {format, version:1, paperId, exported (both copied from here), marker, markedAt, summary:{score,outOf,grade,gradeNote,comment,perQuestion:[{q,awarded,max}]}, parts:[{id (from here), q, awarded, max, verdict: correct|partial|wrong|blank|excluded, comment, correction, correctOptions:['B'] (multiple choice), working:['step 1','step 2'] (shown when not correct), annotations:[{type: tick|cross|underline|circle|caret|note|bracket|arrow|sketch|symbol, anchor: {kind:'text', match:'words from the answer', occurrence} | {kind:'workings', x,y,w,h (0-1 of that part's workings image)} | {kind:'option', letter} | {kind:'cell', index (0-based, as in cells)} | {kind:'part'} | {kind:'page', page, x, y}, text, from:{x,y} (arrow start, same units), path:'M0 0 L1 1' (sketch, 0-1 of the anchor box), symbol: and|or|not|nand|nor|xor|xnor|buffer (a logic gate drawn in the anchor box)}]}]}." };
   o.answers = list.filter(answered);
   Object.defineProperty(o, "_all", { value: list, enumerable: false });
   const blank = list.filter(e => !answered(e)).map(e => e.q + (e.part ? ` [${e.part}]` : ""));
@@ -367,7 +369,7 @@ function updateAiInfo() {
 // what was exported last, and which answer spaces each id is: kept with the paper (and synced) for marking
 function rememberExport(o) {
   const ids = {};
-  for (const e of o._all || o.answers) ids[e.id] = { q: e.q, type: e.type, r: (e._r || []).map(x => x.id), page: e.page, ...(e.workings ? { w: e.workings } : {}) };
+  for (const e of o._all || o.answers) ids[e.id] = { q: e.q, type: e.type, r: (e._r || []).map(x => x.id), page: e.page, ...(e._L ? { L: e._L } : {}), ...(e.workings ? { w: e.workings } : {}) };
   doc.aiExport = { exported: o.exported, ids };
   scheduleSave(); emit("aiexport");
   return o;

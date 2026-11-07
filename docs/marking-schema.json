@@ -4,66 +4,353 @@
   "title": "TypePDF marking (v1)",
   "description": "A marking of a paper answered in TypePDF and exported with Export for AI. Import it in TypePDF (Marks → Import marking) to see it drawn on the paper like a teacher's red pen. Name the file \"<paper title> - marking.json\".",
   "type": "object",
-  "required": ["format", "version", "parts"],
+  "required": [
+    "format",
+    "version",
+    "parts"
+  ],
   "properties": {
-    "format": { "const": "typepdf-marking" },
-    "version": { "const": 1 },
-    "paperId": { "type": "string", "description": "The export's paperId. If it doesn't match the open paper TypePDF warns but still imports." },
-    "paperTitle": { "type": "string" },
-    "exported": { "type": "string", "format": "date-time", "description": "The export's exported timestamp: the export this marking is for." },
-    "marker": { "type": "string", "examples": ["Claude"] },
-    "markedAt": { "type": "string", "format": "date-time" },
+    "format": {
+      "const": "typepdf-marking"
+    },
+    "version": {
+      "const": 1
+    },
+    "paperId": {
+      "type": "string",
+      "description": "The export's paperId. If it doesn't match the open paper TypePDF warns but still imports."
+    },
+    "paperTitle": {
+      "type": "string"
+    },
+    "exported": {
+      "type": "string",
+      "format": "date-time",
+      "description": "The export's exported timestamp: the export this marking is for."
+    },
+    "marker": {
+      "type": "string",
+      "examples": [
+        "Claude"
+      ]
+    },
+    "markedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
     "summary": {
       "type": "object",
       "properties": {
-        "score": { "type": "number", "description": "Marks awarded, excluded parts left out. Defaults to the sum of the parts." },
-        "outOf": { "type": "number", "description": "Marks available, excluded parts left out. Defaults to the sum of the parts." },
-        "grade": { "type": "string" },
-        "gradeNote": { "type": "string", "examples": ["estimated from June 2025 boundaries"] },
-        "comment": { "type": "string", "description": "A short overall comment." },
+        "score": {
+          "type": "number",
+          "description": "Marks awarded, excluded parts left out. Defaults to the sum of the parts."
+        },
+        "outOf": {
+          "type": "number",
+          "description": "Marks available, excluded parts left out. Defaults to the sum of the parts."
+        },
+        "grade": {
+          "type": "string"
+        },
+        "gradeNote": {
+          "type": "string",
+          "examples": [
+            "estimated from June 2025 boundaries"
+          ]
+        },
+        "comment": {
+          "type": "string",
+          "description": "A short overall comment."
+        },
         "perQuestion": {
           "type": "array",
           "items": {
-            "type": "object", "required": ["q"],
-            "properties": { "q": { "type": "string", "description": "The question number, e.g. \"1\", \"E2\"." }, "awarded": { "type": "number" }, "max": { "type": "number" } }
+            "type": "object",
+            "required": [
+              "q"
+            ],
+            "properties": {
+              "q": {
+                "type": "string",
+                "description": "The question number, e.g. \"1\", \"E2\"."
+              },
+              "awarded": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              }
+            }
           }
         }
       }
     },
     "parts": {
       "type": "array",
-      "items": { "$ref": "#/$defs/part" }
+      "items": {
+        "$ref": "#/$defs/part"
+      }
     }
   },
   "$defs": {
     "part": {
       "type": "object",
-      "required": ["id", "verdict"],
+      "required": [
+        "id",
+        "verdict"
+      ],
       "properties": {
-        "id": { "type": "string", "description": "The answer's id from the export (e.g. \"3a-iii\", \"4a-gap3\", \"5d-drawn\"). An unknown id is reported and skipped." },
-        "q": { "type": "string", "description": "The part label, e.g. \"3(a)(iii)\". Used if the id isn't found." },
-        "awarded": { "type": "number" },
-        "max": { "type": "number" },
-        "verdict": { "enum": ["correct", "partial", "wrong", "blank", "excluded"], "description": "excluded: skipped on purpose, shown grey and left out of the total." },
-        "comment": { "type": "string", "description": "A short margin note." },
-        "correction": { "type": "string", "description": "The model answer or fix, shown under the comment as \"Answer: …\"." },
-        "annotations": { "type": "array", "items": { "$ref": "#/$defs/annotation" } }
+        "id": {
+          "type": "string",
+          "description": "The answer's id from the export (e.g. \"3a-iii\", \"4a-gap3\", \"5d-drawn\"). An unknown id is reported and skipped."
+        },
+        "q": {
+          "type": "string",
+          "description": "The part label, e.g. \"3(a)(iii)\". Used if the id isn't found."
+        },
+        "awarded": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "verdict": {
+          "enum": [
+            "correct",
+            "partial",
+            "wrong",
+            "blank",
+            "excluded"
+          ],
+          "description": "excluded: skipped on purpose, shown grey and left out of the total."
+        },
+        "comment": {
+          "type": "string",
+          "description": "A short margin note."
+        },
+        "correction": {
+          "type": "string",
+          "description": "The model answer or fix, shown under the comment as \"Answer: …\"."
+        },
+        "annotations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/annotation"
+          }
+        },
+        "correctOptions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-H]$"
+          },
+          "description": "Multiple choice: the right option letter(s). TypePDF ticks your choice in green when it's right; when it's wrong it crosses your choice in red and circles and ticks the right one in green. (correctOption: \"B\" also works.)"
+        },
+        "working": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "How to get the answer, step by step. Shown (numbered) in a dashed box in the blank space under or beside the answer, before the next question, when the verdict isn't correct; in the margin if there's no room."
+        }
       }
     },
     "annotation": {
       "type": "object",
-      "required": ["type", "anchor"],
+      "required": [
+        "type",
+        "anchor"
+      ],
       "properties": {
-        "type": { "enum": ["tick", "cross", "underline", "circle", "caret", "note", "bracket"], "description": "Ticks are green, everything else red (never blue)." },
+        "type": {
+          "enum": [
+            "tick",
+            "cross",
+            "underline",
+            "circle",
+            "caret",
+            "note",
+            "bracket",
+            "arrow",
+            "sketch",
+            "symbol"
+          ],
+          "description": "Ticks are green, everything else red (never blue). arrow: points at the anchor, from 'from' (or from up and to the right); its text is written at its tail. sketch: 'path' drawn in the anchor's box. symbol: a logic gate drawn in the anchor's box."
+        },
         "anchor": {
           "oneOf": [
-            { "type": "object", "required": ["kind", "match"], "properties": { "kind": { "const": "text" }, "match": { "type": "string", "description": "Words copied from the typed answer. Not found: placed beside the whole answer." }, "occurrence": { "type": "integer", "minimum": 1, "default": 1 } } },
-            { "type": "object", "required": ["kind", "x", "y"], "properties": { "kind": { "const": "workings" }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 }, "w": { "type": "number", "minimum": 0, "maximum": 1 }, "h": { "type": "number", "minimum": 0, "maximum": 1 } }, "description": "0–1 of that part's image in the workings PDF (top left is 0,0)." },
-            { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "part" } }, "description": "Beside the whole answer." },
-            { "type": "object", "required": ["kind", "page", "x", "y"], "properties": { "kind": { "const": "page" }, "page": { "type": "integer", "minimum": 1 }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 } }, "description": "0–1 of a page (the fallback)." }
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "match"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "text"
+                },
+                "match": {
+                  "type": "string",
+                  "description": "Words copied from the typed answer. Not found: placed beside the whole answer."
+                },
+                "occurrence": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "x",
+                "y"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "workings"
+                },
+                "x": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "y": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "w": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "h": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "description": "0–1 of that part's image in the workings PDF (top left is 0,0)."
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "letter"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "option"
+                },
+                "letter": {
+                  "type": "string",
+                  "pattern": "^[A-H]$"
+                }
+              },
+              "description": "A multiple-choice option, by its letter (marks go just left of it; a circle goes round it)."
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "index"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "cell"
+                },
+                "index": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "description": "A cell of a table answer, numbered from 0 in the order the export lists its cells."
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "part"
+                }
+              },
+              "description": "Beside the whole answer."
+            },
+            {
+              "type": "object",
+              "required": [
+                "kind",
+                "page",
+                "x",
+                "y"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "page"
+                },
+                "page": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "x": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "y": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "description": "0–1 of a page (the fallback)."
+            }
           ]
         },
-        "text": { "type": "string", "description": "A short label, e.g. \"should be 8\". Up to about 28 characters is written beside the mark; longer goes in the margin." }
+        "text": {
+          "type": "string",
+          "description": "A short label, e.g. \"should be 8\". Up to about 28 characters is written beside the mark; longer goes in the margin."
+        },
+        "from": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "description": "arrow: where it starts, in the same units as the anchor (0-1 of the workings image or of the page)."
+        },
+        "path": {
+          "type": "string",
+          "description": "sketch: an SVG path using absolute M, L, Q and C commands with coordinates 0-1 of the anchor's box (0,0 top left), e.g. \"M0 0.5 Q0.5 0 1 0.5\". Give the anchor a w and h."
+        },
+        "symbol": {
+          "enum": [
+            "and",
+            "or",
+            "not",
+            "nand",
+            "nor",
+            "xor",
+            "xnor",
+            "buffer"
+          ],
+          "description": "symbol: a logic gate (inputs on the left, output on the right) drawn in red in the anchor's box, keeping its shape."
+        }
       }
     }
   }
