@@ -261,7 +261,7 @@ $("#fontSel").addEventListener("change", e => {
 });
 
 // version of the answer-space finder: pages found by an older one are found again when nothing is on them yet
-const DV = 4;
+const DV = 5;
 // ---- Save My Exams papers: what each page is. A paper built by Topic practice says so in its metadata
 // ({smx, pages: [{role, code, topic, type, sec}]}); a Save My Exams PDF opened on its own is read from its text:
 // the cover ("Multiple Choice Questions" / "Structured Questions" / "Exam Questions") and the section headings.
