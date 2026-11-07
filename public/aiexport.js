@@ -374,6 +374,129 @@ function rememberExport(o) {
   scheduleSave(); emit("aiexport");
   return o;
 }
+// ---- one bundle for the marker: the prompt, the answers, the workings and the whole answered paper ----
+// the instructions the marker reads first: what it's been sent, how to mark, and exactly what to send back
+function markingPrompt(o, files) {
+  const name = doc.name, out = `${name} - marking.json`;
+  const time = o.time_used ? `\nTime used: ${o.time_used}.` : "";
+  return `# Please mark this paper: ${name}
+
+You are an experienced examiner. Mark my answers to this past paper strictly but fairly, the way the exam board's mark scheme would, and send the marking back as one JSON file that TypePDF (the app I answered it in) draws onto the paper like a teacher's red pen.
+
+## What I've sent
+${files.map(f => `- **${f.name}**: ${f.what}`).join("\n")}${time}
+
+Use the whole answered paper to see each question, its diagrams and the marks available ([2], (3 marks) …). Use **answers.json** for exactly what I typed or chose; every answer has an \`id\`. Where an answer says "handwritten", look at that part's image in the workings PDF (one image per part, captioned with the question and page) as well as on the paper.
+
+## How to mark
+- Use the real mark scheme for this paper if you know it; otherwise mark as that exam board would.
+- Give credit for correct physics/maths/working even when the final answer is wrong (error carried forward), as the board would.
+- Keep comments short and specific, like a teacher's margin notes. Say what was missing, not just "wrong".
+- For anything not fully right, give the correct answer (\`correction\`) and, where it helps, the steps to get there (\`working\`).
+- Parts listed in answers.json under "blank" that I clearly skipped on purpose: verdict "excluded". Otherwise blank parts are "blank" with 0 marks.
+- Estimate a grade from the most recent grade boundaries you know for this paper and say which (\`gradeNote\`).
+
+## What to send back
+Create a file called **${out}** (or, if you can't make files, reply with only the JSON in one code block). It must be valid JSON in this shape:
+
+\`\`\`json
+{
+  "format": "typepdf-marking", "version": 1,
+  "paperId": "${o.paperId}", "paperTitle": ${JSON.stringify(name)}, "exported": "${o.exported}",
+  "marker": "Claude", "markedAt": "<now, ISO time>",
+  "summary": { "score": 0, "outOf": 0, "grade": "", "gradeNote": "", "comment": "2–3 sentences overall",
+               "perQuestion": [ { "q": "1", "awarded": 0, "max": 0 } ] },
+  "parts": [
+    { "id": "<id from answers.json>", "q": "<its q>", "awarded": 0, "max": 0,
+      "verdict": "correct | partial | wrong | blank | excluded",
+      "comment": "short margin note", "correction": "the right answer",
+      "working": ["step 1", "step 2"],
+      "correctOptions": ["C"],
+      "annotations": [ { "type": "tick", "anchor": { "kind": "text", "match": "exact words from my answer" } } ] }
+  ]
+}
+\`\`\`
+
+- One entry in \`parts\` for every answer in answers.json (use its \`id\` exactly), plus one for each blank part (ids in "blankIds").
+- \`correctOptions\`: multiple-choice parts only (the right letter or letters). TypePDF then ticks my choice or crosses it and circles the right one, so you don't need annotations for those.
+- \`working\`: only when I didn't get full marks.
+- **annotations** are the marks on the page. Types: tick (a credited point), cross (an error), underline, circle, caret (something missing; put the missing word in "text"), note, bracket, arrow, sketch, symbol. Optional "text" is a short label written beside the mark.
+- **anchors** (where a mark goes):
+  - \`{"kind":"text","match":"…"}\`: words copied exactly from my typed answer (add "occurrence": 2 for the second time they appear). Put each tick or cross on the words that earned or lost the mark.
+  - \`{"kind":"workings","x":0.4,"y":0.3,"w":0.2,"h":0.1}\`: a spot on that part's image in the workings PDF, as fractions of the picture (0,0 is its top left, under the caption). Use these for drawings, graphs, diagrams, circuits and handwriting.
+  - \`{"kind":"option","letter":"B"}\`: a multiple-choice option. \`{"kind":"cell","index":2}\`: a table cell, counting from 0 in the order of "cells".
+  - \`{"kind":"part"}\`: beside the whole answer. \`{"kind":"page","page":3,"x":0.5,"y":0.8}\`: anywhere on a page (last resort).
+- To show what a drawing should have been: an **arrow** (\`"from": {"x":…,"y":…}\` in the same units as its anchor) pointing at the mistake, a **symbol** (\`"symbol"\`: and, or, not, nand, nor, xor, xnor or buffer) to draw a logic gate in the anchor's box, or a **sketch** (\`"path"\`: SVG path with absolute M/L/Q/C commands, coordinates 0–1 of the anchor's box, e.g. "M0 1 L1 0" for a line of best fit).
+- \`summary.score\` and \`outOf\` leave out excluded parts. \`perQuestion\` gives each whole question's total.
+
+Before sending, check the JSON is valid, every \`id\` is one from answers.json, and the marks add up to the score.
+`;
+}
+// a .zip with nothing compressed (PDFs are compressed already): enough for Claude, Finder and Files to open
+function zipFiles(files) {
+  const enc = new TextEncoder(), crcT = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crcT[n] = c >>> 0; }
+  const crc = b => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = crcT[(c ^ b[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  const d = new Date(), dt = ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) & 0xFFFF, dd = (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) & 0xFFFF;
+  const parts = [], central = []; let off = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = f.data instanceof Uint8Array ? f.data : typeof f.data === "string" ? enc.encode(f.data) : new Uint8Array(f.data), c = crc(data);
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true); h.setUint16(10, dt, true); h.setUint16(12, dd, true);
+    h.setUint32(14, c, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true); h.setUint16(26, name.length, true); h.setUint16(28, 0, true);
+    parts.push(new Uint8Array(h.buffer), name, data);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true); cd.setUint16(8, 0x0800, true); cd.setUint16(10, 0, true); cd.setUint16(12, dt, true); cd.setUint16(14, dd, true);
+    cd.setUint32(16, c, true); cd.setUint32(20, data.length, true); cd.setUint32(24, data.length, true); cd.setUint16(28, name.length, true); cd.setUint32(42, off, true);
+    central.push(new Uint8Array(cd.buffer), name);
+    off += 30 + name.length + data.length;
+  }
+  const csize = central.reduce((t, b) => t + b.length, 0), end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, csize, true); end.setUint32(16, off, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: "application/zip" });
+}
+const safeName = s => String(s).replace(/[\\/:*?"<>|]+/g, " ").trim() || "paper";
+// the four files, as File objects (for a zip or the share sheet)
+async function markingBundle() {
+  await aiPrep();
+  const o = rememberExport(aiJSON($("#aiQ").checked)), base = safeName(doc.name), files = [];
+  busy(true, "Preparing the whole paper…", 0.2);
+  const full = await exportPDF(false, { bytes: true });
+  busy(true, "Preparing your workings…", 0.6);
+  const work = (o.handwritten || []).length ? await workingsPDF() : null;
+  busy(false);
+  const list = [
+    { name: `${base} - answers.json`, what: "my typed and chosen answers, one entry per part, each with an id", data: JSON.stringify(o, null, 1), type: "application/json" },
+    ...(work ? [{ name: `${base} - workings.pdf`, what: "only what I wrote or drew by hand, one cropped image per part, captioned with its question", data: work, type: "application/pdf" }] : []),
+    { name: `${base} - answered.pdf`, what: "the whole paper with my answers on it, exactly as I see it", data: full, type: "application/pdf" },
+  ];
+  const prompt = markingPrompt(o, list);
+  files.push({ name: `${base} - READ ME FIRST (marking instructions).md`, data: prompt, type: "text/markdown" }, ...list);
+  return { files, prompt, o };
+}
+$("#aiZip").onclick = async () => {
+  try { const { files } = await markingBundle(); download(zipFiles(files), safeName(doc.name) + " - for Claude.zip"); toast("Downloaded: drag the .zip into Claude and press send.", 5000); }
+  catch (e) { busy(false); toast("Couldn't make the bundle: " + (e.message || e), 6000); }
+};
+$("#aiShare").onclick = async () => {
+  try {
+    const { files, prompt } = await markingBundle();
+    const fs = files.map(f => new File([f.data], f.name, { type: f.type }));
+    // the prompt goes in as the message too, in case the app only keeps the files
+    await navigator.share({ files: fs, title: "Mark this paper", text: prompt.split("\n")[0].replace(/^#\s*/, "") + ". Follow the instructions in the READ ME FIRST file." });
+  } catch (e) { busy(false); if (e && e.name !== "AbortError") toast("Couldn't share: " + (e.message || e) + ". Use Download for Claude instead.", 6000); }
+};
+$("#aiPrompt").onclick = async () => {
+  try { await aiPrep(); const o = rememberExport(aiJSON($("#aiQ").checked)), base = safeName(doc.name), has = (o.handwritten || []).length;
+    const t = markingPrompt(o, [{ name: `${base} - answers.json`, what: "my answers" }, ...(has ? [{ name: `${base} - workings.pdf`, what: "my handwriting, one image per part" }] : []), { name: `${base} - answered.pdf`, what: "the whole paper with my answers on it" }]);
+    try { await navigator.clipboard.writeText(t); toast("Marking prompt copied."); } catch (e) { fallbackCopy(t); } } catch (e) { toast("Couldn't make the prompt: " + e.message); }
+};
+$("#aiFull").onclick = async () => { try { const b = await exportPDF(false, { bytes: true }); download(new Blob([b], { type: "application/pdf" }), safeName(doc.name) + " - answered.pdf"); } catch (e) { toast("Couldn't make the PDF: " + e.message); } };
+// Share needs a device that can share files (iPad, iPhone, Android); elsewhere the .zip is the way
+try { $("#aiShare").hidden = !(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.pdf", { type: "application/pdf" })] })); } catch (e) {}
+$("#aiHow").textContent = !$("#aiShare").hidden
+  ? "Share to Claude: pick the Claude app in the share sheet, then send. On a computer: download the .zip and drag it into a Claude chat."
+  : "Drag the .zip into a Claude chat and press send (Claude unzips it when code execution / file creation is on in its settings; if it can't, unzip it and drag the four files in instead).";
 $("#aiCopy").onclick = async () => { const t = JSON.stringify(rememberExport(aiJSON($("#aiQ").checked)), null, 1); try { await navigator.clipboard.writeText(t); toast("Answers copied as JSON."); } catch (e) { fallbackCopy(t); } };
 $("#aiJson").onclick = () => download(new Blob([JSON.stringify(rememberExport(aiJSON($("#aiQ").checked)), null, 1)], { type: "application/json" }), doc.name + " - answers.json");
 $("#aiWork").onclick = async () => { try { const b = await workingsPDF(); busy(false); if (b) download(new Blob([b], { type: "application/pdf" }), doc.name + " - workings.pdf"); } catch (e) { busy(false); toast("Couldn't build the workings PDF: " + e.message); } };

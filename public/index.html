@@ -242,15 +242,23 @@
 
 <dialog id="aiDlg" class="dlg">
   <h2>Export for AI marking</h2>
-  <p class="note">Typed answers go in a small JSON file. Only the parts you wrote or drew by hand go in a PDF, cropped to just those areas and in greyscale. Together they cost far fewer tokens than the whole paper.</p>
+  <p class="note">Everything Claude needs to mark this paper, in one go: <b>instructions</b> (what to check and how to send the marking back), your <b>answers</b> as JSON, your <b>handwriting</b> cropped into a small PDF, and the <b>whole paper</b> with your answers on it, so nothing is missed. Drop it into Claude and send. Then import what it sends back with <b>✓ Marks</b>.</p>
   <label class="chk"><input type="checkbox" id="aiQ" checked> Include each question's wording (useful if the AI doesn't have the paper)</label>
   <p id="aiInfo" class="info"></p>
   <div class="row wrap">
-    <button class="primary" id="aiBoth">Download both</button>
+    <button class="primary" id="aiShare" hidden>Share to Claude…</button>
+    <button class="primary" id="aiZip">Download for Claude (.zip)</button>
+    <button id="aiPrompt">Copy the marking prompt</button>
+  </div>
+  <p class="note small" id="aiHow"></p>
+  <details class="aisep"><summary>Separate files</summary>
+  <div class="row wrap">
+    <button id="aiBoth">Answers + workings</button>
     <button id="aiJson">Answers (JSON)</button>
     <button id="aiWork">Workings (PDF)</button>
+    <button id="aiFull">Whole paper (PDF)</button>
     <button id="aiCopy">Copy JSON</button>
-  </div>
+  </div></details>
   <div class="row"><button type="button" id="aiClose">Close</button></div>
 </dialog>
 

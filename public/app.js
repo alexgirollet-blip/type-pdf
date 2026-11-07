@@ -2101,9 +2101,9 @@ function wrapText(text, font, size, width, indent) {
   }
   return out;
 }
-// marked: also draw the marking layer (Marks → Export marked PDF)
-async function exportPDF(marked) {
-  marked = marked === true;
+// marked: also draw the marking layer (Marks → Export marked PDF). opts.bytes: hand the PDF back instead of downloading it
+async function exportPDF(marked, opts) {
+  marked = marked === true; const wantBytes = !!(opts && opts.bytes);
   const btn = $("#exportBtn"); btn.disabled = true;
   try {
     busy(true, "Building your PDF…", 0);
@@ -2202,9 +2202,10 @@ async function exportPDF(marked) {
     await out.attach(new Uint8Array(doc.bytes.slice(0)), "typepdf-original.pdf", { mimeType: "application/pdf", description: "The original paper, for reopening in TypePDF" });
     await out.attach(new TextEncoder().encode(JSON.stringify({ format: "typepdf-state", v: 2, state: strip(doc) })), "typepdf-answers.json", { mimeType: "application/json", description: "Your answers, for reopening in TypePDF" });
     const bytes = await out.save();
+    if (wantBytes) { busy(false); return bytes; }
     download(new Blob([bytes], { type: "application/pdf" }), doc.name + (marked ? " - marked.pdf" : " - answered.pdf"));
     busy(false); toast("PDF exported.");
-  } catch (e) { console.error(e); busy(false); toast("Export failed: " + (e.message || e), 6000); }
+  } catch (e) { console.error(e); busy(false); toast("Export failed: " + (e.message || e), 6000); if (wantBytes) throw e; }
   finally { btn.disabled = false; }
 }
 $("#exportBtn").onclick = exportPDF;

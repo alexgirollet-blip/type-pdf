@@ -186,6 +186,26 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(/#mark=[A-Za-z0-9_-]+$/.test(link), "a marking fits in a #mark= link", link.slice(0, 80));
   const parsed = await pg.evaluate(async l => { const s = l.split("#mark=")[1], bin = Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0)); return JSON.parse(await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream("gzip"))).text()).parts.length; }, link);
   ok(parsed === marking.parts.length, "and comes back out of it", parsed);
+  // Export for AI: one .zip for Claude with the prompt, the answers, the workings and the whole answered paper
+  console.log("Bundle for Claude");
+  await pg.evaluate(() => { $("#aiDlg").showModal(); });
+  const [zdl] = await Promise.all([pg.waitForEvent("download", { timeout: 60000 }), pg.click("#aiZip")]);
+  const zpath = path.join(process.env.SHOTS || "/tmp", "bundle.zip"); await zdl.saveAs(zpath);
+  ok(/ - for Claude\.zip$/.test(zdl.suggestedFilename()), "one .zip to drag into Claude", zdl.suggestedFilename());
+  const listing = require("child_process").execFileSync("python3", ["-I", "-c", `
+import zipfile, json, sys
+z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None
+out = {}
+for n in z.namelist():
+    b = z.read(n)
+    out[n] = {"size": len(b), "pdf": b[:5] == b"%PDF-", "json": n.endswith(".json") and bool(json.loads(b)), "text": b.decode("utf8")[:4000] if n.endswith(".md") else ""}
+print(json.dumps(out))`, zpath]).toString();
+  const files = JSON.parse(listing), names = Object.keys(files);
+  ok(names.length === 4, "it holds four files", names);
+  ok(names.some(n => /READ ME FIRST/.test(n)) && names.some(n => / - answers\.json$/.test(n) && files[n].json) && names.some(n => / - workings\.pdf$/.test(n) && files[n].pdf) && names.some(n => / - answered\.pdf$/.test(n) && files[n].pdf && files[n].size > 5000), "instructions, answers.json, workings.pdf and the whole answered PDF, all valid", files);
+  const prompt = files[names.find(n => /READ ME FIRST/.test(n))].text;
+  ok(prompt.includes(ex.paperId) && /typepdf-marking/.test(prompt) && /correctOptions/.test(prompt) && /workings/.test(prompt) && prompt.includes("test-paper - marking.json"), "the prompt says how to mark and exactly what to send back (with this paper's id)", prompt.slice(0, 300));
+  await pg.evaluate(() => $("#aiDlg").close());
   ok(!errs.length, "no page errors", errs);
   await b.close();
   console.log(fails ? `\n${fails} check(s) failed` : "\nAll checks passed");
