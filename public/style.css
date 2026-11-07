@@ -400,3 +400,40 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .tpcount{font-size:12.5px;color:var(--muted)}
 .tpbuild button:not(.pfopen):not(.pfclear){font-size:13px;padding:5px 10px;border-radius:7px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
 .pfopen:disabled{opacity:.45}
+
+/* ---- marking (red pen layer, Marks panel) ---- */
+.page svg.marks{position:absolute;left:0;top:0;z-index:6;pointer-events:none;overflow:visible}
+.page svg.marks.editing{pointer-events:all;cursor:crosshair}
+.page svg.marks.editing g{cursor:grab}
+.page svg.marks g.sel{filter:drop-shadow(0 0 2px rgba(204,31,26,.8))}
+#marksBtn.has{border-color:#cc1f1a;color:#ffb3ae}
+.markspop{width:min(360px,calc(100vw - 16px));max-height:min(78vh,640px);overflow:auto;right:8px;top:96px;align-content:start}
+.markspop .note{margin:0;font-size:13px;color:#c5d0cc}
+.mkscore{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.mkscore b{font:400 30px "TP-hand",cursive;color:#ff7b74}
+.mkscore span{font-size:15px;color:#ffb3ae}
+.mkscore em{font-style:normal;font:400 20px "TP-hand",cursive;color:#ff7b74;border:1.5px solid #ff7b74;border-radius:50%;padding:0 10px}
+.mknote{color:#aab6b1;font-size:12px}
+.mkcmt{margin:0;font:400 16px/1.3 "TP-hand",cursive;color:#ffcfcb}
+.markspop .row{display:flex;gap:6px;align-items:center}
+.markspop .row.wrap{flex-wrap:wrap}
+.markspop button.on{background:#cc1f1a;border-color:#cc1f1a;color:#fff}
+.markspop button.danger{color:#ff9b94}
+.mkadd span{font-size:12px;color:#aab6b1}
+.mkwarn{font-size:12px;color:#e8c27a}
+.mkwarn ul{margin:6px 0 0;padding-left:18px}
+.mklist{display:grid;gap:4px}
+.mkrow{display:grid;grid-template-columns:auto 1fr auto;gap:2px 10px;text-align:left;align-items:baseline;border-left:4px solid #59625f}
+.mkrow .mkq{font-weight:700}
+.mkrow .mkv{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#aab6b1}
+.mkrow .mkm{font:400 17px "TP-hand",cursive;color:#ff9b94}
+.mkrow small{grid-column:1/-1;color:#c5d0cc;font-size:12px}
+.mkrow.v-correct{border-left-color:#3fb37a}.mkrow.v-correct .mkm{color:#7fdca5}
+.mkrow.v-partial{border-left-color:#e0b43a}
+.mkrow.v-wrong{border-left-color:#e0473f}
+.mkrow.v-blank{border-left-color:#59625f}
+.mkrow.v-excluded{opacity:.55}.mkrow.v-excluded .mkm{color:#aab6b1}
+.marksel{position:fixed;z-index:60;display:flex;gap:6px;background:var(--bar);padding:6px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+#markDlg textarea{width:100%;box-sizing:border-box;font:12px ui-monospace,monospace;min-height:110px}
+.filebtn{display:inline-flex;align-items:center;cursor:pointer;border:1px solid var(--line);border-radius:8px;padding:7px 14px}
+.filebtn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}

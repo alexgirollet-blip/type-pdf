@@ -104,6 +104,8 @@
         <li><b>Resize on the go:</b> while typing in a box, drag the dots on its corners to make it bigger or smaller.</li>
         <li><b>Two pages at once:</b> the ▯▯ button next to zoom shows pages side by side, like a book.</li>
         <li><b>Fix the boxes:</b> the Boxes tool lets you add, move, resize, delete or change any answer space if one was missed. Question numbers have purple markers there: fix their label, or pick <b>Question</b> and drag a box over a number Go to missed.</li>
+        <li><b>✓ Marks:</b> after Export for AI, send the files to a marker (e.g. Claude) and import the marking it sends back (choose the file or paste it). It's drawn like a teacher's red pen: ticks, crosses, comments, marks per part, totals and your score on the front page. Hide it, move or delete marks, add your own, or Export marked PDF. Your answers aren't changed.</li>
+        <li><b>Long answers over two pages:</b> lines that carry on at the top of the next page are one answer space: keep typing and the text flows on.</li>
         <li><b>Export PDF</b> keeps the original paper sharp and adds your writing on top. <b>Export for AI</b> gives typed answers as JSON plus a small PDF of only your handwritten work, which costs far fewer tokens to mark.</li>
         <li><b>Shortcuts:</b> ⌘/Ctrl+Z undo · ⇧⌘/Ctrl+Z redo · ⌘/Ctrl + and − or pinch to zoom · hold Shift while drawing for a straight line · Tab glides to the next answer space, multiple-choice question or question you answer on the paper (Space chooses an option) · Shift+Tab jumps back · double-click a word, triple-click a paragraph · Esc leaves a box · G or ⌘/Ctrl+G go to a question · N next empty answer.</li>
       </ul>
@@ -162,6 +164,7 @@
     <span class="count" id="count" title="Answer spaces with something typed in them"></span>
     <button id="hintBtn" title="Highlight every answer space">Show spaces</button>
     <button id="aiBtn" title="Typed answers as JSON plus only the handwritten work as a PDF">Export for AI</button>
+    <button id="marksBtn" title="Marks: import a marking, see your score, show or hide the red pen">✓ Marks</button>
     <button class="primary" id="exportBtn">Export PDF</button>
   </div>
 
@@ -192,6 +195,7 @@
   </div>
 
   <div class="pop flagspop" id="flagsPop" hidden></div>
+  <div class="pop markspop" id="marksPop" hidden><div id="marksHead"></div><div class="mklist" id="marksList"></div></div>
   <div class="pop jumppop" id="jumpPop" hidden>
     <form id="jumpForm" class="row">
       <input id="jumpIn" placeholder="Question (3, 4b(ii)) or page (p5)" aria-label="Question or page to jump to" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go">
@@ -250,6 +254,15 @@
   <div class="row"><button type="button" id="aiClose">Close</button></div>
 </dialog>
 
+<dialog id="markDlg" class="dlg">
+  <h2>Import marking</h2>
+  <p class="note">Send your <b>Export for AI</b> files to the marker (e.g. Claude) and ask for a TypePDF marking. Then pick the file it sends back (<i>… - marking.json</i>), or paste it below. The marks go on as their own layer: your answers aren't changed.</p>
+  <div class="row wrap"><label class="filebtn primary">Choose file…<input type="file" id="markFile" accept=".json,application/json,text/plain" hidden></label><button type="button" id="markPasteBtn">Paste from clipboard</button></div>
+  <textarea id="markPaste" rows="6" placeholder="…or paste the marking JSON here" aria-label="Marking JSON" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+  <p class="err" id="markErr"></p>
+  <div class="row"><button type="button" class="primary" id="markGo">Import</button><button type="button" id="markClose">Close</button></div>
+</dialog>
+
 <dialog id="nameDlg" class="dlg">
   <form id="nameForm">
     <h2 id="nameTitle">Name</h2>
@@ -289,6 +302,7 @@
 <script src="app.js"></script>
 <script src="geom.js"></script>
 <script src="aiexport.js"></script>
+<script src="marking.js"></script>
 <script src="sync.js"></script>
 <script src="home.js"></script>
 <script src="finder.js"></script>

@@ -159,6 +159,10 @@ function gapLabel(p, r, k, cells) {
 }
 
 // ---- the answers ----
+// each answer entry remembers which answer spaces it came from (not part of the JSON: used to place marks later)
+const withRegions = (e, regs) => Object.defineProperty(e, "_r", { value: regs.map(([p, r]) => ({ p, id: r.id })), enumerable: false });
+// a stable id from a part label: "3(a)(iii)" → "3a-iii", "06.2" → "6.2", "E1(a)" → "e1a", "4-2 M3(b)" → "4-2m3b"
+const idOfLabel = q => String(q).toLowerCase().replace(/^0+(?=\d)/, "").replace(/\)\s*\(/g, "-").replace(/[()\s]/g, "") || "q";
 function aiJSON(withQuestion) {
   const M = aiModel(), list = [];
   const done = id => !!(doc.text[id] || "").trim();
@@ -180,7 +184,7 @@ function aiJSON(withQuestion) {
         if (!/^[A-H]\b/.test(t)) t = (L + " " + t).trim();
         return { t: t.slice(0, 300), letter: t[0], chosen: done(r.id), inked: M.inked.has(r.id) };
       });
-      const e = { ...base, type: "multiple choice", options: opts.map(o => o.t), answer: opts.filter(o => o.chosen).map(o => o.letter) };
+      const e = withRegions({ ...base, type: "multiple choice", options: opts.map(o => o.t), answer: opts.filter(o => o.chosen).map(o => o.letter) }, ch);
       if (opts.some(o => o.inked)) e.handwritten = "marked by hand on the paper: see the workings PDF";
       list.push(e);
     }
@@ -189,11 +193,12 @@ function aiJSON(withQuestion) {
     if (cells.length) {
       const rows = new Set(cells.map(([, r]) => Math.round(r.y0 / 6))), cols = new Set(cells.map(([, r]) => Math.round(r.x0 / 6)));
       if (rows.size >= 2 && cols.size >= 2 && cells.length >= 4) {
-        const e = { ...base, type: "table", note: "cells left to right, top to bottom", cells: cells.map(([, r]) => (doc.text[r.id] || "").trim()) };
+        const e = withRegions({ ...base, type: "table", note: "cells left to right, top to bottom", cells: cells.map(([, r]) => (doc.text[r.id] || "").trim()) }, cells);
         if (cells.some(([, r]) => M.inked.has(r.id))) e.handwritten = "some cells written by hand: see the workings PDF";
         list.push(e);
       } else cells.forEach(([p, r], k) => {
-        const e = { ...base, part: gapLabel(p, r, k + 1, cells.map(c => c[1])), type: "gap", answer: (doc.text[r.id] || "").trim() };
+        const e = withRegions({ ...base, part: gapLabel(p, r, k + 1, cells.map(c => c[1])), type: "gap", answer: (doc.text[r.id] || "").trim() }, [[p, r]]);
+        Object.defineProperty(e, "_gap", { value: k + 1, enumerable: false });
         if (k) delete e.question;
         if (M.inked.has(r.id)) e.handwritten = "written by hand: see the workings PDF";
         list.push(e);
@@ -202,7 +207,10 @@ function aiJSON(withQuestion) {
     // written answers (lines and boxes): one per part, joined if a part has several spaces
     const typed = pt.regions.filter(([, r]) => r.kind === "lines" || r.kind === "box");
     if (typed.length) {
-      const e = { ...base, type: "written", answer: typed.map(([, r]) => (doc.text[r.id] || "").trim()).filter(Boolean).join("\n") };
+      // an answer that carries on over the page is one piece of text (its spaces were split between words)
+      let ans = "";
+      typed.forEach(([, r], k) => { const t = doc.text[r.id] || ""; if (!t.trim()) return; const joined = r.prev && k && typed[k - 1][1].id === r.prev; ans = joined ? ans + t : (ans.trim() ? ans.trim() + "\n" : "") + t; });
+      const e = withRegions({ ...base, type: "written", answer: ans.trim() }, typed);
       const lab = typed.map(([, r]) => r.label).find(l => l && l !== "label"); if (lab) e.part = lab.replace(/[.\s]+$/, "").slice(0, 40);
       if (typed.some(([, r]) => M.inked.has(r.id))) e.handwritten = "written by hand: see the workings PDF";
       list.push(e);
@@ -218,12 +226,34 @@ function aiJSON(withQuestion) {
     const at = list.findIndex(x => M.order.findIndex(o => o.label === x.q) > M.order.findIndex(o => o.label === w.q));
     if (at < 0) list.push(e); else list.splice(at, 0, e);
   }
+  // ids: unique and stable (the same paper exported again gives the same ids), so a marking can point at each answer
+  const seen = new Set();
+  for (const e of list) {
+    let id = idOfLabel(e.q) + (e.type === "gap" ? "-gap" + (e._gap || 1) : e.type === "drawn" ? "-drawn" : e.type === "table" ? "-table" : "");
+    if (seen.has(id)) { const sfx = e.type === "multiple choice" ? "-mc" : e.type === "written" ? "-written" : ""; if (sfx && !seen.has(id + sfx)) id += sfx; else { let n = 2; while (seen.has(id + "-" + n)) n++; id += "-" + n; } }
+    seen.add(id);
+    const ordered = { id }; for (const k of Object.keys(e)) ordered[k] = e[k];
+    Object.defineProperty(ordered, "_r", { value: e._r || [], enumerable: false });
+    list[list.indexOf(e)] = ordered;
+  }
+  // where each part's handwriting is in the workings PDF: which image, and the strip of the page each piece of it shows
+  // (page coordinates in points from the top of the printed page; x runs the full page width)
+  work.forEach((w, k) => {
+    const W = Math.max(...w.segs.map(sg => doc.pages[sg.p].w)), GAP = 6; let y = 0;
+    const crops = w.segs.map(sg => { const h = sg.y1 - sg.y0, c = { page: sg.p + 1, x0: 0, y0: +src(sg.p, sg.y0).toFixed(1), x1: +doc.pages[sg.p].w.toFixed(1), y1: +src(sg.p, sg.y1).toFixed(1), imageY0: +(y).toFixed(1), imageY1: +(y + h).toFixed(1) }; y += h + GAP; return c; });
+    const H = y - GAP;
+    for (const e of list) if (e.q === w.q && e.handwritten) e.workings = { image: k + 1, width: +W.toFixed(1), height: +H.toFixed(1), crops };
+  });
   const answered = e => (e.answer && (Array.isArray(e.answer) ? e.answer.length : e.answer)) || (e.cells && e.cells.some(Boolean)) || e.handwritten;
-  const o = { paper: doc.name, exported: new Date().toISOString() };
+  const o = { paper: doc.name, paperId: doc.id, exported: new Date().toISOString(), format: "typepdf-answers", version: 2 };
   if (doc.timer) o.time_used = fmtT(timerUsed(doc.timer)) + (doc.timer.up ? "" : " of " + fmtT(doc.timer.total));
-  o.note = "Answers are listed by question part in paper order. Maths is written with ^{…} for superscripts, _{…} for subscripts and \\frac{a}{b} for fractions. Multiple-choice answers give the letters chosen. Anything marked 'handwritten' is in the separate workings PDF, one image per part, captioned with the part and page.";
+  o.note = "Each answer has a unique id (use it to refer to that answer, e.g. in a marking file). Answers are listed by question part in paper order. Maths is written with ^{…} for superscripts, _{…} for subscripts and \\frac{a}{b} for fractions. Multiple-choice answers give the letters chosen. Anything marked 'handwritten' is in the separate workings PDF, one image per part, captioned with the part and page.";
+  // so a marker knows what to send back (see docs/marking-schema.json)
+  o.marking = { file: `${doc.name} - marking.json`, format: "typepdf-marking", version: 1, how: "To mark, return JSON {format, version:1, paperId, exported (both copied from here), marker, markedAt, summary:{score,outOf,grade,gradeNote,comment,perQuestion:[{q,awarded,max}]}, parts:[{id (from here), q, awarded, max, verdict: correct|partial|wrong|blank|excluded, comment, correction, annotations:[{type: tick|cross|underline|circle|caret|note|bracket, anchor: {kind:'text', match:'words from the answer', occurrence} | {kind:'workings', x,y,w,h (0-1 of that part's workings image)} | {kind:'part'} | {kind:'page', page, x, y}, text}]}]}." };
   o.answers = list.filter(answered);
+  Object.defineProperty(o, "_all", { value: list, enumerable: false });
   const blank = list.filter(e => !answered(e)).map(e => e.q + (e.part ? ` [${e.part}]` : ""));
+  const blankIds = list.filter(e => !answered(e)).map(e => e.id); if (blankIds.length) o.blankIds = blankIds;
   if (blank.length) o.blank = [...new Set(blank)];
   if (work.length) o.handwritten = work.map(w => ({ q: w.q, pages: [...new Set(w.segs.map(s => s.p + 1))], ...(w.fig ? { on: "Figure " + w.fig } : {}) }));
   const fl = [];
@@ -334,8 +364,16 @@ function updateAiInfo() {
   $("#aiInfo").textContent = `${o.answers.length} answered (${typed} typed or chosen), ${(o.blank || []).length} blank. ${wk.length ? wk.length + " part" + (wk.length > 1 ? "s" : "") + " with handwriting go in the workings PDF." : "No handwriting, so no workings PDF is needed."} About ${Math.round(txt.length / 4).toLocaleString()} tokens of text.`;
   $("#aiWork").disabled = !wk.length;
 }
-$("#aiCopy").onclick = async () => { const t = JSON.stringify(aiJSON($("#aiQ").checked), null, 1); try { await navigator.clipboard.writeText(t); toast("Answers copied as JSON."); } catch (e) { fallbackCopy(t); } };
-$("#aiJson").onclick = () => download(new Blob([JSON.stringify(aiJSON($("#aiQ").checked), null, 1)], { type: "application/json" }), doc.name + " - answers.json");
+// what was exported last, and which answer spaces each id is: kept with the paper (and synced) for marking
+function rememberExport(o) {
+  const ids = {};
+  for (const e of o._all || o.answers) ids[e.id] = { q: e.q, type: e.type, r: (e._r || []).map(x => x.id), page: e.page, ...(e.workings ? { w: e.workings } : {}) };
+  doc.aiExport = { exported: o.exported, ids };
+  scheduleSave(); emit("aiexport");
+  return o;
+}
+$("#aiCopy").onclick = async () => { const t = JSON.stringify(rememberExport(aiJSON($("#aiQ").checked)), null, 1); try { await navigator.clipboard.writeText(t); toast("Answers copied as JSON."); } catch (e) { fallbackCopy(t); } };
+$("#aiJson").onclick = () => download(new Blob([JSON.stringify(rememberExport(aiJSON($("#aiQ").checked)), null, 1)], { type: "application/json" }), doc.name + " - answers.json");
 $("#aiWork").onclick = async () => { try { const b = await workingsPDF(); busy(false); if (b) download(new Blob([b], { type: "application/pdf" }), doc.name + " - workings.pdf"); } catch (e) { busy(false); toast("Couldn't build the workings PDF: " + e.message); } };
 $("#aiBoth").onclick = async () => { $("#aiJson").click(); if (!$("#aiWork").disabled) setTimeout(() => $("#aiWork").click(), 600); };
 $("#aiClose").onclick = () => $("#aiDlg").close();

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://typepdf.girolletserver.com/docs/marking-schema.json",
+  "title": "TypePDF marking (v1)",
+  "description": "A marking of a paper answered in TypePDF and exported with Export for AI. Import it in TypePDF (Marks → Import marking) to see it drawn on the paper like a teacher's red pen. Name the file \"<paper title> - marking.json\".",
+  "type": "object",
+  "required": ["format", "version", "parts"],
+  "properties": {
+    "format": { "const": "typepdf-marking" },
+    "version": { "const": 1 },
+    "paperId": { "type": "string", "description": "The export's paperId. If it doesn't match the open paper TypePDF warns but still imports." },
+    "paperTitle": { "type": "string" },
+    "exported": { "type": "string", "format": "date-time", "description": "The export's exported timestamp: the export this marking is for." },
+    "marker": { "type": "string", "examples": ["Claude"] },
+    "markedAt": { "type": "string", "format": "date-time" },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "score": { "type": "number", "description": "Marks awarded, excluded parts left out. Defaults to the sum of the parts." },
+        "outOf": { "type": "number", "description": "Marks available, excluded parts left out. Defaults to the sum of the parts." },
+        "grade": { "type": "string" },
+        "gradeNote": { "type": "string", "examples": ["estimated from June 2025 boundaries"] },
+        "comment": { "type": "string", "description": "A short overall comment." },
+        "perQuestion": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["q"],
+            "properties": { "q": { "type": "string", "description": "The question number, e.g. \"1\", \"E2\"." }, "awarded": { "type": "number" }, "max": { "type": "number" } }
+          }
+        }
+      }
+    },
+    "parts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/part" }
+    }
+  },
+  "$defs": {
+    "part": {
+      "type": "object",
+      "required": ["id", "verdict"],
+      "properties": {
+        "id": { "type": "string", "description": "The answer's id from the export (e.g. \"3a-iii\", \"4a-gap3\", \"5d-drawn\"). An unknown id is reported and skipped." },
+        "q": { "type": "string", "description": "The part label, e.g. \"3(a)(iii)\". Used if the id isn't found." },
+        "awarded": { "type": "number" },
+        "max": { "type": "number" },
+        "verdict": { "enum": ["correct", "partial", "wrong", "blank", "excluded"], "description": "excluded: skipped on purpose, shown grey and left out of the total." },
+        "comment": { "type": "string", "description": "A short margin note." },
+        "correction": { "type": "string", "description": "The model answer or fix, shown under the comment as \"Answer: …\"." },
+        "annotations": { "type": "array", "items": { "$ref": "#/$defs/annotation" } }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "required": ["type", "anchor"],
+      "properties": {
+        "type": { "enum": ["tick", "cross", "underline", "circle", "caret", "note", "bracket"], "description": "Ticks are green, everything else red (never blue)." },
+        "anchor": {
+          "oneOf": [
+            { "type": "object", "required": ["kind", "match"], "properties": { "kind": { "const": "text" }, "match": { "type": "string", "description": "Words copied from the typed answer. Not found: placed beside the whole answer." }, "occurrence": { "type": "integer", "minimum": 1, "default": 1 } } },
+            { "type": "object", "required": ["kind", "x", "y"], "properties": { "kind": { "const": "workings" }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 }, "w": { "type": "number", "minimum": 0, "maximum": 1 }, "h": { "type": "number", "minimum": 0, "maximum": 1 } }, "description": "0–1 of that part's image in the workings PDF (top left is 0,0)." },
+            { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "part" } }, "description": "Beside the whole answer." },
+            { "type": "object", "required": ["kind", "page", "x", "y"], "properties": { "kind": { "const": "page" }, "page": { "type": "integer", "minimum": 1 }, "x": { "type": "number", "minimum": 0, "maximum": 1 }, "y": { "type": "number", "minimum": 0, "maximum": 1 } }, "description": "0–1 of a page (the fallback)." }
+          ]
+        },
+        "text": { "type": "string", "description": "A short label, e.g. \"should be 8\". Up to about 28 characters is written beside the mark; longer goes in the margin." }
+      }
+    }
+  }
+}

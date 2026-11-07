@@ -1,0 +1,65 @@
+{
+  "format": "typepdf-marking",
+  "version": 1,
+  "paperId": "66c87aa270410239d0aff1f2",
+  "paperTitle": "test-paper",
+  "exported": "2026-11-07T17:52:43.065Z",
+  "marker": "Claude",
+  "markedAt": "2026-11-07T18:05:00.000Z",
+  "summary": {
+    "score": 6,
+    "outOf": 10,
+    "grade": "B",
+    "gradeNote": "estimated from June 2025 boundaries",
+    "comment": "Good use of F = ma. Ray diagrams need the normal drawn in. Explain the forces changing, not just the end state.",
+    "perQuestion": [
+      { "q": "1", "awarded": 3, "max": 4 },
+      { "q": "2", "awarded": 1, "max": 3 },
+      { "q": "3", "awarded": 1, "max": 1 },
+      { "q": "4", "awarded": 1, "max": 2 }
+    ]
+  },
+  "parts": [
+    {
+      "id": "1a", "q": "1(a)", "awarded": 1, "max": 2, "verdict": "partial",
+      "comment": "Needs 'resultant' force, and proportional to rate of change of momentum.",
+      "correction": "Resultant force = rate of change of momentum (F = ma for constant mass)",
+      "annotations": [
+        { "type": "underline", "anchor": { "kind": "text", "match": "mass times acceleration", "occurrence": 1 } },
+        { "type": "tick", "anchor": { "kind": "text", "match": "F = ma" } },
+        { "type": "caret", "anchor": { "kind": "text", "match": "Force" }, "text": "resultant" }
+      ]
+    },
+    {
+      "id": "1b", "q": "1(b)", "awarded": 2, "max": 2, "verdict": "correct",
+      "annotations": [
+        { "type": "circle", "anchor": { "kind": "text", "match": "2.0 x 3.0" } },
+        { "type": "tick", "anchor": { "kind": "text", "match": "6 N" } }
+      ]
+    },
+    {
+      "id": "2-drawn", "q": "2", "awarded": 1, "max": 3, "verdict": "partial",
+      "comment": "The ray should bend towards the normal going into the block.",
+      "annotations": [
+        { "type": "cross", "anchor": { "kind": "workings", "x": 0.6, "y": 0.55, "w": 0.1, "h": 0.2 }, "text": "bends the wrong way" },
+        { "type": "bracket", "anchor": { "kind": "workings", "x": 0.35, "y": 0.1, "w": 0.4, "h": 0.6 } }
+      ]
+    },
+    { "id": "2", "q": "2", "awarded": 0, "max": 0, "verdict": "excluded", "comment": "Skipped on purpose." },
+    {
+      "id": "3", "q": "3", "awarded": 1, "max": 1, "verdict": "correct",
+      "annotations": [ { "type": "tick", "anchor": { "kind": "part" } } ]
+    },
+    {
+      "id": "4", "q": "4", "awarded": 1, "max": 2, "verdict": "partial",
+      "comment": "Say why: drag increases with speed until it equals weight, so resultant force is zero.",
+      "annotations": [
+        { "type": "tick", "anchor": { "kind": "text", "match": "air resistance equals weight" } },
+        { "type": "note", "anchor": { "kind": "text", "match": "speeds up" }, "text": "why does it stop speeding up?" },
+        { "type": "cross", "anchor": { "kind": "text", "match": "not in the answer" } },
+        { "type": "note", "anchor": { "kind": "page", "page": 3, "x": 0.5, "y": 0.85 }, "text": "Nice clear answers overall." }
+      ]
+    },
+    { "id": "9z", "q": "9", "awarded": 0, "max": 1, "verdict": "blank" }
+  ]
+}

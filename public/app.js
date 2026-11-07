@@ -190,6 +190,7 @@ async function openDoc(d, fresh = false) {
   if (doc.pages.some(P => P && P.cv !== CV)) await findChoices().catch(e => console.warn("choices", e));
   linkChoicesAcrossPages();
   if (doc.pages.some(needsQuestions)) { busy(true, "Finding the questions…"); await findQuestions().catch(e => console.warn("questions", e)); }
+  linkContinuations();
   if (!doc.font) { const name = await detectFont().catch(() => ""); doc.font = { key: matchFont(name) || FONT_DEFAULT, auto: true, detected: name || "" }; emit("font"); }
   await applyFont(false); applyAnsStyle();
   busy(false);
@@ -206,6 +207,7 @@ async function openDoc(d, fresh = false) {
   if (fresh || need.length) scheduleSave();
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
   if (window.Sync) Sync.live();
+  if (window.Marking) { $("#marksPop").hidden = true; Marking.refresh(); }
 }
 
 // the font the paper is mostly printed in, by amount of text
@@ -731,7 +733,11 @@ function makeField(p, r) {
   codeAttrs(ta, r.code);
   ta.dataset.rid = r.id; ta.value = doc.text[r.id] || "";
   ta.setAttribute("aria-label", "Answer space" + (r.label && r.label !== "label" ? " " + r.label : ""));
-  ta.addEventListener("input", () => { if (!r.code && !r.codeSet && looksLikeCode(ta.value)) { setCode(p, r, true, false); toast("This looks like code, so this space is now in code mode: no capitals or corrections, Tab indents. Press </> Code to switch back.", 5000); } if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id); });
+  ta.addEventListener("input", () => {
+    if (!r.code && !r.codeSet && looksLikeCode(ta.value)) { setCode(p, r, true, false); toast("This looks like code, so this space is now in code mode: no capitals or corrections, Tab indents. Press </> Code to switch back.", 5000); }
+    if ((r.prev || r.next) && chainInput(r)) { updateCount(); scheduleSave(); return; }
+    if (ta.value) doc.text[r.id] = ta.value; else delete doc.text[r.id]; queueFit(p, r); updateCount(); scheduleSave(); emit("text:" + r.id);
+  });
   ta.addEventListener("keydown", e => fieldKeys(e, p, r, ta));
   ta.addEventListener("focus", () => {
     if (ta.classList.contains("locked")) { const by = ta.dataset.lockedBy || "Someone"; ta.blur(); toast(`${by} is typing here right now.`); return; }
@@ -745,6 +751,7 @@ function makeField(p, r) {
 
 function fieldKeys(e, p, r, ta) {
   if (e.key === "Escape") { ta.blur(); return; }
+  if (chainKeys(e, r, ta)) return;
   if (r.code && e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
     // a new line keeps the indentation, and goes one step further in after ":" "{" "then" or "do"
     e.preventDefault();
@@ -815,6 +822,113 @@ function linkChoicesAcrossPages() {
     for (const r of first) r.grp = last[0].grp;
   }
 }
+// ---- answer lines that carry on over the page ----
+// a long question's lines at the bottom of one page and more lines at the top of the next (nothing printed in
+// between but the page furniture) are one answer: the text flows from one into the next as you type
+const CONT_FURN = /^(\d{1,3}|turn over\s*[►▶>]?|question \d+ continues on the next page|outside the box|©.*|\(c\).*|.*\bcopyright\b.*|page \d+( of \d+)?|blank page|do not write .*|.*savemyexams.*|.*save my exams.*|\[?\d+\]?|\(\d+ marks?\)|.*(ocr|aqa|pearson|edexcel|wjec|eduqas|cie) 20\d\d.*|\*+.*\*+)$/i;
+function linkContinuations() {
+  if (!doc || !doc.pages) return;
+  for (const P of doc.pages) for (const r of (P && P.regions) || []) if (r.auto) { delete r.next; delete r.prev; delete r.auto; }
+  const real = (P, a, b) => (P.items || []).filter(it => it.y > a && it.y < b && it.s && it.s.trim() && !CONT_FURN.test(it.s.trim()));
+  for (let p = 0; p + 1 < doc.pages.length; p++) {
+    const P = doc.pages[p], Q = doc.pages[p + 1]; if (!P || !Q || !P.regions || !Q.regions) continue;
+    const lines = P.regions.filter(r => r.kind === "lines").sort((a, b) => b.y1 - a.y1), A = lines[0];
+    const top = Q.regions.filter(r => r.kind !== "choice").sort((a, b) => a.y0 - b.y0)[0];
+    if (!A || !top || top.kind !== "lines" || A.next || top.prev || (top.label && top.label !== "")) continue;
+    if (P.regions.some(r => r !== A && r.kind !== "choice" && r.y0 > A.y1 - 2)) continue;                // something else answered below it
+    if ((P.qs || []).some(m => m.y0 > A.y0)) continue;                                                // a question starts after it
+    if ((Q.qs || []).some(m => m.y0 < top.y1)) continue;                                              // or before the next page's lines
+    if (Math.abs(A.x0 - top.x0) > 30 || Math.abs(A.x1 - top.x1) > 60) continue;                      // not the same column
+    // nothing printed under it but the page footer, and nothing above the next page's lines but its header
+    if (real(P, A.y1 + 2, P.h - 45).length || real(Q, 45, top.y0).length) continue;
+    if (P.h - A.y1 > P.h * 0.3 || top.y0 > Q.h * 0.35) continue;
+    A.next = top.id; top.prev = A.id; A.auto = top.auto = true;
+  }
+}
+// the whole chain an answer space belongs to, first to last
+function chainOf(r) {
+  let h = r, guard = 0; while (h.prev && guard++ < 20) { const q = findRegion(h.prev); if (!q) break; h = q; }
+  const out = [h]; guard = 0;
+  while (out[out.length - 1].next && guard++ < 20) { const q = findRegion(out[out.length - 1].next); if (!q || out.includes(q)) break; out.push(q); }
+  return out;
+}
+const pageOfRegion = r => doc.pages.findIndex(P => P && P.regions.includes(r));
+// spread the chain's text over its spaces: each takes as much as fits on its lines (breaking between words), the
+// rest goes on. caret: where the caret is in the whole text; it ends up in whichever space now holds that spot
+function reflow(chain, full, caret) {
+  const parts = [];
+  let rest = full;
+  for (let i = 0; i < chain.length; i++) {
+    const r = chain[i], p = pageOfRegion(r), ta = r._el;
+    if (i === chain.length - 1 || !ta) { parts.push(rest); rest = ""; continue; }
+    const f = baseFit(r);
+    const fits = t => { ta.value = t; applyFieldNoGap(p, r, f); return contentH(r) <= availFor(r, f) + 0.5; };
+    let take = rest.length;
+    if (!fits(rest)) {
+      // break points: after a space or a new line (and a hard cut, for one enormous word)
+      const cuts = []; for (let k = 1; k <= rest.length; k++) if (/\s/.test(rest[k - 1])) cuts.push(k);
+      let lo = -1, hi = cuts.length;                                   // cuts[lo] fits, cuts[hi] doesn't
+      while (hi - lo > 1) { const m = (lo + hi) >> 1; if (fits(rest.slice(0, cuts[m]))) lo = m; else hi = m; }
+      take = lo >= 0 ? cuts[lo] : 0;
+      if (!take) { let a = 0, b = rest.length; while (b - a > 1) { const m = (a + b) >> 1; if (fits(rest.slice(0, m))) a = m; else b = m; } take = a; }
+    }
+    parts.push(rest.slice(0, take)); rest = rest.slice(take);
+  }
+  let off = 0, at = null;
+  chain.forEach((r, i) => {
+    const t = parts[i], ta = r._el;
+    if (ta && ta.value !== t) ta.value = t;
+    if (t) doc.text[r.id] = t; else delete doc.text[r.id];
+    const end = off + t.length;
+    // the caret goes into the first space that holds it; at a join it goes on into the next space when that has text
+    if (at === null && caret != null && caret <= end && !(caret === end && i < chain.length - 1 && parts[i + 1])) at = { r, pos: caret - off };
+    off = end;
+  });
+  return at;
+}
+// typing in a chained space: the text is the whole chain's, re-spread after every change
+function chainInput(r) {
+  const chain = chainOf(r);
+  if (chain.length < 2) return false;
+  const ta = r._el; let full = "", caret = 0;
+  for (const q of chain) { if (q === r) caret = full.length + ta.selectionStart; full += q === r ? ta.value : (doc.text[q.id] || ""); }
+  const at = reflow(chain, full, caret);
+  for (const q of chain) { const p = pageOfRegion(q); queueFit(p, q); emit("text:" + q.id); }
+  if (at && at.r._el) {
+    const el = at.r._el;
+    if (document.activeElement !== el) { el.focus({ preventScroll: true }); if (at.r !== r) { const p = pageOfRegion(at.r); scrollToShow(p, at.r); } }
+    el.setSelectionRange(at.pos, at.pos);
+  }
+  return true;
+}
+// keep the space you've just moved into on screen
+function scrollToShow(p, r) {
+  const host = $("#pages"), t = pageTop(p) + disp(p, r.y0) * zoom, b = pageTop(p) + disp(p, r.y1) * zoom;
+  if (t < host.scrollTop + 40 || t > host.scrollTop + host.clientHeight - 80) glideTo(host, Math.max(0, t - host.clientHeight * 0.25));
+}
+// moving between the spaces of a chain with the keyboard, as if they were one box
+function chainKeys(e, r, ta) {
+  if (!(r.prev || r.next) || e.metaKey || e.ctrlKey || e.altKey) return false;
+  const s = ta.selectionStart, en = ta.selectionEnd, go = (q, pos) => { const el = q._el; if (!el) return; e.preventDefault(); el.focus({ preventScroll: true }); scrollToShow(pageOfRegion(q), q); const P = pos < 0 ? el.value.length : pos; el.setSelectionRange(P, P); };
+  const prev = r.prev && findRegion(r.prev), next = r.next && findRegion(r.next);
+  if (prev && s === 0 && en === 0) {
+    if (e.key === "Backspace") {
+      // delete the last character of the space before, and carry on from there
+      e.preventDefault(); const pe = prev._el; if (!pe) return true;
+      pe.focus({ preventScroll: true }); scrollToShow(pageOfRegion(prev), prev);
+      const L = pe.value.length; if (L) { pe.value = pe.value.slice(0, L - 1); pe.setSelectionRange(L - 1, L - 1); }
+      pe.dispatchEvent(new Event("input")); return true;
+    }
+    if (e.key === "ArrowLeft" || (e.key === "ArrowUp" && !ta.value.slice(0, s).includes("\n") && caretLine(ta) === 0)) { go(prev, -1); return true; }
+  }
+  if (next && s === ta.value.length && en === s) {
+    if (e.key === "Delete") { e.preventDefault(); const ne = next._el; if (ne && ne.value) { ne.value = ne.value.slice(1); ne.dispatchEvent(new Event("input")); ta.focus({ preventScroll: true }); ta.setSelectionRange(s, s); } return true; }
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") { go(next, 0); return true; }
+  }
+  return false;
+}
+// which wrapped line of the box the caret is on (0 = the first)
+function caretLine(ta) { const r = caretRect(ta, ta.selectionStart), top = ta.getBoundingClientRect().top; return r ? Math.floor((r.top - top) / (parseFloat(ta.style.lineHeight) || 16)) : 0; }
 // the part of a choice that's filled in: the capsule inside AQA's answer box, or the oval itself (slightly inset)
 function choiceMark(r) { return Array.isArray(r.mark) && r.mark.length === 4 ? r.mark : [0.16, 0.16, 0.84, 0.84]; }
 function paintChoice(r) { const b = r._el; if (!b) return; const on = !!doc.text[r.id]; b.classList.toggle("on", on); b.setAttribute("aria-pressed", on ? "true" : "false"); }
@@ -983,7 +1097,8 @@ function fitRegion(p, r) {
   const steps = fitSteps(r);
   const fits = f => { applyFieldNoGap(p, r, f); return contentH(r) <= availFor(r, f) + 0.5; };
   let f = steps[0], gap = 0;
-  if (ta.value && !fits(steps[0])) {
+  if (r.next && findRegion(r.next)) { /* the rest flows on into the next space */ }
+  else if (ta.value && !fits(steps[0])) {
     const last = steps[steps.length - 1];
     if (fits(last)) { let lo = steps.length - 1, hi = 0; while (lo - hi > 1) { const m = (lo + hi) >> 1; if (fits(steps[m])) lo = m; else hi = m; } f = steps[lo]; }
     else {
@@ -1037,6 +1152,7 @@ function layoutPage(p) {
   if (handFor && handFor.p === p) placeHandles();
   if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
   Geo.place();
+  if (window.Marking) Marking.pageChanged();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
@@ -1769,7 +1885,10 @@ function answerUnits() {
   if (!doc) return [];
   const units = [], groups = new Map(); let idx = null;
   doc.pages.forEach((P, p) => { if (!P) return; for (const r of P.regions) {
-    if (r.kind !== "choice") { units.push({ ids: [r.id] }); continue; }
+    if (r.kind !== "choice") {
+      if (r.prev && findRegion(r.prev)) continue;                         // the rest of an answer from the page before
+      units.push({ ids: r.next ? chainOf(r).map(q => q.id) : [r.id] }); continue;
+    }
     idx ||= labelIndex();
     const key = r.grp ? "g|" + (/^\d+:/.test(r.grp) ? "" : p + "|") + r.grp : labelAt(idx, p, r.y0 + 2) + "|" + (idx.length ? "" : p);
     if (!groups.has(key)) { const u = { ids: [], choice: true }; groups.set(key, u); units.push(u); }
@@ -1982,7 +2101,9 @@ function wrapText(text, font, size, width, indent) {
   }
   return out;
 }
-async function exportPDF() {
+// marked: also draw the marking layer (Marks → Export marked PDF)
+async function exportPDF(marked) {
+  marked = marked === true;
   const btn = $("#exportBtn"); btn.disabled = true;
   try {
     busy(true, "Building your PDF…", 0);
@@ -2072,6 +2193,7 @@ async function exportPDF() {
         const d = "M" + pts.map(f2).join(" L");
         page.drawSvgPath(d, { x: tx(0), y: ty(0), borderColor: hex(s.c), borderWidth: s.w, borderOpacity: s.t === "hl" ? 0.35 : 1, borderLineCap: s.t === "hl" ? LineCapStyle.Butt : LineCapStyle.Round });
       }
+      if (marked && window.Marking) await Marking.toPdf(out, page, p, tx, ty);
     }
     await aiPrep().catch(() => {});
     out.setTitle(doc.name + " (answered)"); out.setSubject(JSON.stringify(aiJSON(false))); out.setCreator("TypePDF"); out.setProducer("TypePDF");
@@ -2080,7 +2202,7 @@ async function exportPDF() {
     await out.attach(new Uint8Array(doc.bytes.slice(0)), "typepdf-original.pdf", { mimeType: "application/pdf", description: "The original paper, for reopening in TypePDF" });
     await out.attach(new TextEncoder().encode(JSON.stringify({ format: "typepdf-state", v: 2, state: strip(doc) })), "typepdf-answers.json", { mimeType: "application/json", description: "Your answers, for reopening in TypePDF" });
     const bytes = await out.save();
-    download(new Blob([bytes], { type: "application/pdf" }), doc.name + " - answered.pdf");
+    download(new Blob([bytes], { type: "application/pdf" }), doc.name + (marked ? " - marked.pdf" : " - answered.pdf"));
     busy(false); toast("PDF exported.");
   } catch (e) { console.error(e); busy(false); toast("Export failed: " + (e.message || e), 6000); }
   finally { btn.disabled = false; }
