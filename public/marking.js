@@ -82,7 +82,8 @@ const Marking = window.Marking = (() => {
     m.map = map; m.importedAt = new Date().toISOString(); m.warn = warn;
     if (doc.marking) { doc.markingPrev = doc.marking; emit("markingPrev"); }
     doc.marking = m; emit("marking"); scheduleSave();
-    setOn(true); refresh();
+    await prepare();
+    lay = null; setOn(true); refresh();
     return warn;
   }
   const when = iso => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }); };
@@ -210,58 +211,193 @@ const Marking = window.Marking = (() => {
     return out;
   }
 
+  // ---------------- what's already on each page: a grid of 2 pt cells, taken or free ----------------
+  // Taken: the printed paper's own ink (read from a render of the page), what you typed (line by line), your pen
+  // strokes, chosen options, and every mark placed so far. The empty lines of an answer space are free: that's
+  // where a teacher writes.
+  const CELL = 2;
+  const inkMasks = new Map();                  // "<doc id>:<page>" → { w, h, a } in the printed page's points / CELL
+  async function inkMask(p) {
+    const key = doc.id + ":" + p; if (inkMasks.has(key)) return inkMasks.get(key);
+    const page = await pdf.getPage(p + 1), vp = page.getViewport({ scale: 1 });
+    const c = document.createElement("canvas"); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+    const ctx = c.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    const d = ctx.getImageData(0, 0, c.width, c.height).data, W = Math.ceil(c.width / CELL), H = Math.ceil(c.height / CELL), a = new Uint8Array(W * H);
+    for (let y = 0; y < c.height; y++) { const row = ((y / CELL) | 0) * W; for (let x = 0; x < c.width; x++) { const i = (y * c.width + x) * 4; if (d[i] * 0.3 + d[i + 1] * 0.59 + d[i + 2] * 0.11 < 200) a[row + ((x / CELL) | 0)] = 1; } }
+    c.width = c.height = 0;
+    const m = { w: W, h: H, a }; inkMasks.set(key, m); return m;
+  }
+  let masksFor = null, preparing = null;
+  // every page's ink, once per paper (a second or two for a long paper), before the marks are laid out
+  function prepare() {
+    if (!doc || !pdf) return Promise.resolve();
+    if (masksFor === doc.id) return Promise.resolve();
+    if (preparing && preparing.id === doc.id) return preparing.p;
+    const id = doc.id;
+    const p = (async () => { for (let i = 0; i < doc.pages.length; i++) { if (!doc || doc.id !== id) return; try { await inkMask(i); } catch (e) { console.warn("ink", e); } } if (doc && doc.id === id) masksFor = id; })();
+    preparing = { id, p }; return p;
+  }
+  const clampI = (v, a, b) => v < a ? a : v > b ? b : v;
+  function Occ(p) {
+    const P = doc.pages[p], H = P.h + totalGap(p), W = Math.ceil(P.w / CELL) + 1, R = Math.ceil(H / CELL) + 1, a = new Uint8Array(W * R);
+    let S = null;
+    const set = (x0, y0, x1, y1, v = 1) => { const c0 = clampI(Math.floor(x0 / CELL), 0, W - 1), c1 = clampI(Math.floor(x1 / CELL), 0, W - 1), r0 = clampI(Math.floor(y0 / CELL), 0, R - 1), r1 = clampI(Math.floor(y1 / CELL), 0, R - 1); if (c1 < c0 || r1 < r0) return; for (let r = r0; r <= r1; r++) a.fill(v, r * W + c0, r * W + c1 + 1); S = null; };
+    // the paper's ink, moved down past any extra space added under answers
+    const m = inkMasks.get(doc.id + ":" + p);
+    if (m) for (let r = 0; r < R; r++) {
+      const yd = r * CELL + 1, ys = src(p, yd); if (Math.abs(disp(p, ys) - yd) > 1.5) continue;     // inside added space: blank
+      const sr = Math.floor(ys / CELL); if (sr < 0 || sr >= m.h) continue;
+      for (let c = 0, n = Math.min(W, m.w); c < n; c++) if (m.a[sr * m.w + c]) a[r * W + c] = 1;
+    }
+    // answer spaces: their printed lines and borders don't count…
+    for (const r of P.regions || []) { if (r.kind === "choice") continue; const Q = regionRect(p, r); set(Q.x0 + 1.5, Q.y0 + 1.5, Q.x1 - 1.5, Q.y1 - 1.5, 0); }
+    // …but printed words inside them (a [3], a label) still do, and what you wrote in them does
+    for (const it of P.items || []) if (it.s && it.s.trim()) set(it.x - 1, disp(p, it.y) - (it.h || 10) * 0.8, it.x1 + 1, disp(p, it.y) + 2);
+    for (const r of P.regions || []) {
+      const Q = regionRect(p, r);
+      if (r.kind === "choice") { set(Q.x0 - 1, Q.y0 - 1, Q.x1 + 1, Q.y1 + 1); continue; }
+      const ta = r._el, t = (ta && ta.value) || doc.text[r.id] || ""; if (!t.trim() || !ta) continue;
+      try {
+        const z = zoom, s0 = caretRect(ta, 0), e0 = caretRect(ta, t.length), lh = (s0.h || 12 * z) / z, y0 = s0.y / z, ye = e0.y / z;
+        if (Math.abs(ye - y0) < lh * 0.5) set(s0.x / z - 2, y0, e0.x / z + 3, ye + lh);
+        else { set(Q.x0, y0, Q.x1, ye); set(Q.x0, ye, e0.x / z + 3, ye + lh); }
+      } catch (e) { set(Q.x0, Q.y0, Q.x1, Q.y1); }
+    }
+    // pen strokes (not highlighter)
+    for (const st of doc.strokes[p] || []) {
+      if (st.t === "hl") continue;
+      const q = dispPts(p, st), w = (st.w || 1.3) / 2 + 1.5;
+      for (let i = 0; i < q.length; i++) { const A = q[i], B = q[i + 1] || A, n = Math.max(1, Math.ceil(Math.hypot(B[0] - A[0], B[1] - A[1]) / CELL)); for (let k = 0; k <= n; k++) { const x = A[0] + (B[0] - A[0]) * k / n, y = A[1] + (B[1] - A[1]) * k / n; set(x - w, y - w, x + w, y + w); } }
+    }
+    const sum = () => { S = new Int32Array((W + 1) * (R + 1)); for (let r = 0; r < R; r++) { let row = 0; for (let c = 0; c < W; c++) { row += a[r * W + c]; S[(r + 1) * (W + 1) + c + 1] = S[r * (W + 1) + c + 1] + row; } } };
+    const count = (x0, y0, x1, y1) => { if (!S) sum(); const c0 = clampI(Math.floor(x0 / CELL), 0, W), c1 = clampI(Math.ceil(x1 / CELL), 0, W), r0 = clampI(Math.floor(y0 / CELL), 0, R), r1 = clampI(Math.ceil(y1 / CELL), 0, R); return S[r1 * (W + 1) + c1] - S[r0 * (W + 1) + c1] - S[r1 * (W + 1) + c0] + S[r0 * (W + 1) + c0]; };
+    const free = (x0, y0, x1, y1) => x0 >= 4 && y0 >= 4 && x1 <= P.w - 4 && y1 <= H - 4 && count(x0, y0, x1, y1) === 0;
+    return { set, free, count, W: P.w, H };
+  }
+  // the closest free w × h spot to (ax, ay): the same line to the right first, then below, a little above, then
+  // to the left. dyMax: how far down to look, dyUp: how far up. null if there's nowhere
+  // (big boxes keep clear of the page edges and the footer; small labels may go right up to the margin)
+  function near(o, ax, ay, w, h, { yMin = 8, yMax = 1e9, dyMax = 240, dyUp = 40, xMin = 8, xMax = 1e9 } = {}) {
+    let best = null, bs = Infinity;
+    const big = w > 60 || h > 30, edge = big ? 28 : 6, foot = big ? 30 : 6;
+    const y0 = Math.max(yMin, big ? 20 : 6, ay - dyUp - h / 2), y1 = Math.min(yMax - h, ay + dyMax, o.H - h - foot), x1 = Math.min(xMax, o.W - edge) - w;
+    for (let y = y0; y <= y1; y += 3) {
+      const dy = y + h / 2 - ay, sy = dy < 0 ? -dy * 2.2 : dy;
+      if (sy >= bs) continue;
+      for (let x = Math.max(xMin, edge); x <= x1; x += 4) {
+        const dx = x >= ax - 4 ? x - ax : (ax - (x + w)) * 1.4 + 30, sc = sy + Math.max(0, dx) * 0.3;
+        if (sc >= bs) continue;
+        if (o.free(x - 1, y - 1, x + w + 1, y + h + 1)) { bs = sc; best = { x, y, score: sc }; }
+      }
+    }
+    return best;
+  }
+  // the box round a shape (to mark it as taken)
+  function bbox(sh) {
+    if (sh.k === "ell") return [sh.cx - sh.rx - 1, sh.cy - sh.ry - 1, sh.cx + sh.rx + 1, sh.cy + sh.ry + 1];
+    if (sh.k === "rect") return [sh.x, sh.y, sh.x + sh.w, sh.y + sh.h];
+    if (sh.k === "line") return [Math.min(sh.x1, sh.x2), Math.min(sh.y1, sh.y2), Math.max(sh.x1, sh.x2), Math.max(sh.y1, sh.y2)];
+    if (sh.k === "text") return [sh.x, sh.y - sh.size * 0.85, sh.x + textW(sh.s, sh.size, sh.font), sh.y + sh.size * 0.25];
+    const n = String(sh.d).match(/-?\d*\.?\d+/g).map(Number), xs = n.filter((_, i) => i % 2 === 0), ys = n.filter((_, i) => i % 2 === 1);
+    return [Math.min(...xs) - 1, Math.min(...ys) - 1, Math.max(...xs) + 1, Math.max(...ys) + 1];
+  }
+
   // ---------------- the shapes ----------------
   // shapes: { k: "path", d, stroke, w } · { k: "ell", cx, cy, rx, ry, stroke, w, fill } · { k: "text", x, y, s, size, font, fill }
-  //         { k: "rect", x, y, w, h, fill, op, stroke, sw } · { k: "line", x1, y1, x2, y2, stroke, w }   each with g: the group (for editing)
+  //         { k: "rect", x, y, w, h, fill, op, stroke, sw } · { k: "line", x1, y1, x2, y2, stroke, w, op }   each with g: the group (for editing)
   const tickD = (x, y, s = 1) => `M${x - 5 * s} ${y - 0.5 * s} L${x - 1.5 * s} ${y + 4 * s} L${x + 6 * s} ${y - 7 * s}`;
   const crossD = (x, y, s = 1) => `M${x - 4.5 * s} ${y - 4.5 * s} L${x + 4.5 * s} ${y + 4.5 * s} M${x + 4.5 * s} ${y - 4.5 * s} L${x - 4.5 * s} ${y + 4.5 * s}`;
+  // a comment that only says it's right adds nothing next to the ticks
+  const trivial = (pt, s) => pt.verdict === "correct" && (!s || s.length <= 60 || /^(correct|all\b|both\b|full marks|good|well done|right)/i.test(s.trim()));
   function layout() {
-    const M = doc.marking, warn = [], pages = doc.pages.map(() => []), notes = doc.pages.map(() => []), circles = doc.pages.map(() => []), workings = [];
-    const ed = M.edits || {};
-    const add = (p, g, sh) => { if (pages[p] && !(ed[g] && ed[g].del)) pages[p].push({ ...sh, g }); };
-    const geo = {};
+    const M = doc.marking, warn = [], pages = doc.pages.map(() => []), occ = doc.pages.map((_, p) => Occ(p));
+    const ed = M.edits || {}, geo = {}, foot = doc.pages.map(() => []), later = [];
+    let fn = 0;
+    const add = (p, g, sh, keep) => { if (!pages[p] || (ed[g] && ed[g].del)) return; pages[p].push({ ...sh, g }); if (!keep) { const b = bbox(sh), o = (ed[g] || {}); occ[p].set(b[0] + (o.dx || 0), b[1] + (o.dy || 0), b[2] + (o.dx || 0), b[3] + (o.dy || 0)); } };
+    // a small numbered marker where a note goes when there's no room for it on the page
+    const footnote = (p, g, ax, ay, text, col, q) => {
+      const n = ++fn, s = String(n), at = near(occ[p], ax + 4, ay, 13, 13, { dyMax: 30, dyUp: 20 }) || { x: ax + 3, y: ay - 6 };
+      add(p, g, { k: "ell", cx: at.x + 6.5, cy: at.y + 6.5, rx: 6.5, ry: 6.5, stroke: col, w: 1, fill: PAPER, op: 0.9 });
+      add(p, g, { k: "text", x: at.x + 6.5 - textW(s, 8.5) / 2, y: at.y + 9.6, s, size: 8.5, font: "hand", fill: col });
+      foot[p].push({ n, q, text, col });
+    };
+    // a hand-lettered note (and the right answer under it) in the nearest free space, with a thin line to its spot
+    const note = (p, g, ax, ay, text, corr, col, opts = {}, q = "") => {
+      const o = occ[p], tries = [];
+      for (const W of [200, 160, 125]) {
+        const ls = text ? wrap(text, 10.5, W - 10) : [], cs = corr ? wrap("Answer: " + corr, 8.5, W - 10, "sans") : [];
+        const h = 4 + ls.length * 12.5 + cs.length * 10.5 + 4, w = Math.min(W, Math.max(...ls.map(l => textW(l, 10.5)), ...cs.map(l => textW(l, 8.5, "sans")), 30) + 12);
+        const at = near(o, ax, ay, w, h, opts); if (at) tries.push({ ...at, w, h, ls, cs, score: at.score + (200 - W) * 0.15 });
+      }
+      const b = tries.sort((a, c) => a.score - c.score)[0];
+      if (!b) { footnote(p, g, ax, ay, [text, corr && "Answer: " + corr].filter(Boolean).join(" "), col, q); return false; }
+      const d = Math.hypot(clampI(ax, b.x, b.x + b.w) - ax, clampI(ay, b.y, b.y + b.h) - ay);
+      if (d > 26 && d < 150) add(p, g, { k: "line", x1: clampI(ax, b.x, b.x + b.w), y1: clampI(ay, b.y, b.y + b.h), x2: ax, y2: ay, stroke: col, w: 0.6, op: 0.55 }, true);
+      add(p, g, { k: "rect", x: b.x, y: b.y, w: b.w, h: b.h, fill: PAPER, op: 0.85 });
+      add(p, g, { k: "line", x1: b.x, y1: b.y + 2, x2: b.x, y2: b.y + b.h - 2, stroke: col, w: 1.1 });
+      let y = b.y + 4;
+      for (const l of b.ls) { y += 12.5; add(p, g, { k: "text", x: b.x + 6, y: y - 2.5, s: l, size: 10.5, font: "hand", fill: col }); }
+      for (const l of b.cs) { y += 10.5; add(p, g, { k: "text", x: b.x + 6, y: y - 2, s: l, size: 8.5, font: "sans", fill: "#8f1713", bold: /^Answer:/.test(l) }); }
+      return true;
+    };
+    // the next question's top on a page, below y (notes and working stay with their own question)
+    const nextQ = (p, y) => { const ys = src(p, y), n = labelIndex().filter(e => e.p === p && e.y > ys + 2 && e.m && e.m.lvl === 0).map(e => disp(p, e.y) - 10); return n.length ? Math.min(...n) : 1e9; };
+    // where the next part (any level: 7(b) after 7(a)) starts on the page: a comment stays above it, by its own answer
+    const nextPart = (p, y) => { const ys = src(p, y), n = labelIndex().filter(e => e.p === p && e.y > ys + 2).map(e => disp(p, e.y) - 6); return n.length ? Math.min(...n) : 1e9; };
+
+    // 1. the marks themselves, where they belong
+    const circles = doc.pages.map(() => []);
     M.parts.forEach((pt, i) => {
       const rects = partRects(pt); geo[pt.id] = rects;
       if (!rects.length) return;
       const ex = pt.verdict === "excluded", col = ex ? GREY : RED, R0 = rects[0];
-      // the score in a circle in the right margin, beside where the answer starts
-      if (pt.max != null || ex) {
+      // the score in a circle in the right margin (not for 0/0: those are marked as part of another answer)
+      if ((pt.max != null && +pt.max > 0) || ex) {
         const P = doc.pages[R0.p], s = ex ? "excl." : `${fmt(pt.awarded)}/${fmt(pt.max)}`, size = ex ? 7.5 : 9;
         const tw = textW(s, size), rx = Math.max(10.5, tw / 2 + 4);
         circles[R0.p].push({ g: "s:" + i, y: Math.max(16, R0.y0 + 9), rx, s, size, col, x: P.w - 6 - rx });
       }
-      // marks at their anchors
       pt.annotations.forEach((a, k) => {
         const g = `a:${i}:${k}`, at = resolve(pt, rects, a, warn); if (!at) return;
-        const p = at.p, c = ex ? GREY : a.type === "tick" ? GREEN : RED;
+        const p = at.p, c = ex ? GREY : a.type === "tick" ? GREEN : RED, o = occ[p];
         if (a.type === "tick" || a.type === "cross") {
-          const x = at.kind === "text" ? at.ex + 8 : at.opt || at.cell ? at.x : at.kind === "box" && at.box.x1 > at.box.x0 ? at.box.x1 + 6 : at.x, y = at.kind === "text" ? at.ey - 1 : at.y;
+          // right after the words (or inside the end of a cell), raised above the line if more writing follows
+          const cand = [];
+          if (at.kind === "text") { const sg = at.segs[at.segs.length - 1]; cand.push([at.ex + 8, at.ey - 1], [at.ex + 2, sg.y - 3]); }
+          else if (at.cell) { cand.push([at.box.x1 - 8, at.y], [at.box.x1 + 8, at.y], [at.box.x0 - 8, at.y]); }
+          else if (at.opt) cand.push([at.x, at.y], [at.x - 12, at.y]);
+          else if (at.kind === "box" && at.box.x1 > at.box.x0) cand.push([at.box.x1 + 6, at.y], [at.x, at.y]);
+          else cand.push([at.x, at.y]);
+          const [x, y] = cand.find(([x, y]) => o.free(x - 6, y - 8, x + 7, y + 5)) || cand[0];
+          at.mx = x; at.my = y;
           add(p, g, { k: "path", d: a.type === "tick" ? tickD(x, y, 1.15) : crossD(x, y, 1.05), stroke: c, w: 1.8 });
         } else if (a.type === "underline") {
-          if (at.segs) for (const sg of at.segs) add(p, g, { k: "path", d: `M${sg.x0} ${sg.y + sg.h * 0.92} Q${(sg.x0 + sg.x1) / 2} ${sg.y + sg.h * 0.92 + 1.6} ${sg.x1} ${sg.y + sg.h * 0.9}`, stroke: c, w: 1.2 });
-          else { const b = at.box || { x0: at.x - 20, x1: at.x + 20, y1: at.y + 4 }; add(p, g, { k: "path", d: `M${b.x0} ${b.y1 + 1.5} L${b.x1} ${b.y1 + 1}`, stroke: c, w: 1.2 }); }
+          if (at.segs) for (const sg of at.segs) add(p, g, { k: "path", d: `M${sg.x0} ${sg.y + sg.h * 0.92} Q${(sg.x0 + sg.x1) / 2} ${sg.y + sg.h * 0.92 + 1.6} ${sg.x1} ${sg.y + sg.h * 0.9}`, stroke: c, w: 1.2 }, true);
+          else { const b = at.box || { x0: at.x - 20, x1: at.x + 20, y1: at.y + 4 }; add(p, g, { k: "path", d: `M${b.x0} ${b.y1 + 1.5} L${b.x1} ${b.y1 + 1}`, stroke: c, w: 1.2 }, true); }
         } else if (a.type === "circle") {
           let b = at.box;
           if (at.segs) { const xs = at.segs.flatMap(s => [s.x0, s.x1]), ys = at.segs.flatMap(s => [s.y, s.y + s.h]); b = { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) }; }
           if (!b || b.x1 - b.x0 < 4) b = { x0: at.x - 12, x1: at.x + 12, y0: at.y - 8, y1: at.y + 8 };
-          add(p, g, { k: "ell", cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2, rx: (b.x1 - b.x0) / 2 + 4, ry: (b.y1 - b.y0) / 2 + 3, stroke: c, w: 1.3 });
+          add(p, g, { k: "ell", cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2, rx: (b.x1 - b.x0) / 2 + 4, ry: (b.y1 - b.y0) / 2 + 3, stroke: c, w: 1.3 }, true);
         } else if (a.type === "caret") {
           const x = at.x, y = at.segs ? at.segs[0].y + at.segs[0].h : at.y + 6;
-          add(p, g, { k: "path", d: `M${x - 3.5} ${y + 5} L${x} ${y - 1} L${x + 3.5} ${y + 5}`, stroke: c, w: 1.3 });
+          add(p, g, { k: "path", d: `M${x - 3.5} ${y + 5} L${x} ${y - 1} L${x + 3.5} ${y + 5}`, stroke: c, w: 1.3 }, true);
         } else if (a.type === "arrow") {
-          // pointing at the spot; from where "from" says (same units as the anchor), else from up and to the right
           let fx = at.x + 34, fy = at.y - 26;
           if (a.from && !isNaN(a.from.x)) { const f = resolve(pt, rects, { anchor: { ...(a.anchor || {}), x: a.from.x, y: a.from.y, w: 0, h: 0 } }, []); if (f && f.p === p) { fx = f.x; fy = f.y; } }
           const tx2 = at.box && at.kind === "box" && !at.opt && !at.cell ? (at.box.x0 + at.box.x1) / 2 : at.x, ty2 = at.box && at.kind === "box" && !at.opt && !at.cell ? (at.box.y0 + at.box.y1) / 2 : at.y;
           const ang = Math.atan2(ty2 - fy, tx2 - fx), hl = 6;
-          add(p, g, { k: "path", d: `M${fx} ${fy} L${tx2} ${ty2} M${tx2 - hl * Math.cos(ang - 0.45)} ${ty2 - hl * Math.sin(ang - 0.45)} L${tx2} ${ty2} L${tx2 - hl * Math.cos(ang + 0.45)} ${ty2 - hl * Math.sin(ang + 0.45)}`, stroke: c, w: 1.3 });
+          add(p, g, { k: "path", d: `M${fx} ${fy} L${tx2} ${ty2} M${tx2 - hl * Math.cos(ang - 0.45)} ${ty2 - hl * Math.sin(ang - 0.45)} L${tx2} ${ty2} L${tx2 - hl * Math.cos(ang + 0.45)} ${ty2 - hl * Math.sin(ang + 0.45)}`, stroke: c, w: 1.3 }, true);
           at.tail = { x: fx, y: fy, right: fx >= tx2 };
         } else if (a.type === "sketch" || a.type === "symbol") {
-          // drawn into the anchor's box: a sketch's path is in 0–1 of the box; a gate symbol keeps its shape (1.6 : 1)
           let b = at.box && at.box.x1 - at.box.x0 > 4 && at.box.y1 - at.box.y0 > 4 ? at.box : { x0: at.x, y0: at.y - 16, x1: at.x + 52, y1: at.y + 16 };
-          if (a.type === "sketch" && a.path) add(p, g, { k: "path", d: mapPath(a.path, (x, y) => [b.x0 + x * (b.x1 - b.x0), b.y0 + y * (b.y1 - b.y0)]), stroke: c, w: 1.4 });
+          if (a.type === "sketch" && a.path) add(p, g, { k: "path", d: mapPath(a.path, (x, y) => [b.x0 + x * (b.x1 - b.x0), b.y0 + y * (b.y1 - b.y0)]), stroke: c, w: 1.4 }, true);
           if (a.type === "symbol" && GATES.includes(a.symbol)) {
-            const h = Math.min(b.y1 - b.y0, (b.x1 - b.x0) / 1.6), ox = (b.x0 + b.x1) / 2 - h * 0.8, oy = (b.y0 + b.y1) / 2 - h / 2;
+            const h = Math.min(b.y1 - b.y0, (b.x1 - b.x0) / 1.6), w = h * 1.6;
+            let ox = (b.x0 + b.x1) / 2 - w / 2, oy = (b.y0 + b.y1) / 2 - h / 2;
+            // a gate drawn over your wires is hard to read: the nearest clear spot of the same size instead
+            if (o.count(ox, oy, ox + w, oy + h) > (w * h) / (CELL * CELL) * 0.04) { const s2 = near(o, ox + w / 2, oy + h / 2, w, h, { dyMax: 120, dyUp: 120 }); if (s2) { ox = s2.x; oy = s2.y; } }
             const G = gate(a.symbol);
             add(p, g, { k: "path", d: mapPath(G.d, (x, y) => [ox + x * h, oy + y * h]), stroke: c, w: 1.4 });
             if (G.bub) add(p, g, { k: "ell", cx: ox + G.bub * h, cy: oy + 0.5 * h, rx: 0.07 * h, ry: 0.07 * h, stroke: c, w: 1.3 });
@@ -270,118 +406,118 @@ const Marking = window.Marking = (() => {
           let y0 = at.y - 7, y1 = at.y + 7, x = at.x - 6;
           if (at.segs) { y0 = at.segs[0].y; y1 = at.segs[at.segs.length - 1].y + at.segs[at.segs.length - 1].h; x = Math.min(...at.segs.map(s => s.x0)) - 5; }
           else if (at.box) { y0 = at.box.y0; y1 = Math.max(at.box.y1, at.box.y0 + 12); x = at.box.x0 - 5; }
-          add(p, g, { k: "path", d: `M${x + 3} ${y0} L${x} ${y0} L${x} ${y1} L${x + 3} ${y1}`, stroke: c, w: 1.3 });
+          add(p, g, { k: "path", d: `M${x + 3} ${y0} L${x} ${y0} L${x} ${y1} L${x + 3} ${y1}`, stroke: c, w: 1.3 }, true);
         }
-        // a short label is written right by its mark (above a caret, after a tick); a longer one goes in the margin
-        if (a.text && a.type !== "note" && a.text.length <= 28) {
-          const size = 11, lx = a.type === "caret" ? at.x - 4 : a.type === "tick" || a.type === "cross" ? (at.kind === "text" ? at.ex + 18 : (at.kind === "box" && at.box.x1 > at.box.x0 ? at.box.x1 + 18 : at.x + 10)) : at.x;
-          const ly = a.type === "caret" ? (at.segs ? at.segs[0].y - 1 : at.y - 9) : a.type === "tick" || a.type === "cross" ? (at.kind === "text" ? at.ey + 3 : at.y + 4) : (at.segs ? at.segs[0].y - 1 : at.y - 8);
-          const P2 = doc.pages[p], w2 = textW(a.text, size);
-          let x2 = Math.min(lx, P2.w - 40 - w2), ly2 = ly;
-          if (a.type === "arrow" && at.tail) {
-            // at the tail, clear of the comment column down the right of the page
-            const lim = P2.w - 170 - w2; x2 = at.tail.right ? at.tail.x + 3 : at.tail.x - w2 - 3;
-            if (x2 > lim) x2 = Math.max(8, at.tail.x - w2 - 3 > lim ? lim : at.tail.x - w2 - 3);
-            ly2 = at.tail.y - 3;
-          }
-          add(p, g, { k: "rect", x: x2 - 2, y: ly2 - size + 1, w: w2 + 4, h: size + 2, fill: PAPER, op: 0.75 });
-          add(p, g, { k: "text", x: x2, y: ly2, s: a.text, size, font: "hand", fill: c });
-        } else if (a.type === "note" && an0(a) === "page") {
-          const P2 = doc.pages[p], ls = wrap(a.text || "", 11.5, Math.min(220, P2.w - at.x - 30));
-          ls.forEach((l, k2) => add(p, g, { k: "text", x: Math.min(at.x, P2.w - 30 - textW(l, 11.5)), y: at.y + k2 * 14, s: l, size: 11.5, font: "hand", fill: c }));
-        } else if (a.text || a.type === "note") notes[p].push({ g: g + ":n", ay: at.y, ax: at.kind === "text" ? at.ex : at.x, lines: a.text || "", corr: "", col: c });
+        if (a.text || a.type === "note") later.push({ kind: "ann", pt, i, a, g, at, p, c, rects });
       });
-      // multiple choice with the right answer given: your choice ticked (right) or crossed (wrong), and the right one
-      // circled with a tick in green, so you can see it at a glance
+      // multiple choice with the right answer given
       if (pt.correctOptions.length && !ex) {
         const opts = optionRects(pt), right = new Set(pt.correctOptions);
-        for (const o of opts) {
-          const g = "o:" + i + ":" + o.L, cy = (o.y0 + o.y1) / 2;
-          if (o.chosen && right.has(o.L)) add(o.p, g, { k: "path", d: tickD(o.x0 - 12, cy, 1.15), stroke: GREEN, w: 1.8 });
-          else if (o.chosen) add(o.p, g, { k: "path", d: crossD(o.x0 - 12, cy, 1.05), stroke: RED, w: 1.8 });
-          else if (right.has(o.L)) {
-            const w = o.x1 - o.x0, h = o.y1 - o.y0;
-            add(o.p, g, { k: "ell", cx: o.x0 + w / 2, cy, rx: w / 2 + 3.5, ry: h / 2 + 3.5, stroke: GREEN, w: 1.6 });
-            add(o.p, g, { k: "path", d: tickD(o.x0 - 12, cy, 1.15), stroke: GREEN, w: 1.8 });
-            if (!opts.some(x => x.chosen)) add(o.p, g, { k: "text", x: o.x0 - 34, y: cy + 3.5, s: "ans", size: 9, font: "hand", fill: GREEN });
+        for (const op of opts) {
+          const g = "o:" + i + ":" + op.L, cy = (op.y0 + op.y1) / 2;
+          if (op.chosen && right.has(op.L)) add(op.p, g, { k: "path", d: tickD(op.x0 - 12, cy, 1.15), stroke: GREEN, w: 1.8 });
+          else if (op.chosen) add(op.p, g, { k: "path", d: crossD(op.x0 - 12, cy, 1.05), stroke: RED, w: 1.8 });
+          else if (right.has(op.L)) {
+            const w = op.x1 - op.x0, h = op.y1 - op.y0;
+            add(op.p, g, { k: "ell", cx: op.x0 + w / 2, cy, rx: w / 2 + 3.5, ry: h / 2 + 3.5, stroke: GREEN, w: 1.6 });
+            add(op.p, g, { k: "path", d: tickD(op.x0 - 12, cy, 1.15), stroke: GREEN, w: 1.8 });
+            if (!opts.some(x => x.chosen)) add(op.p, g, { k: "text", x: op.x0 - 34, y: cy + 3.5, s: "ans", size: 9, font: "hand", fill: GREEN });
           }
         }
         if (!opts.length) warn.push(`${pt.id}: has correctOptions but isn't a multiple-choice answer on this paper.`);
       }
-      if (pt.working.length && pt.verdict !== "correct" && !ex) workings.push({ i, pt, rects });
-      // the part's comment (and the right answer) in the margin, pointing at the start of the answer
-      if (pt.comment || pt.correction) notes[R0.p].push({ g: "c:" + i, ay: R0.y0 + 8, ax: R0.x1 - 4, lines: pt.comment, corr: pt.correction, col: ex ? GREY : RED });
+      if ((pt.comment && !trivial(pt, pt.comment)) || pt.correction) later.push({ kind: "comment", pt, i, rects, col });
+      if (pt.working.length && pt.verdict !== "correct" && !ex) later.push({ kind: "working", pt, i, rects });
     });
-    const taken = doc.pages.map(() => []);
-    for (const { i, pt, rects } of workings) {
-      const last = rects.reduce((a, b) => (b.p > a.p || (b.p === a.p && b.y1 > a.y1)) ? b : a), p = last.p, P = doc.pages[p];
-      const X0 = Math.max(56, Math.min(...rects.filter(r => r.p === p).map(r => r.x0))), X1 = P.w - 170, W = X1 - X0;
-      const steps = pt.working.length > 1 ? pt.working.map((t, k) => `${k + 1}. ${t}`) : pt.working;
-      const g = "w:" + i;
-      // never past the start of the next question: the working belongs with this one
-      const lastSrc = src(p, last.y1), next = labelIndex().filter(e => e.p === p && e.y > lastSrc + 2).map(e => disp(p, e.y) - 14), limit = next.length ? Math.min(...next) : null;
-      const first = rects.filter(r => r.p === p).reduce((a, b) => b.y0 < a.y0 ? b : a);
-      const box = (x0, w, top0) => { const ls = steps.flatMap(t => wrap(t, 11, w - 16)), h = 20 + ls.length * 13.5 + 6; const top = findSpace(p, top0, h, x0, x0 + w, taken[p], limit); return top == null ? null : { x0, w, top, h, ls }; };
-      // under the answer if there's room before the next question; else beside it (where a multiple-choice question's
-      // options leave the right of the page empty); else in the margin
-      let at = W >= 180 ? box(X0, W, last.y1 + 4) : null;
-      if (!at) {
-        const P2 = doc.pages[p], band = (P2.items || []).filter(it => disp(p, it.y) > first.y0 - 4 && disp(p, it.y) < last.y1 + 4 && it.x < P2.w - 170).map(it => it.x1);
-        const xr = Math.max(first.x1, ...band) + 22, w2 = P2.w - 170 - xr;
-        if (w2 >= 150) at = box(xr, w2, Math.max(16, first.y0 - 6));
-      }
-      if (at) {
-        taken[p].push([at.top, at.top + at.h]);
-        add(p, g, { k: "rect", x: at.x0, y: at.top, w: at.w, h: at.h, fill: PAPER, op: 0.9, stroke: RED, sw: 0.8, dash: true });
-        add(p, g, { k: "text", x: at.x0 + 8, y: at.top + 14, s: "Working", size: 9.5, font: "sans", fill: "#8f1713", bold: true });
-        at.ls.forEach((l, k) => add(p, g, { k: "text", x: at.x0 + 8, y: at.top + 28 + k * 13.5, s: l, size: 11, font: "hand", fill: RED }));
-        continue;
-      }
-      notes[last.p].push({ g, ay: last.y1 - 6, ax: last.x1, lines: "Working: " + steps.join("  "), corr: "", col: RED });
-    }
-    // a bracket with each question's total, at the end of its last part
-    for (const qt of questionTotals(M)) {
-      const rs = qt.parts.flatMap(pt => geo[pt.id] || []); if (!rs.length) continue;
-      const last = rs.reduce((a, b) => (b.p > a.p || (b.p === a.p && b.y1 > a.y1)) ? b : a), P = doc.pages[last.p];
-      const first = rs.filter(r => r.p === last.p).reduce((a, b) => b.y0 < a.y0 ? b : a);
-      const g = "t:" + qt.q, x = P.w - 4, y1 = last.y1 + 2, y0 = Math.max(first.y0, y1 - 70);
-      add(last.p, g, { k: "path", d: `M${x - 4} ${y0} L${x} ${y0} L${x} ${y1} L${x - 4} ${y1}`, stroke: RED, w: 1.2 });
-      const s = `${qName(qt.q)}: ${fmt(qt.awarded)}/${fmt(qt.max)}`, tw = textW(s, 10.5);
-      add(last.p, g, { k: "rect", x: x - tw - 12, y: y1 + 2, w: tw + 8, h: 15, fill: PAPER, op: 0.9, stroke: RED, sw: 0.9 });
-      add(last.p, g, { k: "text", x: x - tw - 8, y: y1 + 13.5, s, size: 10.5, font: "hand", fill: RED });
-    }
-    // score circles: no two on top of each other
+    // score circles down the right edge, never on top of each other or of anything printed there
     circles.forEach((cs, p) => {
       cs.sort((a, b) => a.y - b.y); let prev = -1e9;
-      for (const c of cs) { c.y = Math.max(c.y, prev + 2 * 11 + 3); prev = c.y;
-        add(p, c.g, { k: "ell", cx: c.x, cy: c.y, rx: c.rx, ry: 10.5, stroke: c.col, w: 1.4, fill: PAPER, op: 0.85 });
-        add(p, c.g, { k: "text", x: c.x - textW(c.s, c.size) / 2, y: c.y + c.size * 0.36, s: c.s, size: c.size, font: "hand", fill: c.col }); }
-    });
-    // margin notes: a column just inside the right edge, stacked so none overlap, each with a thin line to its spot
-    notes.forEach((ns, p) => {
-      const P = doc.pages[p]; if (!P || !ns.length) return;
-      const W = 128, X = P.w - 32 - W, H = P.h + totalGap(p), boxes = [];
-      for (const n of ns.sort((a, b) => a.ay - b.ay)) {
-        const ls = n.lines ? wrap(n.lines, 10.5, W - 8) : [], cs = n.corr ? wrap("Answer: " + n.corr, 8.5, W - 8, "sans") : [];
-        const h = 5 + ls.length * 12.5 + cs.length * 10.5 + 4;
-        boxes.push({ n, ls, cs, h, top: n.ay - 8 });
+      for (const c of cs) {
+        let y = Math.max(c.y, prev + 24);
+        for (const d of [0, 3, -3, 6, -6, 10, -10, 15, 20, 26]) if (y + d > prev + 23 && occ[p].free(c.x - c.rx - 1, y + d - 11.5, c.x + c.rx + 1, y + d + 11.5)) { y += d; break; }
+        prev = c.y = y;
+        add(p, c.g, { k: "ell", cx: c.x, cy: y, rx: c.rx, ry: 10.5, stroke: c.col, w: 1.4, fill: PAPER, op: 0.85 });
+        add(p, c.g, { k: "text", x: c.x - textW(c.s, c.size) / 2, y: y + c.size * 0.36, s: c.s, size: c.size, font: "hand", fill: c.col });
       }
-      let prev = 14; for (const b of boxes) { b.top = Math.max(b.top, prev + 4); prev = b.top + b.h; }
-      let lim = H - 14; for (let i = boxes.length - 1; i >= 0; i--) { const b = boxes[i]; if (b.top + b.h > lim) b.top = lim - b.h; lim = b.top - 4; }
-      for (const b of boxes) {
-        const { n } = b, g = n.g;
-        if (Math.abs(n.ax - X) > 6 || Math.abs(n.ay - (b.top + 9)) > 4) {
-          const ax = Math.min(n.ax + 2, X - 8), ly = n.ay + 6;
-          add(p, g, { k: "path", d: `M${ax} ${ly} L${X - 6} ${ly} L${X - 6} ${b.top + 9} L${X} ${b.top + 9}`, stroke: n.col, w: 0.6 });
+    });
+    // 2. the front page: the score in its Total box, and the summary in the largest clear space
+    summary(add, occ[0]);
+    // 3. words: short labels by their marks, comments near the answer, the working under it. All only in clear space
+    for (const L of later.filter(x => x.kind === "ann")) {
+      const { a, g, at, p, c, pt } = L, short = a.text && a.type !== "note" && a.text.length <= 28;
+      if (a.type === "note" && an0(a) === "page") {                    // a note placed on the page by the marker: right there
+        const P2 = doc.pages[p], ls = wrap(a.text || "", 11.5, Math.min(220, P2.w - at.x - 30));
+        ls.forEach((l, k2) => add(p, g, { k: "text", x: Math.min(at.x, P2.w - 30 - textW(l, 11.5)), y: at.y + k2 * 14, s: l, size: 11.5, font: "hand", fill: c }));
+        continue;
+      }
+      const ax = at.tail ? at.tail.x : at.mx != null ? at.mx + 7 : at.kind === "text" ? at.ex : at.x, ay = at.tail ? at.tail.y : at.my != null ? at.my : at.y;
+      if (short) {
+        const size = 11, w2 = textW(a.text, size) + 4, h2 = size + 3;
+        // a caret's word goes above it; a tick's or cross's beside it; otherwise next to the spot
+        const pref = a.type === "caret" ? near(occ[p], at.x - w2 / 2, (at.segs ? at.segs[0].y : at.y) - 8, w2, h2, { dyMax: 6, dyUp: 18 }) : null;
+        const sp = pref || near(occ[p], ax + 3, ay, w2, h2, { dyMax: 30, dyUp: 16 });
+        if (sp) { add(p, g, { k: "rect", x: sp.x, y: sp.y, w: w2, h: h2, fill: PAPER, op: 0.7 }); add(p, g, { k: "text", x: sp.x + 2, y: sp.y + size, s: a.text, size, font: "hand", fill: c }); continue; }
+      }
+      note(p, g + ":n", ax, ay, a.text || "", "", c, { yMax: nextPart(p, ay), dyMax: 160 }, pt.q);
+    }
+    for (const L of later.filter(x => x.kind === "comment")) {
+      const { pt, i, rects, col } = L;
+      // at the end of what you wrote (or the start of the answer if you wrote nothing there)
+      let p = rects[0].p, ax = rects[0].x1 - 10, ay = rects[0].y0 + 8;
+      const typed = rects.filter(R => R.r && R.r._el && R.r.kind !== "choice" && (R.r._el.value || "").trim()).pop();
+      if (typed) { try { const e = caretRect(typed.r._el, typed.r._el.value.length); p = typed.p; ax = e.x / zoom + 4; ay = e.y / zoom + e.h / zoom / 2; } catch (er) {} }
+      note(p, "c:" + i, ax, ay, trivial(pt, pt.comment) ? "" : pt.comment, pt.correction, col, { yMax: nextPart(p, ay), dyMax: 160 }, pt.q);
+    }
+    // notes that had no room by their answer: numbered there, and written out together in clear space on the page
+    // (or, failing that, at the end of the marked PDF and in the Marks panel)
+    const endNotes = [], placed = doc.pages.map(() => 0);
+    function placeFoot() {
+      foot.forEach((all, p) => {
+        const fs = all.slice(placed[p]); if (!fs.length) return;
+        placed[p] = all.length;
+        const P = doc.pages[p], W = Math.min(P.w - 90, 440), lines = fs.flatMap(f => wrap(`${f.n}. ${f.q ? qName(f.q) + ": " : ""}${f.text}`, 10, W - 14).map(l => ({ l, f })));
+        const h = 18 + lines.length * 12 + 6, H = P.h + totalGap(p);
+        const at = near(occ[p], 45, H - h - 30, W, h, { dyUp: H, dyMax: 30 });
+        if (!at) { endNotes.push(...fs.map(f => ({ ...f, p }))); return; }
+        const g = "fn:" + p + ":" + fs[0].n;
+        add(p, g, { k: "rect", x: at.x, y: at.y, w: W, h, fill: PAPER, op: 0.9, stroke: RED, sw: 0.7, dash: true });
+        add(p, g, { k: "text", x: at.x + 7, y: at.y + 13, s: "Notes", size: 9, font: "sans", fill: "#8f1713", bold: true });
+        lines.forEach(({ l, f }, k) => add(p, g, { k: "text", x: at.x + 7, y: at.y + 27 + k * 12, s: l, size: 10, font: "hand", fill: f.col }));
+      });
+    }
+    placeFoot();
+    for (const L of later.filter(x => x.kind === "working")) {
+      const { pt, i, rects } = L, last = rects.reduce((a, b) => (b.p > a.p || (b.p === a.p && b.y1 > a.y1)) ? b : a), p = last.p, P = doc.pages[p], g = "w:" + i;
+      const steps = pt.working.length > 1 ? pt.working.map((t, k) => `${k + 1}. ${t}`) : pt.working, yMax = nextQ(p, last.y0);
+      let best = null, away = false;
+      const own = nextPart(p, last.y0);
+      for (const lim of [own, yMax, 1e9]) {
+        for (const W of [Math.min(380, P.w - 110), 280, 200]) {
+          const ls = steps.flatMap(t => wrap(t, 11, W - 16)), h = 20 + ls.length * 13.5 + 6;
+          const at = near(occ[p], Math.max(56, last.x0), last.y1 + 4, W, h, { yMax: lim, dyMax: lim === 1e9 ? P.h : 260, dyUp: Math.max(40, last.y1 - last.y0) });
+          if (at && (!best || at.score + (380 - W) * 0.1 < best.score)) best = { ...at, W, h, ls, score: at.score + (380 - W) * 0.1 };
         }
-        add(p, g, { k: "rect", x: X, y: b.top, w: W, h: b.h, fill: PAPER, op: 0.9 });
-        add(p, g, { k: "line", x1: X, y1: b.top, x2: X, y2: b.top + b.h, stroke: n.col, w: 1.1 });
-        let y = b.top + 4;
-        for (const l of b.ls) { y += 12.5; add(p, g, { k: "text", x: X + 5, y: y - 2.5, s: l, size: 10.5, font: "hand", fill: n.col }); }
-        for (const l of b.cs) { y += 10.5; add(p, g, { k: "text", x: X + 5, y: y - 2, s: l, size: 8.5, font: "sans", fill: "#8f1713", bold: /^Answer:/.test(l) }); }
+        if (best) { away = lim !== own; break; }
       }
-    });
-    summary(pages, add);
+      if (!best) { footnote(p, g, last.x1 - 8, last.y1 - 6, "Working: " + steps.join("  "), RED, pt.q); continue; }
+      add(p, g, { k: "rect", x: best.x, y: best.y, w: best.W, h: best.h, fill: PAPER, op: 0.9, stroke: RED, sw: 0.8, dash: true });
+      add(p, g, { k: "text", x: best.x + 8, y: best.y + 14, s: away ? `Working · ${qName(pt.q)}` : "Working", size: 9.5, font: "sans", fill: "#8f1713", bold: true });
+      best.ls.forEach((l, k) => add(p, g, { k: "text", x: best.x + 8, y: best.y + 28 + k * 13.5, s: l, size: 11, font: "hand", fill: RED }));
+    }
+    // 4. a bracket with each question's total at the end of its last part, its label in clear space beside it
+    for (const qt of questionTotals(M)) {
+      const rs = qt.parts.flatMap(pt => geo[pt.id] || []); if (!rs.length) continue;
+      const last = rs.reduce((a, b) => (b.p > a.p || (b.p === a.p && b.y1 > a.y1)) ? b : a), p = last.p, P = doc.pages[p];
+      const first = rs.filter(r => r.p === p).reduce((a, b) => b.y0 < a.y0 ? b : a);
+      const g = "t:" + qt.q, x = P.w - 4, y1 = last.y1 + 2, y0 = Math.max(first.y0, y1 - 70);
+      add(p, g, { k: "path", d: `M${x - 4} ${y0} L${x} ${y0} L${x} ${y1} L${x - 4} ${y1}`, stroke: RED, w: 1.2 }, true);
+      const s = `${qName(qt.q)}: ${fmt(qt.awarded)}/${fmt(qt.max)}`, tw = textW(s, 10.5) + 8;
+      const at = near(occ[p], x - tw - 6, y1 + 3, tw, 15, { dyMax: 40, dyUp: 30, xMin: P.w * 0.55 }) || near(occ[p], x - tw - 6, y1 + 3, tw, 15, { dyMax: 120, dyUp: 120, xMin: P.w * 0.35 });
+      if (!at) { footnote(p, g, x - 12, y1 - 4, `${qName(qt.q)} total: ${fmt(qt.awarded)}/${fmt(qt.max)}`, RED, ""); continue; }
+      add(p, g, { k: "rect", x: at.x, y: at.y, w: tw, h: 15, fill: PAPER, op: 0.9, stroke: RED, sw: 0.9 });
+      add(p, g, { k: "text", x: at.x + 4, y: at.y + 11.5, s, size: 10.5, font: "hand", fill: RED });
+    }
+    placeFoot();
     // marks you added yourself
     (M.extra || []).forEach((x, i) => {
       const p = x.p, P = doc.pages[p]; if (!P) return;
@@ -391,20 +527,10 @@ const Marking = window.Marking = (() => {
       else if (x.type === "circle") add(p, g, { k: "ell", cx: x.x, cy: y, rx: 14, ry: 9, stroke: RED, w: 1.3 });
       if (x.text) wrap(x.text, 10.5, 150).forEach((l, k) => add(p, g, { k: "text", x: x.x + (x.type === "note" ? -4 : 10), y: y + 4 + k * 12.5, s: l, size: 10.5, font: "hand", fill: RED }));
     });
-    lay = { pages, warn: [...new Set([...(M.warn || []), ...warn])], geo };
+    lay = { pages, warn: [...new Set([...(M.warn || []), ...warn])], geo, endNotes, footnotes: foot.flat() };
     return lay;
   }
   const fmt = v => v == null ? "–" : Math.round(v * 10) / 10;
-  // the first band of the page from y0 down (within the next 320 pt) at least h tall, between x0 and x1, with
-  // nothing printed, written, drawn or answered in it
-  function findSpace(p, y0, h, x0, x1, extra, limit) {
-    const P = doc.pages[p], H = P.h + totalGap(p), occ = [...(extra || [])];
-    for (const it of P.items || []) if (it.x < x1 && it.x1 > x0) occ.push([disp(p, it.y - (it.h || 10)), disp(p, it.y + 3)]);
-    for (const r of P.regions || []) { const R = regionRect(p, r); if (R.x0 < x1 && R.x1 > x0) occ.push([R.y0, R.y1]); }
-    for (const st of doc.strokes[p] || []) { const q = dispPts(p, st), xs = q.map(v => v[0]), ys = q.map(v => v[1]); if (q.length && Math.min(...xs) < x1 && Math.max(...xs) > x0) occ.push([Math.min(...ys) - 3, Math.max(...ys) + 3]); }
-    for (let top = y0; top + h <= Math.min(H - 36, y0 + 320, limit ?? 1e9); top += 2) if (!occ.some(([a, b]) => a < top + h + 3 && b > top - 3)) return top;
-    return null;
-  }
   // every x y pair in a path (absolute M L Q C commands), moved by f
   const mapPath = (d, f) => String(d).replace(/(-?\d*\.?\d+)[\s,]+(-?\d*\.?\d+)/g, (_, a, b) => { const [x, y] = f(+a, +b); return `${+x.toFixed(2)} ${+y.toFixed(2)}`; });
   // logic gates in a 1.6 × 1 box: inputs on the left (at 0.3 and 0.7, or 0.5 for NOT), output on the right at 0.5
@@ -436,10 +562,10 @@ const Marking = window.Marking = (() => {
     const score = M.summary.score != null ? M.summary.score : sum(live, "awarded"), outOf = M.summary.outOf != null ? M.summary.outOf : sum(live, "max");
     return { score, outOf, pct: outOf ? Math.round(score / outOf * 100) : null };
   }
-  // ---- the front page: the score (in the paper's own "Total" box if it has one) and a summary in the emptiest space ----
-  function summary(pages, add) {
+  // ---- the front page: the score (in the paper's own "Total" box if it has one) and a summary in the largest clear space ----
+  function summary(add, o) {
     const M = doc.marking, P = doc.pages[0]; if (!P) return;
-    const T = totals(M), sm = M.summary, items = (P.items || []);
+    const T = totals(M), sm = M.summary, items = (P.items || []), H = P.h + totalGap(0);
     // 1. a printed spot for the total: "Total marks … / 85", or a TOTAL label with room beside it
     const tot = items.find(it => /^total(\s*marks?)?$/i.test(it.s.trim()) || /^total\s*marks?\s*\/?\s*\d*$/i.test(it.s.trim()));
     if (tot) {
@@ -449,50 +575,61 @@ const Marking = window.Marking = (() => {
       add(0, "spot", { k: "text", x, y, s: String(s), size, font: "hand", fill: RED });
       if (sm.grade) { const gw = textW(sm.grade, 15); add(0, "spot", { k: "ell", cx: x + w / 2, cy: y + 19, rx: Math.max(9, gw / 2 + 5), ry: 9, stroke: RED, w: 1.1 }); add(0, "spot", { k: "text", x: x + w / 2 - gw / 2, y: y + 24, s: sm.grade, size: 15, font: "hand", fill: RED }); }
     }
-    // 2. the summary box: the largest band of the front page with nothing printed in it (or over the bottom if none fits)
-    const W = Math.min(P.w - 100, 470), X = (P.w - W) / 2;
-    const cmt = sm.comment ? wrap(sm.comment, 11.5, W - 20) : [];
-    const qs = (sm.perQuestion || []).length ? sm.perQuestion : questionTotals(M), cols = Math.max(1, Math.floor((W - 20) / 78)), rows = Math.ceil(qs.length / cols);
-    const note = sm.gradeNote ? wrap(sm.gradeNote, 8.5, 104, "sans") : [];
-    const h = 14 + 30 + Math.max(0, note.length - 1) * 10 + (cmt.length ? 8 + cmt.length * 14 : 0) + (rows ? 10 + rows * 15 : 0) + 12;
-    const occ = items.map(it => [disp(0, it.y - (it.h || 10)), disp(0, it.y + 4)]).concat(P.regions.map(r => { const R = regionRect(0, r); return [R.y0, R.y1]; })).sort((a, b) => a[0] - b[0]);
-    let best = null, at = 40;
-    for (const [a, b] of occ.concat([[P.h + totalGap(0) - 40, 1e9]])) { if (a - at > (best ? best.h : 0)) best = { y: at, h: a - at }; at = Math.max(at, b); }
-    let top = best && best.h >= h + 12 ? best.y + (best.h - h) / 2 : P.h + totalGap(0) - h - 46;
-    const g = "sum";
+    // 2. the summary box, as full as fits in clear space: everything, then without the comment's tail, the
+    // per-question table, the comment, down to just the score and grade
+    const qs = (sm.perQuestion || []).length ? sm.perQuestion : questionTotals(M);
+    const big = `${fmt(T.score)}/${fmt(T.outOf)}`;
+    const build = (W, lvl) => {
+      const gn = sm.gradeNote ? wrap(sm.gradeNote, 8, Math.min(170, W - 200), "sans").slice(0, 2) : [];
+      if (gn.length === 2 && wrap(sm.gradeNote, 8, Math.min(170, W - 200), "sans").length > 2) gn[1] = gn[1].replace(/\s*\S*$/, "") + " …";
+      let cmt = lvl < 3 && sm.comment ? wrap(sm.comment, 11, W - 20) : [];
+      if (lvl === 1 && cmt.length > 3) cmt = cmt.slice(0, 3).map((l, k) => k === 2 ? l.replace(/\s*\S*$/, "") + " …" : l);
+      const cols = Math.max(1, Math.floor((W - 20) / 70)), rows = lvl < 2 ? Math.ceil(qs.length / cols) : 0;
+      const h = 12 + 30 + (cmt.length ? 6 + cmt.length * 13.5 : 0) + (rows ? 8 + rows * 14 : 0) + 8;
+      return { W, h, gn, cmt, cols, rows };
+    };
+    let B = null, at = null;
+    outer: for (const lvl of [0, 1, 2, 3]) for (const W of [Math.min(P.w - 100, 470), 380, 300]) {
+      const b = build(W, lvl), s = near(o, P.w / 2 - W / 2, H * 0.6, W, b.h, { dyUp: H, dyMax: H });
+      if (s) { B = b; at = s; break outer; }
+    }
+    if (!B) { B = build(260, 3); at = { x: P.w - B.W - 12, y: 12 }; }       // nothing clear anywhere: small, top right
+    const { W, h } = B, X = at.x, top = at.y, g = "sum";
     add(0, g, { k: "rect", x: X, y: top, w: W, h, fill: PAPER, op: 0.93, stroke: RED, sw: 1.3 });
-    let y = top + 13;
+    let y = top + 12;
     add(0, g, { k: "text", x: X + 10, y, s: `Marked by ${M.marker}${M.markedAt ? " · " + new Date(M.markedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : ""}`, size: 8, font: "sans", fill: "#8f1713" });
     y += 27;
-    const big = `${fmt(T.score)}/${fmt(T.outOf)}`, bw = textW(big, 26);
-    add(0, g, { k: "text", x: X + 10, y, s: big, size: 26, font: "hand", fill: RED });
-    if (T.pct != null) add(0, g, { k: "text", x: X + 16 + bw, y, s: T.pct + "%", size: 15, font: "hand", fill: RED });
+    const bw = textW(big, 24);
+    add(0, g, { k: "text", x: X + 10, y, s: big, size: 24, font: "hand", fill: RED });
+    if (T.pct != null) add(0, g, { k: "text", x: X + 16 + bw, y, s: T.pct + "%", size: 14, font: "hand", fill: RED });
     if (sm.grade) {
-      const gx = X + W - 150;
-      add(0, g, { k: "ell", cx: gx + 16, cy: y - 8, rx: 16 + Math.max(0, textW(sm.grade, 22) - 20) / 2, ry: 14, stroke: RED, w: 1.4 });
-      add(0, g, { k: "text", x: gx + 16 - textW(sm.grade, 22) / 2, y: y - 0.5, s: sm.grade, size: 22, font: "hand", fill: RED });
-      note.forEach((l, k) => add(0, g, { k: "text", x: gx + 38, y: y - 12 + k * 10, s: l, size: 8.5, font: "sans", fill: "#8f1713" }));
-      if (!note.length) add(0, g, { k: "text", x: gx + 38, y: y - 6, s: "grade", size: 8.5, font: "sans", fill: "#8f1713" });
+      const gw = textW(sm.grade, 20), gx = X + W - 26 - Math.max(...B.gn.map(l => textW(l, 8, "sans")), 0) - gw;
+      add(0, g, { k: "ell", cx: gx + gw / 2, cy: y - 7, rx: Math.max(14, gw / 2 + 7), ry: 12, stroke: RED, w: 1.4 });
+      add(0, g, { k: "text", x: gx, y: y - 0.5, s: sm.grade, size: 20, font: "hand", fill: RED });
+      B.gn.forEach((l, k) => add(0, g, { k: "text", x: gx + gw / 2 + Math.max(14, gw / 2 + 7) + 5, y: y - 10 + k * 9.5, s: l, size: 8, font: "sans", fill: "#8f1713" }));
     }
-    y += Math.max(0, note.length - 1) * 10;
-    if (cmt.length) { y += 8; for (const l of cmt) { y += 14; add(0, g, { k: "text", x: X + 10, y: y - 3, s: l, size: 11.5, font: "hand", fill: RED }); } }
-    if (rows) {
-      y += 10;
-      qs.forEach((q, i) => { const c = i % cols, r = Math.floor(i / cols); add(0, g, { k: "text", x: X + 10 + c * 78, y: y + r * 15 + 10, s: `${qName(q.q)}  ${fmt(q.awarded)}/${fmt(q.max)}`, size: 10.5, font: "hand", fill: RED }); });
-    }
+    if (B.cmt.length) { y += 6; for (const l of B.cmt) { y += 13.5; add(0, g, { k: "text", x: X + 10, y: y - 3, s: l, size: 11, font: "hand", fill: RED }); } }
+    if (B.rows) { y += 8; qs.forEach((q, i) => { const c = i % B.cols, r = Math.floor(i / B.cols); add(0, g, { k: "text", x: X + 10 + c * 70, y: y + r * 14 + 9, s: `${qName(q.q)}  ${fmt(q.awarded)}/${fmt(q.max)}`, size: 10, font: "hand", fill: RED }); }); }
   }
 
   // ---------------- on screen ----------------
   const isOn = () => { try { return localStorage.getItem("marksOn:" + (doc && doc.id)) !== "0"; } catch (e) { return true; } };
   function setOn(on) { try { localStorage.setItem("marksOn:" + doc.id, on ? "1" : "0"); } catch (e) {} draw(); panelHead(); }
   let raf = 0;
-  function refresh() { lay = null; cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { draw(); renderPanel(); }); $("#marksBtn") && ($("#marksBtn").classList.toggle("has", !!(doc && doc.marking))); }
-  // a page was laid out again (zoom, extra space, typing): redraw the marks soon
-  function pageChanged() { if (!doc || !doc.marking) return; lay = null; cancelAnimationFrame(raf); raf = requestAnimationFrame(draw); }
+  function refresh() {
+    lay = null; cancelAnimationFrame(raf);
+    $("#marksBtn") && ($("#marksBtn").classList.toggle("has", !!(doc && doc.marking)));
+    if (!doc || !doc.marking) { draw(); renderPanel(); return; }
+    prepare().then(() => { lay = null; raf = requestAnimationFrame(() => { draw(); renderPanel(); }); });
+  }
+  // a page was laid out again (zoom, extra space, typing): redraw the marks once things settle
+  let pcT = 0;
+  function pageChanged() { if (!doc || !doc.marking) return; clearTimeout(pcT); pcT = setTimeout(() => { lay = null; draw(); }, 250); }
   function draw() {
     if (typeof views === "undefined" || !doc) return;
     views.forEach(v => { const s = v.el.querySelector("svg.marks"); if (s) s.remove(); });
     if (!doc.marking || !isOn()) return;
+    if (masksFor !== doc.id) { prepare().then(() => { lay = null; draw(); }); return; }
     if (!lay) { try { layout(); } catch (e) { console.warn("marking layout", e); return; } }
     lay.pages.forEach((shapes, p) => {
       const v = views[p]; if (!v) return;
@@ -513,7 +650,7 @@ const Marking = window.Marking = (() => {
   function svgOf(sv, sh) {
     const el = n => document.createElementNS(sv.namespaceURI, n), set = (e, o) => { for (const k in o) if (o[k] != null) e.setAttribute(k, o[k]); return e; };
     if (sh.k === "path") return set(el("path"), { d: sh.d, fill: "none", stroke: sh.stroke, "stroke-width": sh.w, "stroke-linecap": "round", "stroke-linejoin": "round" });
-    if (sh.k === "line") return set(el("line"), { x1: sh.x1, y1: sh.y1, x2: sh.x2, y2: sh.y2, stroke: sh.stroke, "stroke-width": sh.w });
+    if (sh.k === "line") return set(el("line"), { x1: sh.x1, y1: sh.y1, x2: sh.x2, y2: sh.y2, stroke: sh.stroke, "stroke-width": sh.w, "stroke-opacity": sh.op });
     if (sh.k === "ell") return set(el("ellipse"), { cx: sh.cx, cy: sh.cy, rx: sh.rx, ry: sh.ry, fill: sh.fill || "none", "fill-opacity": sh.op, stroke: sh.stroke, "stroke-width": sh.w });
     if (sh.k === "rect") return set(el("rect"), { x: sh.x, y: sh.y, width: sh.w, height: sh.h, rx: 2, fill: sh.fill || "none", "fill-opacity": sh.op, stroke: sh.stroke || "none", "stroke-width": sh.sw, "stroke-dasharray": sh.dash ? "3 2" : null });
     const t = set(el("text"), { x: sh.x, y: sh.y, fill: sh.fill, "font-size": sh.size, "font-weight": sh.bold ? 700 : null });
@@ -585,6 +722,11 @@ const Marking = window.Marking = (() => {
     panelHead();
     const list = $("#marksList"); list.innerHTML = "";
     const M = doc.marking; if (!M) return;
+    if (lay && lay.footnotes && lay.footnotes.length) {
+      const d = document.createElement("details"); d.className = "mkfoot";
+      d.innerHTML = `<summary>${lay.footnotes.length} note${lay.footnotes.length > 1 ? "s" : ""} shown as numbers on the page (no room to write them out)</summary><ol>${lay.footnotes.map(f => `<li value="${f.n}"><b>${esc(qName(f.q || ""))}</b> ${esc(f.text)}</li>`).join("")}</ol>`;
+      list.appendChild(d);
+    }
     for (const pt of M.parts) {
       const b = document.createElement("button"); b.type = "button"; b.className = "mkrow v-" + pt.verdict;
       const where = (lay && lay.geo[pt.id] || [])[0];
@@ -652,6 +794,7 @@ const Marking = window.Marking = (() => {
   let handBytes = null;
   async function toPdf(out, page, p, tx, ty) {
     if (!doc.marking || !isOn()) return;
+    if (masksFor !== doc.id) { await prepare(); lay = null; }
     if (!lay) layout();
     const shapes = lay.pages[p]; if (!shapes || !shapes.length) return;
     const { rgb, LineCapStyle, StandardFonts } = PDFLib;
@@ -662,7 +805,7 @@ const Marking = window.Marking = (() => {
     for (const sh of shapes) {
       const o = ed[sh.g] || {}, dx = o.dx || 0, dy = o.dy || 0, X = x => tx(x + dx), Y = y => ty(y + dy);
       if (sh.k === "path") page.drawSvgPath(shiftPath(sh.d, dx, dy), { x: tx(0), y: ty(0), borderColor: col(sh.stroke), borderWidth: sh.w, borderLineCap: LineCapStyle.Round });
-      else if (sh.k === "line") page.drawLine({ start: { x: X(sh.x1), y: Y(sh.y1) }, end: { x: X(sh.x2), y: Y(sh.y2) }, thickness: sh.w, color: col(sh.stroke) });
+      else if (sh.k === "line") page.drawLine({ start: { x: X(sh.x1), y: Y(sh.y1) }, end: { x: X(sh.x2), y: Y(sh.y2) }, thickness: sh.w, color: col(sh.stroke), opacity: sh.op ?? 1 });
       else if (sh.k === "ell") page.drawEllipse({ x: X(sh.cx), y: Y(sh.cy), xScale: sh.rx, yScale: sh.ry, ...(sh.fill ? { color: col(sh.fill), opacity: sh.op ?? 1 } : {}), borderColor: col(sh.stroke), borderWidth: sh.w });
       else if (sh.k === "rect") page.drawRectangle({ x: X(sh.x), y: Y(sh.y + sh.h), width: sh.w, height: sh.h, ...(sh.fill ? { color: col(sh.fill), opacity: sh.op ?? 1 } : {}), ...(sh.stroke ? { borderColor: col(sh.stroke), borderWidth: sh.sw || 1, ...(sh.dash ? { borderDashArray: [3, 2] } : {}) } : {}) });
       else if (sh.k === "text") {
@@ -670,6 +813,19 @@ const Marking = window.Marking = (() => {
         const ok = new Set(font.getCharacterSet ? font.getCharacterSet() : []), s = sh.font === "sans" ? sh.s.replace(/[^\x20-\x7E\xA0-\xFF]/g, "?") : [...sh.s].map(ch => !ok.size || ok.has(ch.codePointAt(0)) ? ch : "?").join("");
         page.drawText(s, { x: X(sh.x), y: Y(sh.y), size: sh.size, font, color: col(sh.fill) });
       }
+    }
+  }
+  async function toPdfEnd(out) {
+    if (!doc.marking || !isOn() || !lay || !lay.endNotes || !lay.endNotes.length) return;
+    const { rgb } = PDFLib, font = out._tpHand, W = 595.28, H = 841.89;
+    let page = out.addPage([W, H]), y = H - 60;
+    page.drawText("Marker's notes", { x: 50, y, size: 16, font: out._tpSansB, color: rgb(0.56, 0.09, 0.07) }); y -= 26;
+    for (const n of lay.endNotes) {
+      for (const l of wrap(`${n.n}. ${n.q ? qName(n.q) + " (page " + (n.p + 1) + "): " : ""}${n.text}`, 12, W - 100)) {
+        if (y < 50) { page = out.addPage([W, H]); y = H - 50; }
+        page.drawText([...l].map(ch => font.getCharacterSet().includes(ch.codePointAt(0)) ? ch : "?").join(""), { x: 50, y, size: 12, font, color: rgb(0.8, 0.12, 0.1) }); y -= 15;
+      }
+      y -= 4;
     }
   }
   const shiftPath = (d, dx, dy) => !dx && !dy ? d : d.replace(/(-?\d*\.?\d+)\s+(-?\d*\.?\d+)/g, (_, a, b) => `${+a + dx} ${+b + dy}`);
@@ -683,5 +839,5 @@ const Marking = window.Marking = (() => {
   setTimeout(watchLink, 0);
   document.fonts && document.fonts.load('12px "TP-hand"').then(() => { lay = null; draw(); }).catch(() => {});
   setTimeout(wire, 0);
-  return { wire, refresh, pageChanged, draw, toPdf, importText, parse, fromLink, linkFor, layout: () => layout(), totals: () => doc && doc.marking && totals(doc.marking), get lay() { return lay; } };
+  return { wire, refresh, pageChanged, draw, toPdf, toPdfEnd, prepare, importText, parse, fromLink, linkFor, layout: () => layout(), totals: () => doc && doc.marking && totals(doc.marking), get lay() { return lay; } };
 })();

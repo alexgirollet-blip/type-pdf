@@ -35,6 +35,13 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
     doc.pages[3].regions.filter(r => r.kind === "cell").forEach((r, k) => set(r, ["0", "0", "1", "1"][k]));
     doc.strokes[3] = [[[180, 400], [240, 400]], [[180, 440], [240, 440]], [[240, 380], [240, 460], [300, 420], [240, 380]], [[300, 420], [360, 420]]].map((pts, k) => ({ id: "g" + k, t: "pen", c: "#111418", w: 1.3, pts }));
     layoutPage(3);
+    // page 5: the crowded page (three labelled bus answers, then two long answers)
+    const L5 = doc.pages[4].regions.filter(r => r.kind === "lines").sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+    const t5 = ["Carries the data between the memory and the CPU", "Carries the addresses of where data is stored between the memory and CPU", "carries control signals from the CU to the other components inside the CPU",
+      "This is a complex system, where there are separate levels of priority, each level can have its own scheduling algorithm, and if a task is declared being of higher or lower priority it moves up or down the layers accordingly. The priority level determines how much processing time it gets.",
+      "To be able to communicate with the CPU, drivers allow them to communicate with each other so they can understand each other, meaning that inputs and outputs can be coordinated."];
+    window.__L5 = L5.length;
+    L5.forEach((r, k) => { if (t5[k]) set(r, t5[k]); });
   });
   await pg.waitForTimeout(400);
 
@@ -44,7 +51,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(ex.paperId && ex.exported, "has paperId and exported");
   const ids = ex.answers.map(a => a.id);
   ok(new Set(ids).size === ids.length, "ids are unique", ids);
-  ok(["1a", "1b", "2-drawn", "3", "4", "5-gap1", "5-gap2", "5-gap3", "5-gap4", "6"].every(i => ids.includes(i)), "ids are the expected ones", ids);
+  ok(["1a", "1b", "2-drawn", "3", "4", "5-gap1", "5-gap2", "5-gap3", "5-gap4", "6", "7a", "7b", "7c"].every(i => ids.includes(i)), "ids are the expected ones", ids);
   const drawn = ex.answers.find(a => a.id === "2-drawn");
   ok(drawn && drawn.workings && drawn.workings.crops[0].page === 2 && drawn.workings.crops[0].y1 > drawn.workings.crops[0].y0, "handwritten part records its crop rectangle", drawn && drawn.workings);
 
@@ -59,7 +66,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(st.warn.some(w => /9z/.test(w)), "unknown id is reported", st.warn);
   ok(st.warn.some(w => /not in the answer/.test(w)), "text that isn't there is reported (and placed beside the part)", st.warn);
   ok(st.warn.some(w => /export made/.test(w)), "an older export is warned about", st.warn);
-  ok(st.svg.join() === "0,1,2,3", "a marks layer on every page", st.svg);
+  ok(st.svg.join() === "0,1,2,3,4", "a marks layer on every page", st.svg);
 
   // where each mark is
   const g = await pg.evaluate(() => {
@@ -107,7 +114,8 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   console.log("Tables, gaps and drawings (logic gates)");
   const gap = await pg.evaluate(() => doc.pages[3].regions.filter(r => r.kind === "cell").map(r => regionRect(3, r)));
   const t1 = S(`a:${pi("5-gap1")}:0`)[0];
-  ok(P(`a:${pi("5-gap1")}:0`) === 3 && t1 && t1.stroke === "#17853b" && +t1.d.slice(1).split(" ")[0] > gap[0].x1, "a gap's tick goes just after it, not over the answer", { t1, cell: gap[0] });
+  const t1x = t1 && +t1.d.slice(1).split(" ")[0] + 5;
+  ok(P(`a:${pi("5-gap1")}:0`) === 3 && t1 && t1.stroke === "#17853b" && t1x > (gap[0].x0 + gap[0].x1) / 2 + 6 && t1x < gap[0].x1 + 14, "a gap's tick goes in the empty end of its own cell (not on its answer or the next column)", { t1x, cell: gap[0] });
   const x3 = S(`a:${pi("5-gap3")}:0`);
   ok(x3.some(s => s.k === "path" && s.stroke === "#cc1f1a") && x3.some(s => s.k === "text" && s.s === "0"), "the wrong gap is crossed, with the right value beside it", x3);
   ok(S("t:5").some(s => s.k === "text" && /Q5: 1\/2/.test(s.s)), "question 5's total from the marker's own figures", S("t:5"));
@@ -131,7 +139,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
     doc.marking.parts.pop(); delete doc.marking.map["5-table"]; Marking.refresh();
     return { y: sh && +sh.d.split(" ")[1] + 4.7, x: sh && +sh.d.slice(1).split(" ")[0], R, warned };
   });
-  ok(cellChk.y > cellChk.R.y0 && cellChk.y < cellChk.R.y1 && cellChk.x > cellChk.R.x1, "a table cell anchor marks that cell", cellChk);
+  ok(cellChk.y > cellChk.R.y0 && cellChk.y < cellChk.R.y1 && cellChk.x + 5 > (cellChk.R.x0 + cellChk.R.x1) / 2 && cellChk.x < cellChk.R.x1 + 14, "a table cell anchor marks that cell", cellChk);
   ok(cellChk.warned, "a missing option letter is reported", cellChk);
   console.log("Margin, totals, summary");
   const sc = S(`s:${pi("1a")}`);
@@ -145,14 +153,46 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   const notes = Object.entries(g.out).filter(([k, v]) => v.p === 1 && (k.startsWith("c:") || k.endsWith(":n"))).map(([, v]) => v.shapes.find(s => s.k === "rect")).filter(Boolean);
   const overlap = notes.some((a, i) => notes.some((c, j) => j > i && a.y < c.y + c.h && c.y < a.y + a.h));
   ok(!overlap, "margin notes on a page don't overlap", notes);
-  ok(S("sum").some(s => s.k === "text" && s.s === "7/14") && P("sum") === 0, "summary box on the cover with 7/14", S("sum").filter(s => s.k === "text").map(s => s.s));
+  ok(S("sum").some(s => s.k === "text" && s.s === "10/22") && P("sum") === 0, "summary box on the cover with 10/22", S("sum").filter(s => s.k === "text").map(s => s.s));
   ok(S("sum").some(s => s.k === "text" && s.s === "C"), "grade in the summary", null);
-  ok(S("spot").some(s => s.k === "text" && s.s === "7"), "score written in the cover's Total Marks box", S("spot"));
+  ok(S("spot").some(s => s.k === "text" && s.s === "10"), "score written in the cover's Total Marks box", S("spot"));
   const allShapes = Object.values(g.out).flatMap(v => v.shapes);
   ok(!allShapes.some(s => /^#(1c5fd9|0000ff|2563eb)/i.test(s.stroke || s.fill || "")), "no blue anywhere in the marking", null);
   const rows3 = await pg.$$eval("#marksList .mkrow", r => r.map(x => x.textContent).find(t => /Answer: C/.test(t)));
   ok(!!rows3, "the Marks panel shows the right option", rows3);
 
+  console.log("Nothing written over anything else");
+  const clash = await pg.evaluate(() => {
+    const L = Marking.layout(), out = [];
+    const hit = (a, b) => a[0] < b[2] - 0.5 && b[0] < a[2] - 0.5 && a[1] < b[3] - 0.5 && b[1] < a[3] - 0.5;
+    L.pages.forEach((shapes, p) => {
+      const P = doc.pages[p];
+      // the words of the marking: comments, working, labels, totals, notes, the summary (each group's box)
+      const groups = new Map();
+      for (const s of shapes) {
+        const word = /^(c:|w:|t:|fn:|sum$)/.test(s.g) || /:n$/.test(s.g) || (/^a:/.test(s.g) && (s.k === "rect" || s.k === "text"));
+        if (!word || (s.k !== "rect" && s.k !== "text")) continue;
+        const b = s.k === "rect" ? [s.x, s.y, s.x + s.w, s.y + s.h] : [s.x, s.y - s.size * 0.8, s.x + s.s.length * s.size * 0.42, s.y + 2];
+        const g = groups.get(s.g); groups.set(s.g, g ? [Math.min(g[0], b[0]), Math.min(g[1], b[1]), Math.max(g[2], b[2]), Math.max(g[3], b[3])] : b);
+      }
+      // a group with a box (notes, labels, the summary) is its box
+      for (const s of shapes) if (s.k === "rect" && groups.has(s.g)) { if (!groups.get(s.g).boxed) { const b = [s.x, s.y, s.x + s.w, s.y + s.h]; b.boxed = true; groups.set(s.g, b); } }
+      const G = [...groups];
+      // printed words, and what was typed (line by line)
+      const printed = (P.items || []).filter(it => it.s.trim()).map(it => [it.x, disp(p, it.y) - (it.h || 10) * 0.7, it.x1, disp(p, it.y)]);
+      const typed = [];
+      for (const r of P.regions) { const ta = r._el; if (!ta || r.kind === "choice" || !(ta.value || "").trim()) continue; const s0 = caretRect(ta, 0), e0 = caretRect(ta, ta.value.length), z = zoom, R = regionRect(p, r);
+        if (Math.abs(e0.y - s0.y) < 4) typed.push([s0.x / z, s0.y / z + 2, e0.x / z, (e0.y + e0.h) / z - 2]); else { typed.push([R.x0, s0.y / z + 2, R.x1, e0.y / z - 2]); typed.push([R.x0, e0.y / z + 2, e0.x / z, (e0.y + e0.h) / z - 2]); } }
+      G.forEach(([g, b], i) => {
+        G.slice(i + 1).forEach(([g2, b2]) => { if (hit(b, b2)) out.push(`p${p + 1}: ${g} on ${g2}`); });
+        if (g !== "spot") printed.forEach(t => { if (hit(b, t)) out.push(`p${p + 1}: ${g} on printed text`); });
+        typed.forEach(t => { if (hit(b, t)) out.push(`p${p + 1}: ${g} on typed answer`); });
+      });
+    });
+    return { out: [...new Set(out)], foot: L.footnotes.length, end: L.endNotes.length };
+  });
+  ok(clash.out.length === 0, "no comment, working, label, total or summary covers printed text, an answer or another note", clash.out);
+  console.log(`  (${clash.foot} note(s) didn't fit and are numbered; ${clash.end} of those went to the end of the PDF)`);
   console.log("Panel, toggle, edit, undo, export");
   const rows = await pg.$$eval("#marksList .mkrow", r => r.map(x => x.textContent));
   ok(rows.length === marking.parts.length, "Marks panel lists every part", rows);
@@ -177,7 +217,7 @@ const ok = (cond, what, extra) => { console.log((cond ? "  ok   " : "  FAIL ") +
   ok(await pg.evaluate(() => doc.marking.parts.length) === marking.parts.length, "undo brings the previous marking back", null);
   // screenshots for a person to look at
   await pg.evaluate(() => { document.getElementById("marksPop").hidden = true; }); await pg.setViewportSize({ width: 1000, height: 1500 }); await pg.waitForTimeout(500);
-  for (const p of [0, 1, 2, 3]) { await pg.evaluate(p => { $("#pages").scrollTop = pageTop(p) - 8; }, p); await pg.waitForTimeout(400); await pg.screenshot({ path: path.join(process.env.SHOTS || "/tmp", `marked-p${p + 1}.png`) }); }
+  for (const p of [0, 1, 2, 3, 4]) { await pg.evaluate(p => { $("#pages").scrollTop = pageTop(p) - 8; }, p); await pg.waitForTimeout(400); await pg.screenshot({ path: path.join(process.env.SHOTS || "/tmp", `marked-p${p + 1}.png`) }); }
   const [dl] = await Promise.all([pg.waitForEvent("download", { timeout: 30000 }), pg.evaluate(() => exportPDF(true))]);
   const out = path.join(process.env.SHOTS || "/tmp", "marked.pdf"); await dl.saveAs(out);
   ok(/marked\.pdf$/.test(dl.suggestedFilename()) && fs.statSync(out).size > 5000, "Export marked PDF", dl.suggestedFilename());

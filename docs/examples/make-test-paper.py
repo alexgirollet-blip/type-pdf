@@ -70,4 +70,22 @@ c.drawString(68, H - 290, "Draw a logic circuit for Q = NOT (A AND B) using one 
 c.drawRightString(W - 60, H - 308, "[2]")
 c.setLineWidth(1); c.rect(100, H - 560, 400, 230)
 footer(4)
+
+# 5. a crowded page, like OCR's: labelled answer lines, long answers, the next question straight after
+c.setFont("Helvetica-Bold", 11); c.drawString(50, H - 60, "7"); c.drawString(68, H - 60, "(a)")
+c.setFont("Helvetica", 11); c.drawString(92, H - 60, "State the purpose of each of these three buses.")
+y = H - 88
+for lab in ["Data bus", "Address bus", "Control bus"]:
+    c.setFont("Helvetica", 11); c.drawString(70, y, lab)
+    c.setDash(1, 2); c.setLineWidth(0.6); c.line(140, y - 2, W - 60, y - 2); c.line(70, y - 28, W - 60, y - 28); c.setDash()
+    y -= 56
+c.drawRightString(W - 60, y + 14, "[3]")
+c.setFont("Helvetica-Bold", 11); c.drawString(68, y - 10, "(b)")
+c.setFont("Helvetica", 11); c.drawString(92, y - 10, "Describe how a multi-level feedback queue works.")
+c.drawRightString(W - 60, y - 28, "[3]"); rules(y - 52, 6)
+y2 = y - 52 - 6 * 26 - 10
+c.setFont("Helvetica-Bold", 11); c.drawString(68, y2, "(c)")
+c.setFont("Helvetica", 11); c.drawString(92, y2, "Explain why hardware devices require a device driver.")
+c.drawRightString(W - 60, y2 - 18, "[2]"); rules(y2 - 44, 4)
+footer(5)
 c.save()
