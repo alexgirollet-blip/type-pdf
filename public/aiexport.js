@@ -391,7 +391,9 @@ Use the whole answered paper to see each question, its diagrams and the marks av
 ## How to mark
 - Use the real mark scheme for this paper if you know it; otherwise mark as that exam board would.
 - Give credit for correct physics/maths/working even when the final answer is wrong (error carried forward), as the board would.
-- Keep comments short and specific, like a teacher's margin notes. Say what was missing, not just "wrong".
+- Write like a teacher in the margin: **comments at most ~15 words**, saying what was missing, not just "wrong". **No comment on parts with full marks** (the ticks say it). \`correction\`: the right answer in at most ~20 words; anything longer (a program, a long model answer) goes in \`working\` as up to 4 short steps.
+- Put a tick on the words that earned each mark and a cross on each error, rather than describing them in a comment.
+- When a printed mark total covers several answer ids (e.g. a table of 5 gaps worth [3]), put the awarded/max on the first id and give the others "max": 0.
 - For anything not fully right, give the correct answer (\`correction\`) and, where it helps, the steps to get there (\`working\`).
 - Parts listed in answers.json under "blank" that I clearly skipped on purpose: verdict "excluded". Otherwise blank parts are "blank" with 0 marks.
 - Estimate a grade from the most recent grade boundaries you know for this paper and say which (\`gradeNote\`).
@@ -427,7 +429,8 @@ Create a file called **${out}** (or, if you can't make files, reply with only th
   - \`{"kind":"option","letter":"B"}\`: a multiple-choice option. \`{"kind":"cell","index":2}\`: a table cell, counting from 0 in the order of "cells".
   - \`{"kind":"part"}\`: beside the whole answer. \`{"kind":"page","page":3,"x":0.5,"y":0.8}\`: anywhere on a page (last resort).
 - To show what a drawing should have been: an **arrow** (\`"from": {"x":…,"y":…}\` in the same units as its anchor) pointing at the mistake, a **symbol** (\`"symbol"\`: and, or, not, nand, nor, xor, xnor or buffer) to draw a logic gate in the anchor's box, or a **sketch** (\`"path"\`: SVG path with absolute M/L/Q/C commands, coordinates 0–1 of the anchor's box, e.g. "M0 1 L1 0" for a line of best fit).
-- \`summary.score\` and \`outOf\` leave out excluded parts. \`perQuestion\` gives each whole question's total.
+- \`summary.score\` and \`outOf\` leave out excluded parts. \`perQuestion\` gives each whole question's total. \`gradeNote\`: one short line (e.g. "est. from June 2024 boundaries").
+- For a symbol or sketch, put its box in empty space beside the drawing (not over my wires), with an arrow to where it goes.
 
 Before sending, check the JSON is valid, every \`id\` is one from answers.json, and the marks add up to the score.
 `;

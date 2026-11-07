@@ -2195,6 +2195,7 @@ async function exportPDF(marked, opts) {
       }
       if (marked && window.Marking) await Marking.toPdf(out, page, p, tx, ty);
     }
+    if (marked && window.Marking) await Marking.toPdfEnd(out);
     await aiPrep().catch(() => {});
     out.setTitle(doc.name + " (answered)"); out.setSubject(JSON.stringify(aiJSON(false))); out.setCreator("TypePDF"); out.setProducer("TypePDF");
     // carry the untouched paper and the answers inside, so opening this file in TypePDF brings back editable answers
