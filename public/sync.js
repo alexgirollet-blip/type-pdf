@@ -108,6 +108,9 @@ window.Sync = (() => {
     if (k === "timer") return doc.timer ? JSON.stringify(doc.timer) : null;
     if (k === "font") return doc.font ? JSON.stringify(doc.font) : null;
     if (k === "style") return doc.style ? JSON.stringify(doc.style) : null;
+    if (k === "aiexport") return doc.aiExport ? JSON.stringify(doc.aiExport) : null;
+    if (k === "marking") return doc.marking ? JSON.stringify(doc.marking) : null;
+    if (k === "markingPrev") return doc.markingPrev ? JSON.stringify(doc.markingPrev) : null;
     if (k.startsWith("flag:")) return doc.flags && doc.flags[k.slice(5)] ? JSON.stringify(doc.flags[k.slice(5)]) : null;
     let m;
     if ((m = k.match(/^page:(\d+)$/))) { const P = doc.pages[+m[1]]; if (!P) return null; return JSON.stringify({ w: P.w, h: P.h, rot: P.rot, hasText: P.hasText, ocr: P.ocr, items: P.items, qs: P.qs, qv: P.qv, cv: P.cv, dv: P.dv, regions: P.regions.map(cleanRegion) }); }
@@ -117,6 +120,7 @@ window.Sync = (() => {
   }
   function allKeys() {
     const ks = ["meta"]; if (doc.timer) ks.push("timer"); if (doc.font) ks.push("font"); if (doc.style) ks.push("style");
+    if (doc.aiExport) ks.push("aiexport"); if (doc.marking) ks.push("marking"); if (doc.markingPrev) ks.push("markingPrev");
     for (const k of Object.keys(doc.flags || {})) ks.push("flag:" + k);
     doc.pages.forEach((P, p) => { if (P && P.regions) ks.push("page:" + p); });
     for (const k of Object.keys(doc.text)) ks.push("text:" + k);
@@ -134,6 +138,9 @@ window.Sync = (() => {
     if (k === "timer") { doc.timer = v; if (S.live) timerTick(); return; }
     if (k === "font") { if (v) { doc.font = v; if (S.live) applyFont(); } return; }
     if (k === "style") { doc.style = v || null; if (S.live) applyAnsStyle(); return; }
+    if (k === "aiexport") { doc.aiExport = v || null; return; }
+    if (k === "marking") { doc.marking = v || null; if (S.live && window.Marking) Marking.refresh(); return; }
+    if (k === "markingPrev") { doc.markingPrev = v || null; return; }
     if (k.startsWith("flag:")) { const id = k.slice(5); doc.flags ||= {}; if (v) doc.flags[id] = v; else delete doc.flags[id]; if (S.live) { const p = +id.split(":")[0]; layoutPage(p); renderFlags(); } return; }
     if ((m = k.match(/^page:(\d+)$/))) {
       const p = +m[1]; if (!v) return;
