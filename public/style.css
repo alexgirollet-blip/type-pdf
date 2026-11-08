@@ -454,6 +454,8 @@ button.pageind:hover{background:rgba(20,26,24,.95)}
 .aiprov .paid{background:#fdecea;color:#a3271f}
 .aiprov input[type=password],.aiprov input[type=text]{flex:1;min-width:150px;padding:6px 8px}
 .aires{color:var(--muted)}
+.aires ul{margin:4px 0 0;padding-left:18px}
+.aiauto{color:var(--muted);font-size:12px}
 .claudewait{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:70;background:#1c2321;color:#e9eeec;border:1px solid #cc1f1a;border-radius:10px;padding:10px 14px;display:grid;gap:4px;max-width:min(520px,calc(100vw - 24px));font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
 .claudewait small{color:#aab6b1}
 .claudewait button{justify-self:end;font-size:12px}

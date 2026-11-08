@@ -368,7 +368,7 @@ async function api(req, env, url, ctx) {
   // ---- AI: one "Mark with AI" and a chat, served by whichever free provider is up (see src/ai.js) ----
   if (path.startsWith("/api/ai/")) {
     const settings = (await (await call(auth, "/ai/get", {})).json()).ai || {};
-    if (path === "/api/ai/providers" && req.method === "GET") return json(who.admin ? { providers: AI.status(env, settings), ready: AI.available(env, settings).length > 0 } : { ready: AI.available(env, settings).length > 0 });
+    if (path === "/api/ai/providers" && req.method === "GET") return json(who.admin ? { providers: AI.status(env, settings), ready: AI.configured(env, settings) } : { ready: AI.configured(env, settings) });
     if (path === "/api/ai/providers" && req.method === "POST") {
       if (!who.admin) return bad("Only the admin can change the AI settings.", 403);
       const b = await req.json().catch(() => ({}));
@@ -386,8 +386,9 @@ async function api(req, env, url, ctx) {
       if (!who.admin) return bad("Only the admin can test providers.", 403);
       const b = await req.json().catch(() => ({}));
       const only = { ...Object.fromEntries(AI.PROVIDERS.map(p => [p.id, { ...(settings[p.id] || {}), on: false }])), [b.id]: { ...(settings[b.id] || {}), on: true } };
-      try { const r = await AI.run(env, only, "Reply with exactly: OK", [{ role: "user", text: "Say OK." }], { maxTokens: 20, deadline: Date.now() + 40000 }); return json({ ok: true, model: r.model, reply: String(r.result).slice(0, 60), tried: r.tried }); }
-      catch (e) { return json({ ok: false, error: e.message, tried: e.tried || [] }); }
+      // fresh model lists, nothing skipped for resting, and room for models that think before they answer
+      try { const r = await AI.run(env, only, "Reply with exactly: OK", [{ role: "user", text: "Say OK." }], { maxTokens: 1024, deadline: Date.now() + 60000, test: true }); return json({ ok: true, model: r.model, reply: String(r.result).slice(0, 60), tried: r.tried, providers: AI.status(env, settings) }); }
+      catch (e) { return json({ ok: false, error: e.message, tried: e.tried || [], providers: AI.status(env, settings) }); }
     }
     if (path === "/api/ai/mark" && req.method === "POST") {
       if (!(await (await call(auth, "/hit", { key: "aimark:" + user, max: who.admin ? 60 : 12, window: 864e5 })).json()).ok) return bad("You've used today's AI marking. Try again tomorrow, or use Export for AI.", 429);
