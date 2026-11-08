@@ -246,6 +246,34 @@ print(json.dumps(out))`, zpath]).toString();
   const prompt = files[names.find(n => /READ ME FIRST/.test(n))].text;
   ok(prompt.includes(ex.paperId) && /typepdf-marking/.test(prompt) && /correctOptions/.test(prompt) && /workings/.test(prompt) && prompt.includes("test-paper - marking.json"), "the prompt says how to mark and exactly what to send back (with this paper's id)", prompt.slice(0, 300));
   await pg.evaluate(() => $("#aiDlg").close());
+  // an AQA-style cover: the "For Examiner's Use" table gets each row's marks (a range row sums its questions), and the
+  // summary goes in clear space, never over the candidate boxes
+  console.log("Examiner's table on the cover");
+  await pg.goto(URL_);
+  await pg.setInputFiles("#file", path.join(ROOT, "docs/examples/aqa-cover.pdf"));
+  await pg.waitForSelector("#editor:not([hidden])"); await pg.waitForTimeout(2500);
+  const aqa = await pg.evaluate(async () => {
+    const L = doc.pages[1].regions.filter(r => r.kind === "lines");
+    L[0]._el.value = "Electrons are emitted from a metal surface when light above a threshold frequency shines on it"; L[0]._el.dispatchEvent(new Event("input"));
+    L[1]._el.value = "The minimum energy needed to remove an electron"; L[1]._el.dispatchEvent(new Event("input"));
+    await aiPrep(); const ex = rememberExport(aiJSON(false));
+    const per = [{ q: "1", awarded: 7, max: 10 }, { q: "2", awarded: 3, max: 7 }, { q: "3", awarded: 5, max: 6 }];
+    for (let n = 8; n <= 32; n++) per.push({ q: String(n), awarded: n % 2, max: 1 });
+    await Marking.importText(JSON.stringify({ format: "typepdf-marking", version: 1, paperId: ex.paperId, exported: ex.exported, marker: "Claude",
+      summary: { score: 43, outOf: 85, grade: "B", gradeNote: "est. from recent AQA 7408 boundaries", comment: "Calculations are solid; marks went on unpicking the setup.", perQuestion: per },
+      parts: [{ id: ex.answers[0].id, q: ex.answers[0].q, awarded: 1, max: 2, verdict: "partial", comment: "Needs 'photons'.", annotations: [{ type: "tick", anchor: { kind: "text", match: "Electrons are emitted" } }] }] }));
+    const Lay = Marking.layout(), P = doc.pages[0];
+    const row = t => { const it = P.items.find(it => it.s.trim() === t && it.x > 380); const sp = Lay.pages[0].find(s => s.g === "spot" && s.k === "text" && Math.abs(s.y - disp(0, it.y) - 1) < 3); return sp && sp.s; };
+    const sumR = Lay.pages[0].find(s => s.g === "sum" && s.k === "rect");
+    const fields = P.regions.filter(r => r.kind !== "choice" && regionRect(0, r).y1 < 360).map(r => regionRect(0, r));
+    const onField = sumR && fields.some(f => sumR.x < f.x1 && f.x0 < sumR.x + sumR.w && sumR.y < f.y1 && f.y0 < sumR.y + sumR.h);
+    const onText = sumR && P.items.some(it => it.s.trim() && sumR.x < it.x1 && it.x < sumR.x + sumR.w && sumR.y < disp(0, it.y) && disp(0, it.y) - 8 < sumR.y + sumR.h);
+    return { r1: row("1"), r2: row("2"), r3: row("3"), mcq: row("8–32"), total: row("TOTAL"), list: Lay.pages[0].some(s => s.g === "sum" && /^Q1\b/.test(s.s || "")), sumR: !!sumR, onField, onText };
+  });
+  ok(aqa.r1 === "7/10" && aqa.r2 === "3/7" && aqa.r3 === "5/6", "each question's row gets its marks out of the total", aqa);
+  ok(aqa.mcq === "12/25", "the multiple-choice range row (8–32) sums those questions", aqa);
+  ok(aqa.total === "43/85", "TOTAL gets the score out of the total", aqa);
+  ok(aqa.sumR && !aqa.onField && !aqa.onText && !aqa.list, "the summary sits in clear space (not on the name boxes or the print) without repeating the table", aqa);
   ok(!errs.length, "no page errors", errs);
   await b.close();
   console.log(fails ? `\n${fails} check(s) failed` : "\nAll checks passed");
