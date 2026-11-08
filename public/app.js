@@ -208,6 +208,7 @@ async function openDoc(d, fresh = false) {
   if (fresh) toast(`Found ${totalRegions()} answer spaces on ${pdf.numPages} pages. Use Boxes to add any that were missed.`, 5000);
   if (window.Sync) Sync.live();
   if (window.Marking) { $("#marksPop").hidden = true; Marking.refresh(); }
+  if (window.AIMark && doc.inbox && Object.keys(doc.inbox).length) setTimeout(() => AIMark.fromInbox(), 300);      // marks that arrived while the paper was closed
 }
 
 // the font the paper is mostly printed in, by amount of text

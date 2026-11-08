@@ -242,6 +242,8 @@
 
 <dialog id="aiDlg" class="dlg">
   <h2>Export for AI marking</h2>
+  <div class="row wrap aimarkrow"><button type="button" class="primary" data-ai="mark">✨ Mark with AI</button><button type="button" data-ai="claude">Mark with Claude</button><button type="button" data-ai="connect">Connect Claude…</button><button type="button" data-ai="settings" class="adminonly" hidden>AI settings…</button></div>
+  <p class="note"><b>Mark with AI</b> marks it here and puts the marks straight on the paper. <b>Mark with Claude</b> opens Claude beside TypePDF; through the TypePDF connector it reads the paper, marks it and the marks appear here. Or send the files yourself:</p>
   <p class="note">Everything Claude needs to mark this paper, in one go: <b>instructions</b> (what to check and how to send the marking back), your <b>answers</b> as JSON, your <b>handwriting</b> cropped into a small PDF, and the <b>whole paper</b> with your answers on it, so nothing is missed. Drop it into Claude and send. Then import what it sends back with <b>✓ Marks</b>.</p>
   <label class="chk"><input type="checkbox" id="aiQ" checked> Include each question's wording (useful if the AI doesn't have the paper)</label>
   <p id="aiInfo" class="info"></p>
@@ -260,6 +262,32 @@
     <button id="aiCopy">Copy JSON</button>
   </div></details>
   <div class="row"><button type="button" id="aiClose">Close</button></div>
+</dialog>
+
+<dialog id="claudeDlg" class="dlg">
+  <h2>Connect Claude to TypePDF</h2>
+  <p class="note">Once, so Claude can read a paper you've prepared, mark it and put the marks on it for you. It uses your own Claude account.</p>
+  <ol class="steps">
+    <li>Copy your connector link: <div class="row"><input id="claudeUrl" readonly aria-label="Your connector link"><button type="button" id="claudeCopy">Copy</button></div></li>
+    <li>In Claude (claude.ai or the app) open <b>Settings → Connectors</b> and choose <b>Add custom connector</b>. Name it <i>TypePDF</i>, paste the link, and add it.</li>
+    <li>In a chat, make sure <b>TypePDF</b> is switched on in the tools / connectors menu (the first time, Claude may ask you to allow its tools: allow them).</li>
+  </ol>
+  <p class="note">Keep the link private: anyone with it can read the answers you prepare for marking. <button type="button" id="claudeReset" class="linkish">Reset the link</button></p>
+  <div class="row"><button type="button" class="primary" id="claudeDone">I've added it</button><button type="button" id="claudeClose">Close</button></div>
+</dialog>
+
+<dialog id="aiSetDlg" class="dlg wide">
+  <h2>AI settings</h2>
+  <p class="note">Mark with AI tries these in order and moves on when one is busy, at its free limit or gives a bad answer. Add as many free keys as you like. Keys stay on the TypePDF server (never shown again or sent to anyone's browser). Each free one stops at its limit instead of charging, as long as you don't add a card or billing to that account.</p>
+  <div id="aiSetList" class="aisetlist"></div>
+  <div class="row"><button type="button" id="aiSetClose">Close</button></div>
+</dialog>
+
+<dialog id="aiFailDlg" class="dlg">
+  <h2>No AI could mark it just now</h2>
+  <p id="aiFailMsg" class="note"></p>
+  <details><summary>What each one said</summary><ul id="aiFailList" class="small"></ul></details>
+  <div class="row wrap"><button type="button" class="primary" id="aiFailClaude">Mark with Claude instead</button><button type="button" id="aiFailClose">Close</button></div>
 </dialog>
 
 <dialog id="markDlg" class="dlg">
@@ -311,6 +339,7 @@
 <script src="geom.js"></script>
 <script src="aiexport.js"></script>
 <script src="marking.js"></script>
+<script src="aimark.js"></script>
 <script src="sync.js"></script>
 <script src="home.js"></script>
 <script src="finder.js"></script>

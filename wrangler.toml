@@ -7,7 +7,7 @@ keep_vars = true   # keep variables set in the dashboard when GitHub deploys
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/api/*"]
+run_worker_first = ["/api/*", "/mcp/*"]
 
 # Accounts and sessions live in one Durable Object; each user's papers live in their own.
 [[durable_objects.bindings]]
@@ -30,6 +30,12 @@ new_sqlite_classes = ["AuthStore", "UserStore"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["PdfStore"]
+
+# Optional: Cloudflare Workers AI as the last free fallback for "Mark with AI". It only stays free on the Workers
+# FREE plan (it stops at the daily allowance); on the paid plan extra use is billed, so it's off until the admin
+# switches it on in TypePDF (Export for AI → AI settings).
+[ai]
+binding = "AI"
 
 [observability]
 enabled = true
