@@ -12,6 +12,8 @@ TypePDF can mark a paper three ways. All three end the same way: the marks appea
 
 Paste each key in **TypePDF → Export for AI → AI settings…** (admin only). Then press **Test**. Keys stay on the TypePDF server: they're never shown again, and never sent to anyone's browser.
 
+**You don't need to choose models.** Each provider is asked which models it offers right now (rechecked every few hours), and the best ones still on its free tier are used. Leave the Models box empty unless you want particular ones. **Test** shows which models it's using and what each one said.
+
 Mark with AI tries the providers in the order below. It moves to the next one when a provider is at its limit, gives an error, or sends back something that isn't a proper marking. You only need one, but more means it almost never runs out.
 
 None of these charge you **as long as you don't add a card or billing to that account**. Without billing they just refuse requests at the limit, and TypePDF moves on to the next.
@@ -19,24 +21,21 @@ None of these charge you **as long as you don't add a card or billing to that ac
 1. **Google Gemini**: the best of the free ones (it reads handwriting and diagrams well).
    - Go to <https://aistudio.google.com/apikey>, sign in with a Google account, and press **Create API key**.
    - Don't enable billing on that Google Cloud project.
-   - TypePDF tries `gemini-2.5-pro` first (a small daily allowance), then `gemini-2.5-flash`, then `gemini-2.5-flash-lite`.
+   - TypePDF asks Gemini which models it has now and uses the newest Pro, then the newest Flash models, then Flash-Lite. Pro is often not on the free tier, so it's tried and skipped. If Google says a model has been retired and names its replacement, the replacement is tried next.
    - On the free tier, Google may use what you send to improve its products.
 2. **GitHub Models**: free with any GitHub account.
    - Go to <https://github.com/settings/personal-access-tokens/new> and create a fine-grained token.
    - Under **Permissions → Account permissions → Models**, choose **Read-only**. Copy the token.
    - The daily limits are small, and long papers can be too big for its free requests. TypePDF then just moves on.
-3. **Mistral**:
-   - Go to <https://console.mistral.ai/>, sign up, and choose the free **Experiment** plan. It needs a phone number but no card.
-   - Then **API keys → Create new key**.
-4. **OpenRouter**:
-   - Go to <https://openrouter.ai/keys> and create a key. Only models ending in `:free` are used (about 50 requests a day).
+3. **OpenRouter**:
+   - Go to <https://openrouter.ai/keys> and create a key. TypePDF reads OpenRouter's current model list and only ever uses models that cost nothing (about 50 requests a day). OpenRouter regularly moves free models to paid, and those are skipped automatically.
    - **Don't add credit** to the account.
-5. **Groq**:
+4. **Groq**:
    - Go to <https://console.groq.com/keys>, sign up, and press **Create API Key**. No card is needed.
-6. **Any other OpenAI-compatible API**: for other services with a free tier, such as Cerebras, NVIDIA NIM, SambaNova or Together's free models.
+5. **Any other OpenAI-compatible API**: for other services with a free tier, such as Cerebras, NVIDIA NIM, SambaNova or Together's free models.
    - Put the service's `…/chat/completions` address, your key and a model name.
    - A maintained list of free APIs: <https://github.com/cheahjs/free-llm-api-resources>.
-7. **Cloudflare Workers AI**: no key, since it's built into the TypePDF Worker. Off until you tick **Use**.
+6. **Cloudflare Workers AI**: no key, since it's built into the TypePDF Worker. Off until you tick **Use**.
    - Only switch it on if your Cloudflare **Workers plan is Free**. Then it stops at the daily allowance.
    - On the paid Workers plan, use beyond the allowance is billed.
    - It only reads typed answers (no images), and it's the weakest marker here.
@@ -45,7 +44,7 @@ Optional, and not free: **Claude (Anthropic API)**. If you add a key it's tried 
 - Create the key at <https://console.anthropic.com/settings/keys>.
 - Buy a small amount of prepaid credit and leave **auto-reload off**. It then simply stops when the credit's used up, so it can never charge more.
 
-You can also set keys as Worker secrets instead of pasting them into TypePDF. In the Cloudflare dashboard, open the Worker, then **Settings → Variables and Secrets**. The names are `GEMINI_API_KEY`, `GITHUB_MODELS_TOKEN`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CUSTOM_AI_KEY` (with `CUSTOM_AI_URL`) and `ANTHROPIC_API_KEY`.
+You can also set keys as Worker secrets instead of pasting them into TypePDF. In the Cloudflare dashboard, open the Worker, then **Settings → Variables and Secrets**. The names are `GEMINI_API_KEY`, `GITHUB_MODELS_TOKEN`, `OPENROUTER_API_KEY`, `GROQ_API_KEY`, `CUSTOM_AI_KEY` (with `CUSTOM_AI_URL`) and `ANTHROPIC_API_KEY`.
 
 ### Limits for other accounts
 

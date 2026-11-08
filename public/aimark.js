@@ -161,8 +161,7 @@ const AIMark = window.AIMark = (() => {
     claude: { url: "https://console.anthropic.com/settings/keys", how: "Not free: buy a small amount of prepaid credit and leave auto-reload off, so it simply stops when the credit's used. Best marking. Create a key and paste it." },
     gemini: { url: "https://aistudio.google.com/apikey", how: "Free: sign in with a Google account → Create API key. Don't turn on billing for that project, so it just stops at the free limit." },
     github: { url: "https://github.com/settings/personal-access-tokens/new", how: "Free with a GitHub account: create a fine-grained token, Permissions → Models: Read-only. Small daily limits." },
-    mistral: { url: "https://console.mistral.ai/api-keys", how: "Free: choose the 'Experiment' plan (phone number needed, no card) → API keys → Create." },
-    openrouter: { url: "https://openrouter.ai/keys", how: "Free: create a key; only the models ending :free are used (about 50 requests a day without credit). Don't add credit." },
+    openrouter: { url: "https://openrouter.ai/keys", how: "Free: create a key. Only models that cost nothing are used (picked from OpenRouter's current list; about 50 requests a day without credit). Don't add credit." },
     groq: { url: "https://console.groq.com/keys", how: "Free: sign up → Create API key. No card needed." },
     custom: { url: "https://github.com/cheahjs/free-llm-api-resources", how: "Any other service with an OpenAI-style API (e.g. Cerebras, NVIDIA NIM, SambaNova, Together's free models): put its chat/completions address, key and model name." },
     cloudflare: { url: "https://dash.cloudflare.com/?to=/:account/workers/plans", how: "No key: it's built into the TypePDF Worker. Only switch it on if your Workers plan is Free (then it stops at the daily allowance); on the paid plan extra use is billed." },
@@ -182,7 +181,7 @@ const AIMark = window.AIMark = (() => {
         <input type="text" placeholder="${p.id === "custom" ? "Model name (required)" : "Models (optional): " + esc(p.defaults)}" value="${esc(p.models)}" data-k="models">
         <label class="chk"><input type="checkbox" data-k="on" ${p.on ? "checked" : ""}> Use</label>
         <button type="button" data-a="save">Save</button><button type="button" data-a="test" ${p.set || p.optIn ? "" : "disabled"}>Test</button>${p.set && !p.fromEnv && !p.optIn ? '<button type="button" data-a="clear">Remove key</button>' : ""}</div>
-        <small class="aires"></small>`;
+        ${p.auto ? `<small class="aiauto">Using now: ${esc(p.auto.join(", "))}</small>` : ""}<small class="aires"></small>`;
       row.onclick = async e => {
         const a = e.target.dataset.a; if (!a) return;
         const res = row.querySelector(".aires"), v = k => row.querySelector(`[data-k="${k}"]`);
@@ -194,7 +193,9 @@ const AIMark = window.AIMark = (() => {
           } else if (a === "test") {
             res.textContent = "Testing…";
             const j = await api("/api/ai/test", { id: p.id });
-            res.textContent = j.ok ? `✓ works (${j.model} said "${j.reply}")` : `✗ ${j.error}${(j.tried || []).length ? ": " + j.tried.map(t => t.k + " " + t.why).join("; ") : ""}`;
+            const fails = (j.tried || []).map(t => `${t.k.split("/").slice(1).join("/")}: ${t.why}`);
+            if (j.providers) { const np = j.providers.find(x => x.id === p.id); const au = row.querySelector(".aiauto"); if (np && np.auto) { if (au) au.textContent = "Using now: " + np.auto.join(", "); else res.insertAdjacentHTML("beforebegin", `<small class="aiauto">Using now: ${esc(np.auto.join(", "))}</small>`); } }
+            res.innerHTML = j.ok ? `✓ Works: <b>${esc(j.model)}</b> answered${fails.length ? ` (after: ${fails.map(esc).join("; ")})` : ""}.` : `✗ Not working yet.<ul>${fails.map(f => `<li>${esc(f)}</li>`).join("") || `<li>${esc(j.error)}</li>`}</ul>`;
           }
         } catch (er) { res.textContent = er.message; }
       };
