@@ -17,7 +17,7 @@ const Marking = window.Marking = (() => {
   const VERDICTS = ["correct", "partial", "wrong", "blank", "excluded"];
   const TYPES = ["tick", "cross", "underline", "circle", "caret", "note", "bracket", "arrow", "sketch", "symbol"];
   const GATES = ["and", "or", "not", "nand", "nor", "xor", "xnor", "buffer"];
-  let lay = null;                  // { pages: [[shape]], warn, parts } for the current marking
+  let lay = null, lay_summary = null;                  // { pages: [[shape]], warn, parts } for the current marking
   let editMode = false, addType = null, sel = null;
   const $ = s => document.querySelector(s);
 
@@ -251,7 +251,8 @@ const Marking = window.Marking = (() => {
       for (let c = 0, n = Math.min(W, m.w); c < n; c++) if (m.a[sr * m.w + c]) a[r * W + c] = 1;
     }
     // answer spaces: their printed lines and borders don't count…
-    for (const r of P.regions || []) { if (r.kind === "choice") continue; const Q = regionRect(p, r); set(Q.x0 + 1.5, Q.y0 + 1.5, Q.x1 - 1.5, Q.y1 - 1.5, 0); }
+    const marked = new Set(Object.values((doc.marking && doc.marking.map) || {}).flatMap(m => m.r || []));
+    for (const r of P.regions || []) { if (r.kind === "choice") continue; const Q = regionRect(p, r); if (marked.has(r.id)) set(Q.x0 + 1.5, Q.y0 + 1.5, Q.x1 - 1.5, Q.y1 - 1.5, 0); else set(Q.x0, Q.y0, Q.x1, Q.y1); }
     // …but printed words inside them (a [3], a label) still do, and what you wrote in them does
     for (const it of P.items || []) if (it.s && it.s.trim()) set(it.x - 1, disp(p, it.y) - (it.h || 10) * 0.8, it.x1 + 1, disp(p, it.y) + 2);
     for (const r of P.regions || []) {
@@ -441,7 +442,7 @@ const Marking = window.Marking = (() => {
       }
     });
     // 2. the front page: the score in its Total box, and the summary in the largest clear space
-    summary(add, occ[0]);
+    summary(add, occ);
     // 3. words: short labels by their marks, comments near the answer, the working under it. All only in clear space
     for (const L of later.filter(x => x.kind === "ann")) {
       const { a, g, at, p, c, pt } = L, short = a.text && a.type !== "note" && a.text.length <= 28;
@@ -527,7 +528,7 @@ const Marking = window.Marking = (() => {
       else if (x.type === "circle") add(p, g, { k: "ell", cx: x.x, cy: y, rx: 14, ry: 9, stroke: RED, w: 1.3 });
       if (x.text) wrap(x.text, 10.5, 150).forEach((l, k) => add(p, g, { k: "text", x: x.x + (x.type === "note" ? -4 : 10), y: y + 4 + k * 12.5, s: l, size: 10.5, font: "hand", fill: RED }));
     });
-    lay = { pages, warn: [...new Set([...(M.warn || []), ...warn])], geo, endNotes, footnotes: foot.flat() };
+    lay = { pages, warn: [...new Set([...(M.warn || []), ...warn])], geo, endNotes, footnotes: foot.flat(), summaryPage: lay_summary ? lay_summary.p : 0 };
     return lay;
   }
   const fmt = v => v == null ? "–" : Math.round(v * 10) / 10;
@@ -562,54 +563,106 @@ const Marking = window.Marking = (() => {
     const score = M.summary.score != null ? M.summary.score : sum(live, "awarded"), outOf = M.summary.outOf != null ? M.summary.outOf : sum(live, "max");
     return { score, outOf, pct: outOf ? Math.round(score / outOf * 100) : null };
   }
-  // ---- the front page: the score (in the paper's own "Total" box if it has one) and a summary in the largest clear space ----
-  function summary(add, o) {
-    const M = doc.marking, P = doc.pages[0]; if (!P) return;
-    const T = totals(M), sm = M.summary, items = (P.items || []), H = P.h + totalGap(0);
-    // 1. a printed spot for the total: "Total marks … / 85", or a TOTAL label with room beside it
-    const tot = items.find(it => /^total(\s*marks?)?$/i.test(it.s.trim()) || /^total\s*marks?\s*\/?\s*\d*$/i.test(it.s.trim()));
-    if (tot) {
-      const slash = items.find(it => /^\/\s*\d+$/.test(it.s.trim()) && Math.abs(it.y - tot.y) < 30 && it.x > tot.x) || items.find(it => /\/\s*\d+$/.test(it.s.trim()) && Math.abs(it.y - tot.y) < 30 && it.x >= tot.x);
-      const s = fmt(T.score), size = 18, w = textW(String(s), size);
-      const x = slash ? slash.x - w - 4 : tot.x1 + 18, y = disp(0, slash ? slash.y : tot.y) + 2;
-      add(0, "spot", { k: "text", x, y, s: String(s), size, font: "hand", fill: RED });
-      if (sm.grade) { const gw = textW(sm.grade, 15); add(0, "spot", { k: "ell", cx: x + w / 2, cy: y + 19, rx: Math.max(9, gw / 2 + 5), ry: 9, stroke: RED, w: 1.1 }); add(0, "spot", { k: "text", x: x + w / 2 - gw / 2, y: y + 24, s: sm.grade, size: 15, font: "hand", fill: RED }); }
+  // marks for a question number, or a range of them ("8–32": usually the multiple-choice questions)
+  function marksFor(M, a, b = a) {
+    const per = (M.summary.perQuestion || []), qn = q => { const m = String(q).match(/(\d+)/); return m ? +m[1] : NaN; };
+    let aw = 0, mx = 0, any = false;
+    for (let n = a; n <= b; n++) {
+      const own = per.find(x => qn(topQ(x.q)) === n && /^\D*\d+$/.test(topQ(x.q)));
+      if (own && own.max != null) { aw += +own.awarded || 0; mx += +own.max || 0; any = true; continue; }
+      const parts = M.parts.filter(p => p.verdict !== "excluded" && qn(topQ(p.q)) === n && /^\D*\d+$/.test(topQ(p.q)));
+      if (parts.length) { aw += sum(parts, "awarded"); mx += sum(parts, "max"); any = true; }
     }
-    // 2. the summary box, as full as fits in clear space: everything, then without the comment's tail, the
-    // per-question table, the comment, down to just the score and grade
-    const qs = (sm.perQuestion || []).length ? sm.perQuestion : questionTotals(M);
-    const big = `${fmt(T.score)}/${fmt(T.outOf)}`;
+    return any ? { aw, mx } : null;
+  }
+  // the per-question list for the summary: runs of one-mark questions (multiple choice) shown as one range
+  function questionList(M) {
+    const qs = (M.summary.perQuestion || []).length ? M.summary.perQuestion.slice() : questionTotals(M).map(q => ({ q: q.q, awarded: q.awarded, max: q.max }));
+    const out = [];
+    for (let i = 0; i < qs.length; i++) {
+      let j = i; while (j + 1 < qs.length && +qs[j + 1].max === 1 && +qs[i].max === 1 && /^\d+$/.test(qs[j + 1].q) && +qs[j + 1].q === +qs[j].q + 1) j++;
+      if (j - i >= 2) { out.push({ q: `${qs[i].q}–${qs[j].q}`, awarded: sum(qs.slice(i, j + 1), "awarded"), max: j - i + 1 }); i = j; }
+      else out.push(qs[i]);
+    }
+    return out;
+  }
+  // ---- the front page: your marks in the paper's own "For Examiner's Use" table (or its Total box), and a summary
+  // in clear space on the cover (else the first page with room, else the end of the marked PDF) ----
+  function summary(add, occ) {
+    const M = doc.marking, P = doc.pages[0]; if (!P) return;
+    const T = totals(M), sm = M.summary, items = (P.items || []);
+    const write = (x, y, s, size) => add(0, "spot", { k: "text", x, y, s, size, font: "hand", fill: RED });
+    const gradeUnder = (cx, y) => { if (!sm.grade) return; const gw = textW(sm.grade, 15); add(0, "spot", { k: "ell", cx, cy: y + 19, rx: Math.max(9, gw / 2 + 5), ry: 9, stroke: RED, w: 1.1 }); add(0, "spot", { k: "text", x: cx - gw / 2, y: y + 24, s: sm.grade, size: 15, font: "hand", fill: RED }); };
+    // 1. "For Examiner's Use": a Question column (1, 2, … 8–32, TOTAL) and a Mark column. Each row gets its marks
+    const head = items.find(it => /examiner'?s?['’]?s?\s+use/i.test(it.s));
+    const qh = head && items.find(it => /^question$/i.test(it.s.trim()) && it.y > head.y && it.y < head.y + 40);
+    const mh = qh && items.find(it => /^marks?$/i.test(it.s.trim()) && Math.abs(it.y - qh.y) < 6 && it.x > qh.x1);
+    let tableDone = false;
+    if (qh && mh) {
+      const qc = (qh.x + qh.x1) / 2, mc = (mh.x + mh.x1) / 2;
+      const rows = items.filter(it => it.y > qh.y + 4 && it.y < qh.y + 520 && Math.abs((it.x + it.x1) / 2 - qc) < 40 && /^(\d{1,2}(\s*[–—-]\s*\d{1,2})?|total)$/i.test(it.s.trim()));
+      for (const it of rows) {
+        const t = it.s.trim(); let m = null;
+        if (/^total$/i.test(t)) m = { aw: T.score, mx: T.outOf };
+        else { const r = t.match(/^(\d+)(?:\s*[–—-]\s*(\d+))?$/); m = marksFor(M, +r[1], r[2] ? +r[2] : +r[1]); }
+        if (!m) continue;
+        const s = `${fmt(m.aw)}/${fmt(m.mx)}`, size = /^total$/i.test(t) ? 15 : 13, w = textW(s, size), y = disp(0, it.y) + 1;
+        write(mc - w / 2, y, s, size);
+        if (/^total$/i.test(t)) gradeUnder(mc, y);
+        tableDone = true;
+      }
+    }
+    // 2. else a printed spot for the total: "Total marks … / 85", or a TOTAL label with room beside it
+    if (!tableDone) {
+      const tot = items.find(it => /^total(\s*marks?)?$/i.test(it.s.trim()) || /^total\s*marks?\s*\/?\s*\d*$/i.test(it.s.trim()));
+      if (tot) {
+        const slash = items.find(it => /^\/\s*\d+$/.test(it.s.trim()) && Math.abs(it.y - tot.y) < 30 && it.x > tot.x) || items.find(it => /\/\s*\d+$/.test(it.s.trim()) && Math.abs(it.y - tot.y) < 30 && it.x >= tot.x);
+        const s = String(fmt(T.score)), size = 18, w = textW(s, size);
+        const x = slash ? slash.x - w - 4 : tot.x1 + 18, y = disp(0, slash ? slash.y : tot.y) + 2;
+        write(x, y, slash ? s : `${s}/${fmt(T.outOf)}`, size);
+        gradeUnder(x + w / 2, y);
+      }
+    }
+    // 3. the summary box, as full as fits in clear space (everything; then a shorter comment; then without the
+    // per-question list, which the examiner table already shows; then just the score and grade)
+    const qs = tableDone ? [] : questionList(M), big = `${fmt(T.score)}/${fmt(T.outOf)}`;
     const build = (W, lvl) => {
-      const gn = sm.gradeNote ? wrap(sm.gradeNote, 8, Math.min(170, W - 200), "sans").slice(0, 2) : [];
-      if (gn.length === 2 && wrap(sm.gradeNote, 8, Math.min(170, W - 200), "sans").length > 2) gn[1] = gn[1].replace(/\s*\S*$/, "") + " …";
+      const gnAll = sm.gradeNote ? wrap(sm.gradeNote, 8, Math.min(170, W - 200), "sans") : [], gn = gnAll.slice(0, 2);
+      if (gnAll.length > 2) gn[1] = gn[1].replace(/\s*\S*$/, "") + " …";
       let cmt = lvl < 3 && sm.comment ? wrap(sm.comment, 11, W - 20) : [];
-      if (lvl === 1 && cmt.length > 3) cmt = cmt.slice(0, 3).map((l, k) => k === 2 ? l.replace(/\s*\S*$/, "") + " …" : l);
-      const cols = Math.max(1, Math.floor((W - 20) / 70)), rows = lvl < 2 ? Math.ceil(qs.length / cols) : 0;
+      if (lvl >= 1 && cmt.length > 3) cmt = cmt.slice(0, 3).map((l, k) => k === 2 ? l.replace(/\s*\S*$/, "") + " …" : l);
+      const cols = Math.max(1, Math.floor((W - 20) / 76)), rows = lvl < 2 ? Math.ceil(qs.length / cols) : 0;
       const h = 12 + 30 + (cmt.length ? 6 + cmt.length * 13.5 : 0) + (rows ? 8 + rows * 14 : 0) + 8;
       return { W, h, gn, cmt, cols, rows };
     };
-    let B = null, at = null;
-    outer: for (const lvl of [0, 1, 2, 3]) for (const W of [Math.min(P.w - 100, 470), 380, 300]) {
-      const b = build(W, lvl), s = near(o, P.w / 2 - W / 2, H * 0.6, W, b.h, { dyUp: H, dyMax: H });
-      if (s) { B = b; at = s; break outer; }
+    let B = null, at = null, pg = 0;
+    // the cover first; then any page with a big enough clear space (blank pages, the end); a smaller box before
+    // moving on, but never on top of anything
+    outer: for (const p of [0, ...doc.pages.map((_, i) => i).slice(1).reverse()]) {
+      const H = doc.pages[p].h + totalGap(p), Wp = doc.pages[p].w;
+      for (const lvl of p === 0 ? [0, 1, 2, 3] : [0, 1]) for (const W of [Math.min(Wp - 100, 470), 380, 300]) {
+        const b = build(W, lvl), s = near(occ[p], Wp / 2 - W / 2, H * 0.6, W, b.h, { dyUp: H, dyMax: H });
+        if (s) { B = b; at = s; pg = p; break outer; }
+      }
     }
-    if (!B) { B = build(260, 3); at = { x: P.w - B.W - 12, y: 12 }; }       // nothing clear anywhere: small, top right
-    const { W, h } = B, X = at.x, top = at.y, g = "sum";
-    add(0, g, { k: "rect", x: X, y: top, w: W, h, fill: PAPER, op: 0.93, stroke: RED, sw: 1.3 });
+    lay_summary = B ? { p: pg } : { p: -1 };
+    if (!B) return;                                      // no room anywhere: it's in the Marks panel and the marked PDF's last page
+    const { W, h } = B, X = at.x, top = at.y, g = "sum", A = (sh) => add(pg, g, sh);
+    A({ k: "rect", x: X, y: top, w: W, h, fill: PAPER, op: 0.93, stroke: RED, sw: 1.3 });
     let y = top + 12;
-    add(0, g, { k: "text", x: X + 10, y, s: `Marked by ${M.marker}${M.markedAt ? " · " + new Date(M.markedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : ""}`, size: 8, font: "sans", fill: "#8f1713" });
+    A({ k: "text", x: X + 10, y, s: `Marked by ${M.marker}${M.markedAt ? " · " + new Date(M.markedAt).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : ""}`, size: 8, font: "sans", fill: "#8f1713" });
     y += 27;
     const bw = textW(big, 24);
-    add(0, g, { k: "text", x: X + 10, y, s: big, size: 24, font: "hand", fill: RED });
-    if (T.pct != null) add(0, g, { k: "text", x: X + 16 + bw, y, s: T.pct + "%", size: 14, font: "hand", fill: RED });
+    A({ k: "text", x: X + 10, y, s: big, size: 24, font: "hand", fill: RED });
+    if (T.pct != null) A({ k: "text", x: X + 16 + bw, y, s: T.pct + "%", size: 14, font: "hand", fill: RED });
     if (sm.grade) {
       const gw = textW(sm.grade, 20), gx = X + W - 26 - Math.max(...B.gn.map(l => textW(l, 8, "sans")), 0) - gw;
-      add(0, g, { k: "ell", cx: gx + gw / 2, cy: y - 7, rx: Math.max(14, gw / 2 + 7), ry: 12, stroke: RED, w: 1.4 });
-      add(0, g, { k: "text", x: gx, y: y - 0.5, s: sm.grade, size: 20, font: "hand", fill: RED });
-      B.gn.forEach((l, k) => add(0, g, { k: "text", x: gx + gw / 2 + Math.max(14, gw / 2 + 7) + 5, y: y - 10 + k * 9.5, s: l, size: 8, font: "sans", fill: "#8f1713" }));
+      A({ k: "ell", cx: gx + gw / 2, cy: y - 7, rx: Math.max(14, gw / 2 + 7), ry: 12, stroke: RED, w: 1.4 });
+      A({ k: "text", x: gx, y: y - 0.5, s: sm.grade, size: 20, font: "hand", fill: RED });
+      B.gn.forEach((l, k) => A({ k: "text", x: gx + gw / 2 + Math.max(14, gw / 2 + 7) + 5, y: y - 10 + k * 9.5, s: l, size: 8, font: "sans", fill: "#8f1713" }));
     }
-    if (B.cmt.length) { y += 6; for (const l of B.cmt) { y += 13.5; add(0, g, { k: "text", x: X + 10, y: y - 3, s: l, size: 11, font: "hand", fill: RED }); } }
-    if (B.rows) { y += 8; qs.forEach((q, i) => { const c = i % B.cols, r = Math.floor(i / B.cols); add(0, g, { k: "text", x: X + 10 + c * 70, y: y + r * 14 + 9, s: `${qName(q.q)}  ${fmt(q.awarded)}/${fmt(q.max)}`, size: 10, font: "hand", fill: RED }); }); }
+    if (B.cmt.length) { y += 6; for (const l of B.cmt) { y += 13.5; A({ k: "text", x: X + 10, y: y - 3, s: l, size: 11, font: "hand", fill: RED }); } }
+    if (B.rows) { y += 8; qs.forEach((q, i) => { const c = i % B.cols, r = Math.floor(i / B.cols); A({ k: "text", x: X + 10 + c * 76, y: y + r * 14 + 9, s: `${qName(q.q)}  ${fmt(q.awarded)}/${fmt(q.max)}`, size: 10, font: "hand", fill: RED }); }); }
   }
 
   // ---------------- on screen ----------------
@@ -816,9 +869,21 @@ const Marking = window.Marking = (() => {
     }
   }
   async function toPdfEnd(out) {
-    if (!doc.marking || !isOn() || !lay || !lay.endNotes || !lay.endNotes.length) return;
-    const { rgb } = PDFLib, font = out._tpHand, W = 595.28, H = 841.89;
+    const noSum = lay && lay.summaryPage === -1;
+    if (!doc.marking || !isOn() || !lay || (!(lay.endNotes || []).length && !noSum)) return;
+    const { rgb } = PDFLib, font = out._tpHand, W = 595.28, H = 841.89, M = doc.marking, T = totals(M), red = rgb(0.8, 0.12, 0.1);
+    const ok = t => [...String(t)].map(ch => font.getCharacterSet().includes(ch.codePointAt(0)) ? ch : "?").join("");
     let page = out.addPage([W, H]), y = H - 60;
+    if (noSum) {
+      page.drawText("Marking summary", { x: 50, y, size: 16, font: out._tpSansB, color: rgb(0.56, 0.09, 0.07) }); y -= 34;
+      page.drawText(ok(`${fmt(T.score)}/${fmt(T.outOf)}${T.pct != null ? "  " + T.pct + "%" : ""}${M.summary.grade ? "   Grade " + M.summary.grade : ""}`), { x: 50, y, size: 24, font, color: red }); y -= 20;
+      for (const l of [...(M.summary.gradeNote ? wrap(M.summary.gradeNote, 10, W - 100, "sans") : []), "", ...(M.summary.comment ? wrap(M.summary.comment, 12, W - 100) : [])]) { if (l) page.drawText(ok(l), { x: 50, y, size: 12, font, color: red }); y -= 15; }
+      y -= 10;
+      const qs = questionList(M);
+      qs.forEach((q, i) => { page.drawText(ok(`${qName(q.q)}  ${fmt(q.awarded)}/${fmt(q.max)}`), { x: 50 + (i % 5) * 100, y: y - Math.floor(i / 5) * 16, size: 11, font, color: red }); });
+      y -= Math.ceil(qs.length / 5) * 16 + 24;
+    }
+    if (!(lay.endNotes || []).length) return;
     page.drawText("Marker's notes", { x: 50, y, size: 16, font: out._tpSansB, color: rgb(0.56, 0.09, 0.07) }); y -= 26;
     for (const n of lay.endNotes) {
       for (const l of wrap(`${n.n}. ${n.q ? qName(n.q) + " (page " + (n.p + 1) + "): " : ""}${n.text}`, 12, W - 100)) {
