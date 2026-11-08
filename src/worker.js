@@ -4,6 +4,8 @@
 // carry over untouched when a new version is deployed.
 import { pmtSearch, pmtSubjects, isPmtPdf, PMT_UA } from "./pmt.js";
 import { smeOn, smeIndex, smePdf } from "./sme.js";
+import * as AI from "./ai.js";
+import { handleMcp } from "./mcp.js";
 import { DurableObject } from "cloudflare:workers";
 
 const MB = 1024 * 1024;
@@ -122,7 +124,7 @@ async function cloudflareUsage(env) {
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
-    if (!url.pathname.startsWith("/api/")) return env.ASSETS.fetch(req);
+    if (!url.pathname.startsWith("/api/") && !url.pathname.startsWith("/mcp/")) return env.ASSETS.fetch(req);
     try { return await api(req, env, url, ctx); }
     catch (e) { console.error(e); return bad("Server error", 500); }
   },
@@ -188,6 +190,26 @@ async function api(req, env, url, ctx) {
   const ip = req.headers.get("cf-connecting-ip") || "local";
 
   if (path === "/api/config") return json({ hub: hubOn(env) });
+
+  // ---- the Claude connector: /mcp/<secret>, one per account (TypePDF → Export for AI → Connect Claude) ----
+  let tk = path.match(/^\/mcp\/([a-f0-9]{40})$/);
+  if (tk) {
+    const t = await (await call(auth, "/tok/get", { t: tk[1], kind: "mcp" })).json();
+    if (!t.user) return new Response(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "This TypePDF connector link has been reset. Get the new one in TypePDF (Export for AI → Connect Claude)." } }), { status: 401, headers: { "content-type": "application/json" } });
+    return handleMcp(req, storeIO(env, t.user, url.origin));
+  }
+  // ---- a drop link: an AI that can make web requests POSTs the marking here and it appears on the paper ----
+  tk = path.match(/^\/api\/drop\/([a-f0-9]{40})$/);
+  if (tk) {
+    const t = await (await call(auth, "/tok/get", { t: tk[1], kind: "drop" })).json();
+    if (!t.user) return bad("This drop link has expired. Export for AI again for a new one.", 404);
+    if (req.method !== "POST") return new Response("POST the TypePDF marking JSON here (Content-Type: application/json). It appears on the paper in TypePDF straight away.", { headers: { "content-type": "text/plain" } });
+    if (!(await (await call(auth, "/hit", { key: "drop:" + tk[1], max: 30, window: 3600e3 })).json()).ok) return bad("Too many drops. Try again later.", 429);
+    let mk; try { const raw = (await req.text()).trim().replace(/^```(?:json)?\s*|\s*```$/g, ""); mk = JSON.parse(raw); } catch { return bad("That isn't valid JSON."); }
+    const c = AI.checkMarking(mk, { paperId: t.doc }); if (typeof c === "string") return bad("That isn't a TypePDF marking: " + c);
+    c.marker ||= "AI"; await storeIO(env, t.user, url.origin).submit(t.doc, c, c.marker + " (drop link)");
+    return json({ ok: true, message: "Marking received: it's on the paper in TypePDF now." });
+  }
   if (path === "/api/auth/signup" || path === "/api/auth/login" || path === "/api/auth/password") return bad("TypePDF accounts now come from GirolletServer. Use Sign in.", 410);
   // sign in: off to the hub, which sends the person back here with a signed pass
   if (path === "/api/auth/hub-login") {
@@ -343,6 +365,60 @@ async function api(req, env, url, ctx) {
     return new Response(buf, { headers: { "content-type": "application/pdf", "x-file-name": encodeURIComponent(name) } });
   }
 
+  // ---- AI: one "Mark with AI" and a chat, served by whichever free provider is up (see src/ai.js) ----
+  if (path.startsWith("/api/ai/")) {
+    const settings = (await (await call(auth, "/ai/get", {})).json()).ai || {};
+    if (path === "/api/ai/providers" && req.method === "GET") return json(who.admin ? { providers: AI.status(env, settings), ready: AI.available(env, settings).length > 0 } : { ready: AI.available(env, settings).length > 0 });
+    if (path === "/api/ai/providers" && req.method === "POST") {
+      if (!who.admin) return bad("Only the admin can change the AI settings.", 403);
+      const b = await req.json().catch(() => ({}));
+      if (!AI.PROVIDERS.some(p => p.id === b.id)) return bad("Unknown provider");
+      const cur = { ...(settings[b.id] || {}) };
+      if (typeof b.key === "string") { const k = b.key.trim().replace(/^Bearer\s+/i, ""); if (k) cur.key = k.slice(0, 400); else delete cur.key; }
+      if (typeof b.models === "string") cur.models = b.models.slice(0, 400);
+      if (typeof b.url === "string") cur.url = b.url.trim().slice(0, 300);
+      if (typeof b.on === "boolean") cur.on = b.on;
+      settings[b.id] = cur;
+      await call(auth, "/ai/set", { ai: settings });
+      return json({ providers: AI.status(env, settings) });
+    }
+    if (path === "/api/ai/test" && req.method === "POST") {
+      if (!who.admin) return bad("Only the admin can test providers.", 403);
+      const b = await req.json().catch(() => ({}));
+      const only = { ...Object.fromEntries(AI.PROVIDERS.map(p => [p.id, { ...(settings[p.id] || {}), on: false }])), [b.id]: { ...(settings[b.id] || {}), on: true } };
+      try { const r = await AI.run(env, only, "Reply with exactly: OK", [{ role: "user", text: "Say OK." }], { maxTokens: 20, deadline: Date.now() + 40000 }); return json({ ok: true, model: r.model, reply: String(r.result).slice(0, 60), tried: r.tried }); }
+      catch (e) { return json({ ok: false, error: e.message, tried: e.tried || [] }); }
+    }
+    if (path === "/api/ai/mark" && req.method === "POST") {
+      if (!(await (await call(auth, "/hit", { key: "aimark:" + user, max: who.admin ? 60 : 12, window: 864e5 })).json()).ok) return bad("You've used today's AI marking. Try again tomorrow, or use Export for AI.", 429);
+      const b = await req.json().catch(() => ({}));
+      try { const r = await AI.mark(env, settings, b); return json({ marking: r.result, provider: r.provider, model: r.model, tried: r.tried }); }
+      catch (e) { return json({ error: e.message, tried: e.tried || [] }, e.status === 400 ? 400 : 503); }
+    }
+    if (path === "/api/ai/chat" && req.method === "POST") {
+      if (!(await (await call(auth, "/hit", { key: "aichat:" + user, max: who.admin ? 300 : 80, window: 864e5 })).json()).ok) return bad("That's today's chat limit. Try again tomorrow.", 429);
+      const b = await req.json().catch(() => ({}));
+      try { const r = await AI.chat(env, settings, b); return json({ text: r.result, provider: r.provider, model: r.model }); }
+      catch (e) { return json({ error: e.message, tried: e.tried || [] }, e.status === 400 ? 400 : 503); }
+    }
+    return bad("Not found", 404);
+  }
+  // ---- the Claude connector link (one per account; reset makes the old one stop working) ----
+  if (path === "/api/connector") {
+    const b = req.method === "POST" ? await req.json().catch(() => ({})) : {};
+    const t = await (await call(auth, "/tok/new", { kind: "mcp", user, fresh: !!b.reset })).json();
+    return json({ url: url.origin + "/mcp/" + t.t });
+  }
+  // ---- a marking pack: what the connector hands Claude (instructions, answers, handwriting and page pictures) ----
+  if (path === "/api/pack" && req.method === "POST") {
+    const doc = url.searchParams.get("doc") || "";
+    if (!HEX.test(doc)) return bad("Bad paper id");
+    const r = await userStub(env, user).fetch(new Request("https://do/pack/put?doc=" + doc, { method: "POST", headers: { "x-user": user }, body: req.body, duplex: "half" }));
+    if (!r.ok) return r;
+    const t = await (await call(auth, "/tok/new", { kind: "drop", user, doc })).json();
+    return json({ ok: true, drop: url.origin + "/api/drop/" + t.t });
+  }
+
   // ---- sharing my own papers ----
   let sm = path.match(/^\/api\/share\/(codes|reset|people|remove)$/);
   if (sm) {
@@ -365,6 +441,23 @@ async function api(req, env, url, ctx) {
   headers.set("x-name", encodeURIComponent(who.name || who.email || ""));
   for (const h of ["x-share-role", "x-share-pid", "x-share-name"]) headers.delete(h);   // only set by the shared-paper route
   return store.fetch(new Request("https://do" + path.slice(4) + url.search, { method: req.method, headers, body: req.body, duplex: "half" }));
+}
+
+// what the connector and drop links can do with one account's papers
+function storeIO(env, user, origin) {
+  const st = userStub(env, user), get = async (p) => (await st.fetch(new Request("https://do" + p, { headers: { "x-user": user } }))).json();
+  return {
+    listPapers: async limit => (await get("/mcp/papers?limit=" + limit)).papers || [],
+    latestPack: async () => (await get("/pack/latest")).doc || null,
+    pack: async (doc, what) => HEX.test(doc) ? (await get(`/pack/get?doc=${doc}&what=${encodeURIComponent(what)}`)).v ?? null : null,
+    marking: async doc => HEX.test(doc) ? (await get(`/kv/get?doc=${doc}&k=marking`)).v ?? null : null,
+    submit: async (doc, mk, via) => {
+      if (!HEX.test(doc)) throw new Error("Bad paper id");
+      const id = rand(8);
+      const r = await st.fetch(new Request("https://do/inbox", { method: "POST", headers: { "x-user": user }, body: JSON.stringify({ doc, id, v: JSON.stringify({ id, at: Date.now(), via, json: JSON.stringify(mk) }) }) }));
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Couldn't save the marking");
+    },
+  };
 }
 
 // ===================== accounts =====================
@@ -399,6 +492,8 @@ export class AuthStore extends DurableObject {
     addColumn(this.sql, "users", "hubadmin", "INTEGER DEFAULT 0");
     addColumn(this.sql, "users", "checked", "INTEGER DEFAULT 0");
     addColumn(this.sql, "users", "delete_at", "INTEGER");
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS tokens (t TEXT PRIMARY KEY, kind TEXT, user TEXT, doc TEXT, created INTEGER, exp INTEGER);
+      CREATE INDEX IF NOT EXISTS tokens_user ON tokens (user, kind, doc);`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS nonces (n TEXT PRIMARY KEY, exp INTEGER);
       CREATE TABLE IF NOT EXISTS shares (code TEXT PRIMARY KEY, owner TEXT, doc TEXT, role TEXT, created INTEGER);
       CREATE INDEX IF NOT EXISTS shares_doc ON shares (owner, doc);`);
@@ -456,6 +551,26 @@ export class AuthStore extends DurableObject {
     const path = new URL(req.url).pathname;
     const b = await req.json().catch(() => ({}));
     const now = Date.now();
+    // secret links: the Claude connector (one per account, no expiry) and drop links (one per paper, 30 days)
+    if (path === "/tok/new") {
+      const kind = b.kind === "drop" ? "drop" : "mcp", doc = kind === "drop" ? String(b.doc || "") : "";
+      this.sql.exec("DELETE FROM tokens WHERE exp IS NOT NULL AND exp < ?", now);
+      if (b.fresh) this.sql.exec("DELETE FROM tokens WHERE user = ? AND kind = ? AND doc = ?", String(b.user), kind, doc);
+      let r = this.sql.exec("SELECT t FROM tokens WHERE user = ? AND kind = ? AND doc = ?", String(b.user), kind, doc).toArray()[0];
+      if (r && kind === "drop") this.sql.exec("UPDATE tokens SET exp = ? WHERE t = ?", now + 30 * 864e5, r.t);
+      if (!r) { r = { t: rand(20) }; this.sql.exec("INSERT INTO tokens VALUES (?, ?, ?, ?, ?, ?)", r.t, kind, String(b.user), doc, now, kind === "drop" ? now + 30 * 864e5 : null); }
+      return json({ t: r.t });
+    }
+    if (path === "/tok/get") {
+      const r = this.sql.exec("SELECT user, doc, exp FROM tokens WHERE t = ? AND kind = ?", String(b.t || ""), String(b.kind || "")).toArray()[0];
+      if (!r || (r.exp && r.exp < now)) return json({});
+      const u = this.sql.exec("SELECT delete_at FROM users WHERE u = ?", r.user).toArray()[0];
+      if (!u || u.delete_at) return json({});
+      return json({ user: r.user, doc: r.doc });
+    }
+    if (path === "/ai/get") { const r = this.sql.exec("SELECT v FROM settings WHERE k = 'ai'").toArray()[0]; return json({ ai: r ? JSON.parse(r.v) : {} }); }
+    if (path === "/ai/set") { this.sql.exec("INSERT OR REPLACE INTO settings VALUES ('ai', ?)", JSON.stringify(b.ai || {})); return json({ ok: true }); }
+    if (path === "/hit") return json({ ok: this.hit(String(b.key || ""), +b.max || 10, +b.window || 864e5) });
     if (path === "/sso") {
       const email = String(b.email || "").toLowerCase();
       if (!email || !b.n || !b.exp || b.exp < now) return bad("That sign-in has expired.");
@@ -542,8 +657,19 @@ export class UserStore extends DurableObject {
     // papers stored before copies existed: their id is their PDF's hash
     this.sql.exec("UPDATE docs SET pdf = id WHERE pdf IS NULL AND haspdf = 1");
     // people who joined one of this account's papers with a share code; papers shared with this account
+    this.sql.exec("CREATE TABLE IF NOT EXISTS packs (doc TEXT, k TEXT, v TEXT, at INTEGER, PRIMARY KEY (doc, k))");
     this.sql.exec(`CREATE TABLE IF NOT EXISTS people (doc TEXT, pid TEXT, name TEXT, email TEXT, role TEXT, first INTEGER, last INTEGER, removed INTEGER DEFAULT 0, PRIMARY KEY (doc, pid));
       CREATE TABLE IF NOT EXISTS shared (owner TEXT, doc TEXT, role TEXT, name TEXT, joined INTEGER, opened INTEGER, PRIMARY KEY (owner, doc));`);
+  }
+  // write one synced value from the server (a marking arriving): stored like a device's change and sent to every
+  // device that has the paper open
+  putKey(doc, k, v) {
+    let seq = (this.docRow(doc)?.seq || 0) + 1;
+    this.sql.exec("INSERT INTO kv (doc, k, v, seq) VALUES (?, ?, ?, ?) ON CONFLICT (doc, k) DO UPDATE SET v = excluded.v, seq = excluded.seq", doc, k, v, seq);
+    this.sql.exec("UPDATE docs SET seq = ?, updated = ? WHERE id = ?", seq, Date.now(), doc);
+    const msg = JSON.stringify({ t: "snap", items: [[k, v, seq]], live: true });
+    for (const ws of this.ctx.getWebSockets("doc:" + doc)) { try { ws.send(msg); } catch {} }
+    return seq;
   }
   // live sockets for a paper, with who they are
   socks(doc) { return this.ctx.getWebSockets("doc:" + doc).map(ws => ({ ws, a: ws.deserializeAttachment() || {} })); }
@@ -648,6 +774,43 @@ export class UserStore extends DurableObject {
       if (path === "/shared/remove") { this.sql.exec("DELETE FROM shared WHERE owner = ? AND doc = ?", b.owner, b.doc); return json({ ok: true }); }
       if (path === "/shared/list") return json({ shared: this.sql.exec("SELECT owner, doc, role, name, joined, opened FROM shared ORDER BY opened DESC").toArray() });
       return bad("Not found", 404);
+    }
+    // ---- marking packs (for the Claude connector), the marking inbox, small reads ----
+    if (path === "/pack/put" && req.method === "POST") {
+      const doc = url.searchParams.get("doc") || "";
+      if (!this.docRow(doc)) return bad("That paper isn't in your account yet. Wait for it to sync, then try again.", 404);
+      let b; try { b = await req.json(); } catch { return bad("Bad pack"); }
+      const pages = Array.isArray(b.pages) ? b.pages.slice(0, 80) : [], work = Array.isArray(b.work) ? b.work.slice(0, 60) : [];
+      const total = pages.reduce((t, x) => t + String(x).length, 0) + work.reduce((t, x) => t + String(x.data || "").length, 0) + String(b.answers || "").length;
+      if (total > 30 * MB) return bad("That paper is too big to prepare for marking.", 413);
+      this.sql.exec("DELETE FROM packs WHERE doc = ?", doc);
+      const put = (k, v) => this.sql.exec("INSERT OR REPLACE INTO packs VALUES (?, ?, ?, ?)", doc, k, String(v).slice(0, 1_900_000), Date.now());
+      put("meta", JSON.stringify({ paperId: doc, exported: b.exported || null, name: String(b.name || "").slice(0, 200), pages: pages.length, work: work.length, pageNotes: String(b.pageNotes || "").slice(0, 2000) }));
+      put("prompt", String(b.prompt || "").slice(0, 60000)); put("answers", String(b.answers || ""));
+      pages.forEach((d, i) => put("page:" + i, d)); work.forEach((w, i) => put("work:" + i, JSON.stringify({ label: String(w.label || "").slice(0, 120), data: String(w.data || "") })));
+      // only the latest few papers keep their pack (they're big)
+      const keep = this.sql.exec("SELECT doc FROM packs WHERE k = 'meta' ORDER BY at DESC LIMIT 6").toArray().map(r => r.doc);
+      this.sql.exec(`DELETE FROM packs WHERE doc NOT IN (${keep.map(() => "?").join(",")})`, ...keep);
+      return json({ ok: true });
+    }
+    if (path === "/pack/get") { const r = this.sql.exec("SELECT v FROM packs WHERE doc = ? AND k = ?", url.searchParams.get("doc"), url.searchParams.get("what")).toArray()[0]; return json({ v: r ? r.v : null }); }
+    if (path === "/pack/latest") { const r = this.sql.exec("SELECT doc FROM packs WHERE k = 'meta' ORDER BY at DESC LIMIT 1").toArray()[0]; return json({ doc: r ? r.doc : null }); }
+    if (path === "/kv/get") { const r = this.sql.exec("SELECT v FROM kv WHERE doc = ? AND k = ?", url.searchParams.get("doc"), url.searchParams.get("k")).toArray()[0]; return json({ v: r ? r.v : null }); }
+    if (path === "/inbox" && req.method === "POST") {
+      const b = await req.json().catch(() => ({}));
+      if (!this.docRow(b.doc)) return bad("No such paper", 404);
+      if (String(b.v || "").length > 1_400_000) return bad("That marking is too big.", 413);
+      if (!/^[a-f0-9]{16}$/.test(String(b.id || ""))) return bad("Bad id");
+      // each arriving marking has its own key, so a device clearing one it has put on the paper never removes another
+      this.putKey(b.doc, "inbox:" + b.id, String(b.v));
+      return json({ ok: true });
+    }
+    if (path === "/mcp/papers") {
+      const n = Math.max(1, Math.min(50, +url.searchParams.get("limit") || 15));
+      const ready = new Set(this.sql.exec("SELECT doc FROM packs WHERE k = 'meta'").toArray().map(r => r.doc));
+      const marked = new Set(this.sql.exec("SELECT doc FROM kv WHERE k = 'marking' AND v IS NOT NULL AND v != 'null'").toArray().map(r => r.doc));
+      const rows = this.sql.exec("SELECT id, name, updated, filled, total FROM docs WHERE deleted IS NULL ORDER BY updated DESC LIMIT ?", n).toArray();
+      return json({ papers: rows.map(r => ({ ...r, ready: ready.has(r.id), marked: marked.has(r.id) })) });
     }
     if (path === "/docs" && req.method === "GET") {
       // empty the bin of anything older than 30 days

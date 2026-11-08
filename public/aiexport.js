@@ -376,7 +376,7 @@ function rememberExport(o) {
 }
 // ---- one bundle for the marker: the prompt, the answers, the workings and the whole answered paper ----
 // the instructions the marker reads first: what it's been sent, how to mark, and exactly what to send back
-function markingPrompt(o, files) {
+function markingPrompt(o, files, how = {}) {
   const name = doc.name, out = `${name} - marking.json`;
   const time = o.time_used ? `\nTime used: ${o.time_used}.` : "";
   return `# Please mark this paper: ${name}
@@ -399,7 +399,7 @@ Use the whole answered paper to see each question, its diagrams and the marks av
 - Estimate a grade from the most recent grade boundaries you know for this paper and say which (\`gradeNote\`).
 
 ## What to send back
-Create a file called **${out}** (or, if you can't make files, reply with only the JSON in one code block). It must be valid JSON in this shape:
+${how.inline ? "Reply with only the marking JSON object (no other text)." : how.connector ? "Send the marking with the TypePDF connector's **submit_marking** tool (paperId \"" + o.paperId + "\"). It appears on my paper straight away." : (how.drop ? "**If you can make web requests**, POST the JSON to **" + how.drop + "** with the header Content-Type: application/json, and it appears on my paper straight away (no copying needed). Otherwise create" : "Create") + " a file called **" + out + "** (or, if you can't make files, reply with only the JSON in one code block)."} It must be valid JSON in this shape:
 
 \`\`\`json
 {
@@ -473,7 +473,10 @@ async function markingBundle() {
     ...(work ? [{ name: `${base} - workings.pdf`, what: "only what I wrote or drew by hand, one cropped image per part, captioned with its question", data: work, type: "application/pdf" }] : []),
     { name: `${base} - answered.pdf`, what: "the whole paper with my answers on it, exactly as I see it", data: full, type: "application/pdf" },
   ];
-  const prompt = markingPrompt(o, list);
+  // a drop link (and a pack for the Claude connector) when signed in: the marking can come straight back
+  let drop = null;
+  if (window.Sync && Sync.user && window.AIMark) { try { drop = (await AIMark.uploadPack()).drop; } catch (e) { console.warn("pack", e); busy(false); } }
+  const prompt = markingPrompt(o, list, { drop });
   files.push({ name: `${base} - READ ME FIRST (marking instructions).md`, data: prompt, type: "text/markdown" }, ...list);
   return { files, prompt, o };
 }

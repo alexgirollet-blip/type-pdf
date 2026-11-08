@@ -111,6 +111,7 @@ window.Sync = (() => {
     if (k === "aiexport") return doc.aiExport ? JSON.stringify(doc.aiExport) : null;
     if (k === "marking") return doc.marking ? JSON.stringify(doc.marking) : null;
     if (k === "markingPrev") return doc.markingPrev ? JSON.stringify(doc.markingPrev) : null;
+    if (k.startsWith("inbox:")) { const v = doc.inbox && doc.inbox[k.slice(6)]; return v ? JSON.stringify(v) : null; }
     if (k.startsWith("flag:")) return doc.flags && doc.flags[k.slice(5)] ? JSON.stringify(doc.flags[k.slice(5)]) : null;
     let m;
     if ((m = k.match(/^page:(\d+)$/))) { const P = doc.pages[+m[1]]; if (!P) return null; return JSON.stringify({ w: P.w, h: P.h, rot: P.rot, hasText: P.hasText, ocr: P.ocr, items: P.items, qs: P.qs, qv: P.qv, cv: P.cv, dv: P.dv, regions: P.regions.map(cleanRegion) }); }
@@ -120,6 +121,7 @@ window.Sync = (() => {
   }
   function allKeys() {
     const ks = ["meta"]; if (doc.timer) ks.push("timer"); if (doc.font) ks.push("font"); if (doc.style) ks.push("style");
+    for (const id of Object.keys(doc.inbox || {})) ks.push("inbox:" + id);
     if (doc.aiExport) ks.push("aiexport"); if (doc.marking) ks.push("marking"); if (doc.markingPrev) ks.push("markingPrev");
     for (const k of Object.keys(doc.flags || {})) ks.push("flag:" + k);
     doc.pages.forEach((P, p) => { if (P && P.regions) ks.push("page:" + p); });
@@ -141,6 +143,7 @@ window.Sync = (() => {
     if (k === "aiexport") { doc.aiExport = v || null; return; }
     if (k === "marking") { doc.marking = v || null; if (S.live && window.Marking) Marking.refresh(); return; }
     if (k === "markingPrev") { doc.markingPrev = v || null; return; }
+    if (k.startsWith("inbox:")) { doc.inbox ||= {}; if (v) doc.inbox[k.slice(6)] = v; else delete doc.inbox[k.slice(6)]; if (S.live && v && window.AIMark) setTimeout(() => AIMark.fromInbox(), 50); return; }
     if (k.startsWith("flag:")) { const id = k.slice(5); doc.flags ||= {}; if (v) doc.flags[id] = v; else delete doc.flags[id]; if (S.live) { const p = +id.split(":")[0]; layoutPage(p); renderFlags(); } return; }
     if ((m = k.match(/^page:(\d+)$/))) {
       const p = +m[1]; if (!v) return;

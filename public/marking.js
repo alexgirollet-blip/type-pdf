@@ -758,7 +758,7 @@ const Marking = window.Marking = (() => {
   function panelHead() {
     const h = $("#marksHead"); if (!h || !doc) return;
     const M = doc.marking;
-    if (!M) { h.innerHTML = `<p class="note">No marking yet. Export for AI, have it marked, then import the marking file it sends back.</p><div class="row wrap"><button type="button" class="primary" data-a="import">Import marking…</button></div>`; return; }
+    if (!M) { h.innerHTML = `<p class="note">No marking yet.</p><div class="row wrap"><button type="button" class="primary" data-ai="mark">✨ Mark with AI</button><button type="button" data-ai="claude">Mark with Claude</button><button type="button" data-a="import">Import a marking…</button></div>`; return; }
     const T = totals(M), sm = M.summary;
     h.innerHTML = `<div class="mkscore"><b>${fmt(T.score)}/${fmt(T.outOf)}</b>${T.pct != null ? `<span>${T.pct}%</span>` : ""}${sm.grade ? `<em>Grade ${esc(sm.grade)}</em>` : ""}</div>
       ${sm.gradeNote ? `<small class="mknote">${esc(sm.gradeNote)}</small>` : ""}${sm.comment ? `<p class="mkcmt">${esc(sm.comment)}</p>` : ""}
@@ -766,6 +766,8 @@ const Marking = window.Marking = (() => {
       <button type="button" data-a="edit" class="${editMode ? "on" : ""}">${editMode ? "Done editing" : "Edit marks"}</button>
       <button type="button" data-a="pdf">Export marked PDF</button></div>
       ${editMode ? `<div class="row wrap mkadd"><span>Tap the page to add:</span>${["tick", "cross", "circle", "note"].map(t => `<button type="button" data-a="add" data-t="${t}" class="${addType === t ? "on" : ""}">${{ tick: "✓ Tick", cross: "✗ Cross", circle: "◯ Circle", note: "✎ Note" }[t]}</button>`).join("")}</div><p class="note">Drag a mark to move it, tap one to delete it.</p>` : ""}
+      <div class="row wrap"><button type="button" data-ai="mark">Mark again with AI</button><button type="button" data-ai="claude">Mark with Claude</button></div>
+      <div class="mkchat"><h3>Ask about your marks</h3><div class="mkchatlog" id="mkChatLog"></div><form id="mkChatForm"><input id="mkChatIn" placeholder="e.g. why did I lose a mark on 7(b)?" autocomplete="off" aria-label="Ask about your marks"><button type="submit">Ask</button></form><button type="button" class="linkish" data-ai="askclaude">Talk it through with Claude instead ↗</button></div>
       <div class="row wrap"><button type="button" data-a="import">Import another…</button>${doc.markingPrev ? `<button type="button" data-a="undo">Undo last import</button>` : ""}<button type="button" data-a="remove" class="danger">Remove marking</button></div>
       ${(() => { const W = (lay && lay.warn) || M.warn || []; return W.length ? `<details class="mkwarn"><summary>${W.length} note${W.length > 1 ? "s" : ""} from the import</summary><ul>${W.map(w => `<li>${esc(w)}</li>`).join("")}</ul></details>` : ""; })()}`;
   }
@@ -773,6 +775,7 @@ const Marking = window.Marking = (() => {
     const pop = $("#marksPop"); if (!pop || pop.hidden || !doc) return;
     if (doc.marking && !lay) try { layout(); } catch (e) {}
     panelHead();
+    if (window.AIMark) AIMark.renderChat();
     const list = $("#marksList"); list.innerHTML = "";
     const M = doc.marking; if (!M) return;
     if (lay && lay.footnotes && lay.footnotes.length) {
