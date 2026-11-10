@@ -93,7 +93,7 @@ const mcp = async (url, method, params, id = 1) => (await (await fetch(url, { me
     const init = await mcp(conn, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } });
     ok(init.result && init.result.serverInfo.name === "TypePDF" && init.result.capabilities.tools, "MCP initialize", init);
     const tl = await mcp(conn, "tools/list", {});
-    ok(["list_papers", "get_paper_for_marking", "get_page", "get_marking", "submit_marking"].every(n => tl.result.tools.some(x => x.name === n)), "the five tools are listed", tl.result && tl.result.tools.map(x => x.name));
+    ok(["list_papers", "get_paper_for_marking", "get_page", "get_marking", "submit_marking", "add_paper", "get_paper_pdf"].every(n => tl.result.tools.some(x => x.name === n)), "the seven tools are listed", tl.result && tl.result.tools.map(x => x.name));
     const lp = await mcp(conn, "tools/call", { name: "list_papers", arguments: {} });
     ok(/test-paper.*ready to mark/.test(lp.result.content[0].text), "list_papers shows the paper, ready to mark", lp.result.content[0].text);
     const gp = await mcp(conn, "tools/call", { name: "get_paper_for_marking", arguments: {} });
