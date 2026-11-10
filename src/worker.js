@@ -139,6 +139,14 @@ const hubBase = env => {
   if (v && !/^https?:\/\//i.test(v)) v = "https://" + v;
   try { return new URL(v).origin; } catch { return v.replace(/\/+$/, ""); }
 };
+// Girolibrary (library.girolletserver.com): LIBRARY_URL, or library.<the hub's domain>. "off" turns the link-up off.
+const libraryBase = env => {
+  let v = String(env.LIBRARY_URL || "").trim().replace(/^["']|["']$/g, "");
+  if (/^off$/i.test(v)) return "";
+  if (v && !/^https?:\/\//i.test(v)) v = "https://" + v;
+  if (v) { try { return new URL(v).origin; } catch { return ""; } }
+  try { const h = new URL(hubBase(env)); return h.hostname.includes(".") && !/^(localhost|127\.)/.test(h.hostname) ? `${h.protocol}//library.${h.hostname}` : ""; } catch { return ""; }
+};
 const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const unb64u = s => { s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); };
 async function hmac(secret, text) {
@@ -189,7 +197,7 @@ async function api(req, env, url, ctx) {
   const path = url.pathname;
   const ip = req.headers.get("cf-connecting-ip") || "local";
 
-  if (path === "/api/config") return json({ hub: hubOn(env) });
+  if (path === "/api/config") return json({ hub: hubOn(env), library: libraryBase(env) });
 
   // ---- the Claude connector: /mcp/<secret>, one per account (TypePDF → Export for AI → Connect Claude) ----
   let tk = path.match(/^\/mcp\/([a-f0-9]{40})$/);
@@ -452,6 +460,37 @@ function storeIO(env, user, origin) {
     latestPack: async () => (await get("/pack/latest")).doc || null,
     pack: async (doc, what) => HEX.test(doc) ? (await get(`/pack/get?doc=${doc}&what=${encodeURIComponent(what)}`)).v ?? null : null,
     marking: async doc => HEX.test(doc) ? (await get(`/kv/get?doc=${doc}&k=marking`)).v ?? null : null,
+    // a PDF added by Claude (or another app): stored like an upload from the browser, so it appears in the
+    // person's papers on every device. Returns { id, name, existed }.
+    addPaper: async (buf, name) => {
+      if (!buf || !buf.byteLength) throw new Error("The PDF is empty.");
+      if (buf.byteLength > MAX_PDF) throw new Error("That PDF is too large (40 MB max).");
+      if (!new TextDecoder().decode(new Uint8Array(buf.slice(0, 1024))).includes("%PDF")) throw new Error("That isn't a PDF file.");
+      const id = hex(await crypto.subtle.digest("SHA-256", buf)).slice(0, 24);
+      name = String(name || "Untitled").replace(/\.pdf$/i, "").replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 200) || "Untitled";
+      const who = await (await call(authStub(env), "/userinfo", { user })).json();
+      const headers = { "x-user": user, "x-quota": who.admin ? "-1" : String(who.quota ?? DEFAULT_QUOTA), "x-global-free": String(Math.max(0, GLOBAL_LIMIT - GLOBAL_SAFETY - (who.globalUsed || 0))) };
+      const papers = (await get("/docs")).docs || [];
+      const had = papers.find(d => d.id === id);
+      if (had && !had.deleted) return { id, name: had.name, existed: true };
+      if (had && had.deleted) {          // in the bin: bring it back
+        await st.fetch(new Request(`https://do/docs/${id}`, { method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ deleted: false, name }) }));
+        return { id, name, existed: true, restored: true };
+      }
+      const r = await st.fetch(new Request(`https://do/pdf/${id}?doc=${id}&name=${encodeURIComponent(name)}`, { method: "PUT", headers, body: buf }));
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Couldn't store the PDF.");
+      return { id, name, existed: false };
+    },
+    // the paper's original PDF (without answers)
+    paperPdf: async doc => {
+      if (!HEX.test(doc)) throw new Error("Bad paper id");
+      const r = await st.fetch(new Request(`https://do/docs/${doc}/pdf`, { headers: { "x-user": user } }));
+      if (!r.ok) throw new Error("That paper has no PDF stored in the account.");
+      const papers = (await get("/docs")).docs || [];
+      const d = papers.find(x => x.id === doc);
+      return { bytes: await r.arrayBuffer(), name: d ? d.name : "paper" };
+    },
+    origin,
     submit: async (doc, mk, via) => {
       if (!HEX.test(doc)) throw new Error("Bad paper id");
       const id = rand(8);
@@ -582,6 +621,7 @@ export class AuthStore extends DurableObject {
       this.sql.exec("DELETE FROM sessions WHERE exp < ?", now);
       return json({ ...this.info(u), token: this.newSession(u) });
     }
+    if (path === "/userinfo") return json(this.info(String(b.user || "")));   // quota etc. for the connector's uploads
     if (path === "/check") {
       const row = this.sql.exec("SELECT s.u, s.exp, u.email, u.delete_at FROM sessions s LEFT JOIN users u ON u.u = s.u WHERE s.t = ?", String(b.token || "")).toArray()[0];
       if (!row || row.exp < now) return json({ user: null });

@@ -47,6 +47,12 @@
       <p class="pfnote" id="tpNote"></p>
       <div class="pftags" id="tpBody"></div>
     </details>
+    <details class="finder" id="girolib" hidden>
+      <summary>From your Girolibrary <small id="glCount"></small></summary>
+      <div class="pfrow"><input id="glQ" type="search" placeholder="Search the library's PDFs" aria-label="Search Girolibrary PDFs" autocomplete="off"><button type="button" id="glRefresh" title="Look again">↻</button><a id="glOpen" class="pfsrc" href="#" target="_blank" rel="noopener" style="align-self:center">Open the library ↗</a></div>
+      <p class="pfnote" id="glNote"></p>
+      <ul class="pflist" id="glBody"></ul>
+    </details>
     <details class="finder" id="finder">
       <summary>Past paper finder <small>A-level papers from Physics &amp; Maths Tutor</small></summary>
       <form class="pfrow" id="pfForm">
@@ -344,5 +350,6 @@
 <script src="home.js"></script>
 <script src="finder.js"></script>
 <script src="topics.js"></script>
+<script src="girolib.js"></script>
 </body>
 </html>
