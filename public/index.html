@@ -351,5 +351,7 @@
 <script src="finder.js"></script>
 <script src="topics.js"></script>
 <script src="girolib.js"></script>
+<script src="hubdock.js"></script>
+<script>fetch("/api/config").then(r => r.json()).then(c => { if (c.hubUrl) HubDock.init(c.hubUrl); }).catch(() => {});</script>
 </body>
 </html>
