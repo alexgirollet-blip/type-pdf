@@ -197,7 +197,7 @@ async function api(req, env, url, ctx) {
   const path = url.pathname;
   const ip = req.headers.get("cf-connecting-ip") || "local";
 
-  if (path === "/api/config") return json({ hub: hubOn(env), library: libraryBase(env) });
+  if (path === "/api/config") return json({ hub: hubOn(env), hubUrl: env.HUB_URL ? hubBase(env) : "", library: libraryBase(env) });
 
   // ---- the Claude connector: /mcp/<secret>, one per account (TypePDF → Export for AI → Connect Claude) ----
   let tk = path.match(/^\/mcp\/([a-f0-9]{40})$/);
