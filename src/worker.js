@@ -930,7 +930,15 @@ export class UserStore extends DurableObject {
         if (!r.ok) return bad("Couldn't store the PDF. Try again.", 500);
         this.sql.exec("INSERT OR REPLACE INTO pdfs VALUES (?, ?, ?)", hash, buf.byteLength, Date.now());
       }
-      if (docId && HEX.test(docId)) { this.ensureDoc(docId, decodeURIComponent(url.searchParams.get("name") || "Untitled").slice(0, 200), hash); this.sql.exec("UPDATE docs SET pdf = COALESCE(pdf, ?) WHERE id = ?", hash, docId); this.syncPdfFlag(docId); }
+      if (docId && HEX.test(docId)) {
+        this.ensureDoc(docId, decodeURIComponent(url.searchParams.get("name") || "Untitled").slice(0, 200), hash);
+        const old = (this.docRow(docId) || {}).pdf;
+        if (url.searchParams.get("replace") === "1" && old && old !== hash) {          // a page of the paper was replaced
+          this.sql.exec("UPDATE docs SET pdf = ? WHERE id = ?", hash, docId);
+          if (!this.sql.exec("SELECT 1 FROM docs WHERE pdf = ?", old).toArray().length) this.dropPdf(old);
+        } else this.sql.exec("UPDATE docs SET pdf = COALESCE(pdf, ?) WHERE id = ?", hash, docId);
+        this.syncPdfFlag(docId);
+      }
       this.sql.exec("UPDATE docs SET haspdf = 1, size = ? WHERE pdf = ?", buf.byteLength, hash);
       await this.report(user);
       return json({ ok: true });

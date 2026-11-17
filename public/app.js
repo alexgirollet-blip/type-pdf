@@ -178,6 +178,7 @@ async function openDoc(d, fresh = false) {
   pdf = await pdfjsLib.getDocument({ data: new Uint8Array(doc.bytes.slice(0)), isEvalSupported: false }).promise;
   // signed in: pull the account's copy first (answers and page layouts) before detecting anything
   if (window.Sync && (Sync.user || doc.shared)) { busy(true, doc.shared ? "Joining…" : "Syncing…"); await Sync.attach(doc).catch(e => console.warn(e)); }
+  if (doc.pdfNew && doc.pdfNew !== doc.pdf) await fetchReplacedPdf();
   await smxInfo().catch(e => console.warn("smx", e));
   const need = [];
   for (let i = 0; i < pdf.numPages; i++) if (!doc.pages[i] || !doc.pages[i].regions || (doc.pages[i].dv !== DV && untouched(i))) need.push(i);
@@ -423,8 +424,10 @@ function sharedUI() {
   $$(".tool,.sw,.sz,#undo,#redo,#fontSel,#ansColSel,#ansLookSel,#timerBtn,#flagsBtn").forEach(b => { b.disabled = !!view; });
   if (view) { setTool("text"); toast("View only: you can see changes live but not edit.", 3500); }
 }
+let lastPeople = null;
 window.onPeople = (people, mySid) => {
   if (!doc) return;
+  lastPeople = [people, mySid];
   // the bar: everyone else who's here
   const bar = $("#peopleBar"); bar.innerHTML = "";
   const others = people.filter(p => p.sid !== mySid);
@@ -569,7 +572,7 @@ function restoreView(v) {
   requestAnimationFrame(() => {
     const host = $("#pages"); const pv = views[clamp(v.p | 0, 0, views.length - 1)];
     if (pv) host.scrollTop = pv.el.offsetTop + (v.off || 0) * zoom;
-    if (v.foc) { const r = findRegion(v.foc.rid); if (r && r._el) { r._el.focus({ preventScroll: true }); try { r._el.setSelectionRange(v.foc.s, v.foc.e); } catch (e) {} } }
+    if (v.foc) { const r = findRegion(v.foc.rid); if (r && elFor(r)) { r._el.focus({ preventScroll: true }); try { r._el.setSelectionRange(v.foc.s, v.foc.e); } catch (e) {} } }
   });
 }
 let viewT; $("#pages").addEventListener("scroll", () => { clearTimeout(viewT); viewT = setTimeout(saveView, 400); });
@@ -696,8 +699,14 @@ function buildViews() {
   const host = $("#pages"); host.innerHTML = ""; views = [];
   io && io.disconnect();
   io = new IntersectionObserver(ents => {
-    for (const e of ents) { const v = views[+e.target.dataset.p]; if (!v) continue; v.visible = e.isIntersecting; if (v.visible) renderPage(+e.target.dataset.p); else dropBitmap(+e.target.dataset.p); }
-  }, { root: host, rootMargin: "1600px 0px" });
+    for (const e of ents) {
+      const p = +e.target.dataset.p, v = views[p]; if (!v) continue;
+      const was = v.visible; v.visible = e.isIntersecting;
+      if (v.visible) renderPage(p); else dropBitmap(p);
+      if (was !== v.visible && v.live) { sizeInk(p); drawInk(p); }     // a drawing layer only while it's on screen
+    }
+    updateLive();
+  }, { root: host, rootMargin: "1200px 0px" });
   doc.pages.forEach((P, p) => {
     const el = document.createElement("div"); el.className = "page"; el.dataset.p = p;
     const pg = document.createElement("canvas"); pg.className = "pg";
@@ -705,15 +714,68 @@ function buildViews() {
     const pno = document.createElement("div"); pno.className = "pno"; pno.textContent = `${p + 1}`;
     el.append(pg, ink, pno);
     host.appendChild(el);
-    const v = { el, pg, ink, bm: null, bmZoom: 0, visible: false, gapEls: [] };
+    const v = { el, pg, ink, bm: null, bmZoom: 0, visible: false, live: false, gapEls: [] };
     views.push(v);
-    P.regions.forEach(r => makeField(p, r));
     bindInk(p, v); toolClass(v);
     io.observe(el);
   });
   host.onscroll = pageIndicator;
   pageIndicator();
   Geo.restore();
+}
+
+// ---- long papers: only the pages near the one you're on have their answer boxes and drawing layer. The rest are
+// light placeholders of the right size, filled in as you scroll near them and emptied again as you move away, so a
+// 200-page paper with thousands of answer spaces opens as quickly, and uses as little memory, as a short one ----
+const LIVE_AROUND = 5;
+function mountPage(p) {
+  const v = views[p]; if (!v || v.live) return;
+  v.live = true;
+  const P = doc.pages[p];
+  for (const r of P.regions) if (!r._el) makeField(p, r);
+  layoutPage(p, true);
+  for (const r of P.regions) if (r.kind === "choice" ? true : doc.text[r.id]) queueFit(p, r);
+  if (lastPeople) window.onPeople(...lastPeople);       // boxes someone else is typing in show as theirs
+}
+function unmountPage(p) {
+  const v = views[p]; if (!v || !v.live) return false;
+  const a = document.activeElement;
+  if (a && a !== document.body && v.el.contains(a)) return false;          // you're typing here
+  if ((handFor && handFor.p === p) || (flagFor && flagFor.p === p) || (inkSel && inkSel.p === p) || (selOp && selOp.p === p) || (sel && sel.p === p) || v.drawing) return false;
+  for (const r of doc.pages[p].regions) {
+    if (r._el) { r._el.remove(); r._el = null; }
+    if (r._shape) { r._shape.remove(); r._shape = null; }
+    if (r._lockTag) { r._lockTag.remove(); r._lockTag = null; }
+  }
+  v.ink.width = v.ink.height = 0;
+  v.live = false;
+  return true;
+}
+let liveRaf = 0;
+function updateLive(now) {
+  if (!doc || !views.length) return;
+  if (!now) { if (!liveRaf) liveRaf = requestAnimationFrame(() => { liveRaf = 0; updateLive(true); }); return; }
+  const cur = currentPage(), want = new Set();
+  for (let q = cur - LIVE_AROUND; q <= cur + LIVE_AROUND; q++) if (views[q]) want.add(q);
+  views.forEach((v, q) => { if (v.visible) want.add(q); });
+  for (const q of [...want].sort((a, b) => Math.abs(a - cur) - Math.abs(b - cur))) mountPage(q);
+  views.forEach((v, q) => { if (v.live && !want.has(q) && Math.abs(q - cur) > LIVE_AROUND + 2) unmountPage(q); });
+}
+// the answer box for a space, loading its page first if it's far from where you are
+function elFor(r) { if (!r._el) { const p = pageOfRegion(r); if (p >= 0) mountPage(p); } return r._el; }
+// measuring a space on a page that isn't loaded: a stand-in, laid out exactly like the real box would be
+let measPage = null;
+function withField(p, r, fn) {
+  if (r._el) return fn(r._el);
+  const P = doc.pages[p]; if (!P) return undefined;
+  if (!measPage) { measPage = document.createElement("div"); measPage.className = "page tp-measure"; measPage.setAttribute("aria-hidden", "true"); }
+  if (measPage.parentElement !== $("#pages")) $("#pages").appendChild(measPage);
+  Object.assign(measPage.style, { position: "absolute", left: "-100000px", top: "0", visibility: "hidden", pointerEvents: "none", width: P.w * zoom + "px", height: (P.h + totalGap(p)) * zoom + "px" });
+  const ta = document.createElement("textarea"); ta.className = "ans " + r.kind + (r.code ? " code" : ""); ta.tabIndex = -1;
+  ta.value = doc.text[r.id] || ""; measPage.appendChild(ta);
+  r._el = ta;
+  try { applyField(p, r, fitOf(r)); if (r.kind === "cell") centreCell(r); return fn(ta); }
+  finally { ta.remove(); r._el = null; if (r._shape) { r._shape.remove(); r._shape = null; } }
 }
 
 function makeField(p, r) {
@@ -891,6 +953,7 @@ function reflow(chain, full, caret) {
 function chainInput(r) {
   const chain = chainOf(r);
   if (chain.length < 2) return false;
+  chain.forEach(q => elFor(q));
   const ta = r._el; let full = "", caret = 0;
   for (const q of chain) { if (q === r) caret = full.length + ta.selectionStart; full += q === r ? ta.value : (doc.text[q.id] || ""); }
   const at = reflow(chain, full, caret);
@@ -910,12 +973,12 @@ function scrollToShow(p, r) {
 // moving between the spaces of a chain with the keyboard, as if they were one box
 function chainKeys(e, r, ta) {
   if (!(r.prev || r.next) || e.metaKey || e.ctrlKey || e.altKey) return false;
-  const s = ta.selectionStart, en = ta.selectionEnd, go = (q, pos) => { const el = q._el; if (!el) return; e.preventDefault(); el.focus({ preventScroll: true }); scrollToShow(pageOfRegion(q), q); const P = pos < 0 ? el.value.length : pos; el.setSelectionRange(P, P); };
+  const s = ta.selectionStart, en = ta.selectionEnd, go = (q, pos) => { const el = elFor(q); if (!el) return; e.preventDefault(); el.focus({ preventScroll: true }); scrollToShow(pageOfRegion(q), q); const P = pos < 0 ? el.value.length : pos; el.setSelectionRange(P, P); };
   const prev = r.prev && findRegion(r.prev), next = r.next && findRegion(r.next);
   if (prev && s === 0 && en === 0) {
     if (e.key === "Backspace") {
       // delete the last character of the space before, and carry on from there
-      e.preventDefault(); const pe = prev._el; if (!pe) return true;
+      e.preventDefault(); const pe = elFor(prev); if (!pe) return true;
       pe.focus({ preventScroll: true }); scrollToShow(pageOfRegion(prev), prev);
       const L = pe.value.length; if (L) { pe.value = pe.value.slice(0, L - 1); pe.setSelectionRange(L - 1, L - 1); }
       pe.dispatchEvent(new Event("input")); return true;
@@ -923,7 +986,7 @@ function chainKeys(e, r, ta) {
     if (e.key === "ArrowLeft" || (e.key === "ArrowUp" && !ta.value.slice(0, s).includes("\n") && caretLine(ta) === 0)) { go(prev, -1); return true; }
   }
   if (next && s === ta.value.length && en === s) {
-    if (e.key === "Delete") { e.preventDefault(); const ne = next._el; if (ne && ne.value) { ne.value = ne.value.slice(1); ne.dispatchEvent(new Event("input")); ta.focus({ preventScroll: true }); ta.setSelectionRange(s, s); } return true; }
+    if (e.key === "Delete") { e.preventDefault(); const ne = elFor(next); if (ne && ne.value) { ne.value = ne.value.slice(1); ne.dispatchEvent(new Event("input")); ta.focus({ preventScroll: true }); ta.setSelectionRange(s, s); } return true; }
     if (e.key === "ArrowRight" || e.key === "ArrowDown") { go(next, 0); return true; }
   }
   return false;
@@ -980,7 +1043,7 @@ function tabMove(dir, from) {
     toast(`${qName(n.label)}: answer this one on the paper (Pen or Smart).`, 1800);
   } else {
     tabAt = null;
-    const el = n.r._el; el.focus({ preventScroll: true });
+    const el = elFor(n.r); el.focus({ preventScroll: true });
     if (n.r.kind === "choice") flashRegions([[n.p, n.r]]);
     else { const L = el.value.length; el.setSelectionRange(L, L); }
     target = readableScroll(n.p, n.r);
@@ -1125,11 +1188,11 @@ function gapRules(p, r, g) {
 }
 
 // ---------------- layout & rendering ----------------
-function layoutPage(p) {
+function layoutPage(p, mounting) {
   const P = doc.pages[p], v = views[p]; if (!v) return;
   const z = zoom, H = P.h + totalGap(p);
   v.el.style.width = P.w * z + "px"; v.el.style.height = H * z + "px";
-  for (const r of P.regions) { applyField(p, r, fitOf(r)); if (r.kind === "cell") centreCell(r); }
+  if (v.live) for (const r of P.regions) { applyField(p, r, fitOf(r)); if (r.kind === "cell" && r._el) centreCell(r); }
   v.gapEls.forEach(e => e.remove()); v.gapEls = [];
   for (const g of gapList(p)) {
     const d = document.createElement("div"); d.className = "gapfill";
@@ -1138,14 +1201,15 @@ function layoutPage(p) {
     v.el.insertBefore(d, v.pg.nextSibling); v.gapEls.push(d);
   }
   $$(".flagmark", v.el).forEach(e => e.remove());
-  for (const r of P.regions) if (doc.flags && doc.flags[r.id]) {
+  if (v.live) for (const r of P.regions) if (doc.flags && doc.flags[r.id]) {
     const R = regionRect(p, r), m = document.createElement("button");
     m.className = "flagmark"; m.title = "Flagged — click to go to this answer"; m.setAttribute("aria-label", "Flagged answer space");
     m.style.left = Math.min(P.w - 14, r.x1 + 3) * z + "px"; m.style.top = (R.y0 + 1) * z + "px";
-    m.onclick = () => { const ta = r._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); };
+    m.onclick = () => { const ta = elFor(r); ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); };
     v.el.appendChild(m);
   }
   drawMarkers(p);
+  if (window.Find) Find.draw(p);
   sizeInk(p); drawInk(p);
   if (v.visible) composite(p);
   if (boxMode) drawBoxes(p);
@@ -1153,11 +1217,12 @@ function layoutPage(p) {
   if (handFor && handFor.p === p) placeHandles();
   if (inkSel && inkSel.p === p && !inkSel.moving) placeInkSel();
   Geo.place();
-  if (window.Marking) Marking.pageChanged();
+  if (window.Marking && !mounting) Marking.pageChanged();
 }
 async function renderPage(p) {
   const v = views[p]; if (!v) return; const want = Math.min(zoom * dpr, 4);
   if (v.bm && v.bmZoom === want) { composite(p); return; }
+  if (!v.bm && v.shown === want && v.pg.width && v.shownGap === totalGap(p)) return;    // already on screen as it is
   if (v.rendering) { v.again = true; return; }
   v.rendering = true;
   try {
@@ -1171,10 +1236,13 @@ async function renderPage(p) {
   v.rendering = false;
   if (v.again) { v.again = false; return renderPage(p); }
   if (v.visible) composite(p);
+  if (v.bm && Math.abs(p - currentPage()) > 1) { v.bm.width = v.bm.height = 0; v.bm = null; v.shown = want; }   // memory: what's on screen is enough
 }
-function dropBitmap(p) { const v = views[p]; if (v.bm) { v.bm.width = v.bm.height = 0; v.bm = null; v.bmZoom = 0; } v.pg.width = v.pg.height = 0; }
+function dropBitmap(p) { const v = views[p]; if (v.bm) { v.bm.width = v.bm.height = 0; v.bm = null; v.bmZoom = 0; } v.pg.width = v.pg.height = 0; v.shown = 0; }
 function composite(p) {
-  const v = views[p], P = doc.pages[p]; if (!v || !v.bm) return;
+  const v = views[p], P = doc.pages[p]; if (!v) return;
+  if (!v.bm) { if (v.visible && !(v.shown === Math.min(zoom * dpr, 4) && v.shownGap === totalGap(p) && v.pg.width)) renderPage(p); return; }
+  v.shownGap = totalGap(p);
   const k = v.bmZoom, H = P.h + totalGap(p);
   const cw = Math.round(P.w * zoom * dpr), ch = Math.round(H * zoom * dpr);
   if (v.pg.width !== cw || v.pg.height !== ch) { v.pg.width = cw; v.pg.height = ch; }
@@ -1202,7 +1270,8 @@ function setZoom(z) {
   views.forEach((v, p) => { if (v.visible) renderPage(p); });
   host.scrollTop = frac * host.scrollHeight;
   $("#zfit").textContent = Math.round(zoom / fitZoom * 100) + "%";
-  doc.pages.forEach((P, p) => P.regions.forEach(r => { if (doc.text[r.id]) queueFit(p, r); }));
+  doc.pages.forEach((P, p) => { if (views[p] && views[p].live) P.regions.forEach(r => { if (doc.text[r.id]) queueFit(p, r); }); });
+  updateLive();
 }
 $("#zin").onclick = () => setZoom(zoom * 1.2);
 $("#zout").onclick = () => setZoom(zoom / 1.2);
@@ -1214,12 +1283,13 @@ function pageIndicator() {
   let cur = 0; views.forEach((v, p) => { if (v.el.offsetTop <= mid) cur = p; });
   if (bookView && views.length > 1) { const a = cur - (cur % 2); $("#pageInd").textContent = a + 1 < views.length ? `Pages ${a + 1}–${a + 2} of ${views.length}` : `Page ${a + 1} of ${views.length}`; }
   else $("#pageInd").textContent = `Page ${cur + 1} of ${views.length}`;
+  updateLive();
 }
 
 // ---------------- ink ----------------
 function sizeInk(p) {
   const v = views[p], P = doc.pages[p]; const H = P.h + totalGap(p);
-  const cw = Math.round(P.w * zoom * dpr), ch = Math.round(H * zoom * dpr);
+  const on = v.live && v.visible, cw = on ? Math.round(P.w * zoom * dpr) : 0, ch = on ? Math.round(H * zoom * dpr) : 0;
   if (v.ink.width !== cw || v.ink.height !== ch) { v.ink.width = cw; v.ink.height = ch; }
   v.ink.style.width = P.w * zoom + "px"; v.ink.style.height = H * zoom + "px";
 }
@@ -1338,7 +1408,7 @@ function pressureRuns(s, pts) {
   return runs;
 }
 function drawInk(p) {
-  const v = views[p]; if (!v) return; const ctx = v.ink.getContext("2d"); const k = zoom * dpr;
+  const v = views[p]; if (!v || !v.live || !v.ink.width) return; const ctx = v.ink.getContext("2d"); const k = zoom * dpr;
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, v.ink.width, v.ink.height);
   const S = doc.strokes[p] || [];
   const hid = inkSel && inkSel.moving && inkSel.p === p ? inkSel.ids : null;   // being dragged: drawn on the overlay instead
@@ -1532,7 +1602,7 @@ async function addSpaceAt(p, q) {
     }
     c.width = c.height = 0;
     r.id = `${p}:a${rid8()}`; r.label ||= ""; r.code ||= false; r.cut ??= r.y1 + 3;
-    P.regions.push(r); makeField(p, r); layoutPage(p); queueFit(p, r); updateCount(); pageChanged(p);
+    P.regions.push(r); mountPage(p); if (!r._el) makeField(p, r); layoutPage(p); queueFit(p, r); updateCount(); pageChanged(p);
     const ta = r._el; ta.focus({ preventScroll: true });
     toast(how, 2600);
   } catch (e) { console.warn(e); }
@@ -1973,8 +2043,113 @@ $("#redetect").onclick = async () => {
   rebuildPageFields(p); pageChanged(p); busy(false); toast(`Page ${p + 1}: ${fresh.regions.length} answer spaces.`);
 };
 function pageChanged(p) { emit("page:" + p); scheduleSave(); }
-function rebuildPageFields(p) { $$(".ans,.ansshape,.choice", views[p].el).forEach(e => e.remove()); doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
-function rebuildField(p, r) { if (r._el) r._el.remove(); if (r._shape) { r._shape.remove(); r._shape = null; } makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
+
+// ---------------- replacing a page with a page from another PDF ----------------
+async function loadPdfBytes(bytes, hash) {
+  doc.bytes = bytes; doc.pdf = hash;
+  if (pdf) pdf.destroy();
+  pdf = await pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)), isEvalSupported: false }).promise;
+}
+// another device replaced a page: fetch the paper's new PDF
+async function fetchReplacedPdf() {
+  const h = doc.pdfNew; delete doc.pdfNew;
+  busy(true, "Getting the updated paper…");
+  try { await loadPdfBytes(await Sync.getPdf(h), h); return true; }
+  catch (e) { toast("A page of this paper was replaced on another device, but the new PDF couldn't be fetched: " + e.message, 6000); return false; }
+}
+window.pdfReplaced = async () => {
+  if (!doc || !doc.pdfNew) return;
+  const d = doc;
+  if (!(await fetchReplacedPdf()) || doc !== d) { busy(false); return; }
+  doc.pages.forEach((P, p) => dropBitmap(p));
+  doc.pages.forEach((P, p) => { if (views[p] && views[p].visible) renderPage(p); });
+  busy(false); scheduleSave();
+  toast("A page of this paper was replaced on another device.", 3500);
+};
+let replSrc = null;   // { bytes, pdf (pdf.js), name }
+async function replPreview() {
+  const c = $("#replPrev"), k = clamp((+$("#replK").value | 0) - 1, 0, replSrc.pdf.numPages - 1);
+  const page = await replSrc.pdf.getPage(k + 1), vp1 = page.getViewport({ scale: 1 }), vp = page.getViewport({ scale: Math.min(2, 520 / vp1.width) });
+  c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height); c.hidden = false;
+  const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: g, viewport: vp }).promise;
+}
+function replReset() { if (replSrc) { replSrc.pdf.destroy(); replSrc = null; } $("#replPrev").width = 0; $("#replPrev").hidden = true; $("#replPick").hidden = true; $("#replName").textContent = ""; $("#replGo").disabled = true; $("#replErr").textContent = ""; $("#replFile").value = ""; }
+$("#replaceBtn").onclick = () => {
+  if (!canEdit() || doc.shared) { toast("Only the paper's owner can replace its pages."); return; }
+  replReset(); $("#replAt").max = doc.pages.length; $("#replAt").value = currentPage() + 1; $("#replDlg").showModal();
+};
+$("#replCancel").onclick = () => { replReset(); $("#replDlg").close(); };
+$("#replFile").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  $("#replErr").textContent = "";
+  try {
+    const bytes = await f.arrayBuffer();
+    if (replSrc) replSrc.pdf.destroy();
+    replSrc = { bytes, name: f.name, pdf: await pdfjsLib.getDocument({ data: new Uint8Array(bytes.slice(0)), isEvalSupported: false }).promise };
+    $("#replName").textContent = f.name; $("#replK").max = replSrc.pdf.numPages; $("#replK").value = Math.min(+$("#replAt").value || 1, replSrc.pdf.numPages);
+    $("#replOf").textContent = `of ${replSrc.pdf.numPages}`; $("#replPick").hidden = replSrc.pdf.numPages < 2;
+    await replPreview(); $("#replGo").disabled = false;
+  } catch (err) { replReset(); $("#replErr").textContent = "That file couldn't be read as a PDF."; }
+};
+$("#replK").onchange = () => { if (replSrc) replPreview(); };
+$("#replGo").onclick = async () => {
+  const p = (+$("#replAt").value | 0) - 1, k = (+$("#replK").value | 0) - 1;
+  if (!replSrc) return;
+  if (p < 0 || p >= doc.pages.length) { $("#replErr").textContent = `Pick a page from 1 to ${doc.pages.length}.`; return; }
+  if (k < 0 || k >= replSrc.pdf.numPages) { $("#replErr").textContent = `That PDF has pages 1 to ${replSrc.pdf.numPages}.`; return; }
+  const keep = $("#replKeep").checked, src = replSrc.bytes;
+  $("#replDlg").close();
+  try { await replacePage(p, src, k, keep); } catch (err) { console.error(err); busy(false); toast("Couldn't replace the page: " + (err.message || err), 6000); }
+  replReset();
+};
+// page p of this paper becomes page k of the PDF in srcBytes. keep: typed answers move to the new page's answer
+// spaces where they overlap (as Re-detect does) and drawings stay; otherwise everything on the page is cleared
+async function replacePage(p, srcBytes, k, keep) {
+  busy(true, `Replacing page ${p + 1}…`);
+  const { PDFDocument } = PDFLib;
+  const out = await PDFDocument.load(doc.bytes.slice(0), { ignoreEncryption: true, updateMetadata: false });
+  const src = await PDFDocument.load(srcBytes.slice(0), { ignoreEncryption: true, updateMetadata: false });
+  const [np] = await out.copyPages(src, [k]);
+  out.removePage(p); out.insertPage(p, np);
+  const u8 = await out.save({ useObjectStreams: false }), bytes = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  const hash = await sha(bytes);
+  await loadPdfBytes(bytes, hash);
+  doc.pdfv = (doc.pdfv || 0) + 1;
+  // the new page's answer spaces
+  busy(true, `Finding answer spaces on page ${p + 1}…`);
+  const old = doc.pages[p], fresh = await detectPage(p, null);
+  fresh.regions.forEach(r => { r.id = `${p}:d${rid8()}`; });
+  const v = views[p];
+  if (v && v.live) { if (document.activeElement && v.el.contains(document.activeElement)) document.activeElement.blur(); hideFlagFloat(); hideHandles(); if (sel && sel.p === p) { sel = null; updateSelTools(); } unmountPage(p); }
+  let lost = 0;
+  for (const o of old.regions) {
+    const t = doc.text[o.id]; delete doc.text[o.id]; delete doc.fit[o.id]; emit("text:" + o.id);
+    if (doc.flags && doc.flags[o.id]) { delete doc.flags[o.id]; emit("flag:" + o.id); }
+    if (!t || !keep) continue;
+    let best = null, bo = 0;
+    for (const n of fresh.regions) { const ov = Math.max(0, Math.min(o.x1, n.x1) - Math.max(o.x0, n.x0)) * Math.max(0, Math.min(o.y1, n.y1) - Math.max(o.y0, n.y0)); if (ov > bo) { bo = ov; best = n; } }
+    if (best) { doc.text[best.id] = (doc.text[best.id] ? doc.text[best.id] + "\n" : "") + t; emit("text:" + best.id); } else lost++;
+  }
+  // linked spaces that ran on to or from the old page start afresh
+  for (const P of doc.pages) for (const r of (P && P.regions) || []) { if (r.next && r.next.startsWith(p + ":")) delete r.next; if (r.prev && r.prev.startsWith(p + ":")) delete r.prev; }
+  if (!keep) { const gone = doc.strokes[p] || []; doc.strokes[p] = []; gone.forEach(s => emit(`s:${p}:${s.id}`)); }
+  doc.pages[p] = fresh;
+  if (doc.smx && doc.smx.pages && doc.smx.pages[p] && doc.smx.pages[p].role !== "q") doc.smx.pages[p] = { role: "q", type: doc.smx.pages[p].type || "", sec: null };
+  await findQuestions().catch(e => console.warn("questions", e));
+  linkContinuations();
+  dropBitmap(p);
+  if (v && (v.visible || Math.abs(p - currentPage()) <= LIVE_AROUND)) mountPage(p); else layoutPage(p);
+  if (v && v.visible) renderPage(p);
+  doc.pages.forEach((P, q) => { if (q !== p && views[q] && views[q].live) layoutPage(q); });
+  updateCount(); renderFlags(); emit("pdf"); pageChanged(p);
+  if (window.Sync && Sync.user && !doc.shared) Sync.uploadPdf(doc, true);
+  if (window.Marking) Marking.refresh();
+  busy(false);
+  toast(`Page ${p + 1} replaced: ${fresh.regions.length} answer space${fresh.regions.length === 1 ? "" : "s"} on it.` + (lost ? ` ${lost} typed answer${lost === 1 ? "" : "s"} had nowhere to go and ${lost === 1 ? "was" : "were"} removed.` : ""), 5000);
+}
+function rebuildPageFields(p) { $$(".ans,.ansshape,.choice", views[p].el).forEach(e => e.remove()); if (views[p].live) doc.pages[p].regions.forEach(r => makeField(p, r)); layoutPage(p); doc.pages[p].regions.forEach(r => queueFit(p, r)); updateCount(); }
+function rebuildField(p, r) { if (r._el) { r._el.remove(); r._el = null; } if (r._shape) { r._shape.remove(); r._shape = null; } if (views[p] && views[p].live) makeField(p, r); delete doc.fit[r.id]; layoutPage(p); queueFit(p, r); updateSelTools(); scheduleSave(); }
 function deleteSel() {
   if (sel && sel.q) { const { p, r } = sel, P = doc.pages[p]; P.qs = (P.qs || []).filter(m => m !== r); sel = null; updateSelTools(); pageChanged(p); doc.pages.forEach((P2, q) => drawBoxes(q)); return; }
   if (!sel) return; const { p, r } = sel; const P = doc.pages[p];
@@ -2049,7 +2224,7 @@ $("#pages").addEventListener("pointerdown", e => {
     const y0 = src(p, Math.min(p0[1], q[1])), y1 = src(p, Math.max(p0[1], q[1]));
     if (newKind === "lines") { r.sp = Math.min(pageSpacing(p), h); r.indent = 0; }
     setRegionRect(p, r, Math.min(p0[0], q[0]), y0, Math.max(p0[0], q[0]), y1);
-    doc.pages[p].regions.push(r); makeField(p, r); sel = { p, r }; updateSelTools(); layoutPage(p); updateCount(); pageChanged(p);
+    doc.pages[p].regions.push(r); mountPage(p); if (!r._el) makeField(p, r); sel = { p, r }; updateSelTools(); layoutPage(p); updateCount(); pageChanged(p);
   };
   window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
 });
@@ -2317,7 +2492,7 @@ $("#flagsBtn").onclick = e => {
   for (const x of rows) {
     const b = document.createElement("button"); const t = (doc.text[x.r.id] || "").trim();
     b.innerHTML = `<span>${qName(x.q)}${x.r.label && x.r.label !== "label" ? " · " + x.r.label.replace(/[.\s]+$/, "") : ""}</span><small>page ${x.p + 1}${t ? " · " + t.slice(0, 40).replace(/</g, "&lt;") : " · not answered"}</small>`;
-    b.onclick = () => { pop.hidden = true; const ta = x.r._el; ta.scrollIntoView({ block: "center", behavior: "smooth" }); ta.focus({ preventScroll: true }); };
+    b.onclick = () => { pop.hidden = true; const ta = elFor(x.r); ta.scrollIntoView({ block: "center", behavior: "smooth" }); ta.focus({ preventScroll: true }); };
     pop.appendChild(b);
   }
   const r = e.currentTarget.getBoundingClientRect(); pop.style.top = r.bottom + 6 + "px"; pop.style.left = Math.max(8, Math.min(window.innerWidth - 300, r.left - 120)) + "px"; pop.hidden = false;
@@ -2362,7 +2537,7 @@ function questionMap() {
   return list;
 }
 function flashRegions(list) {
-  for (const [, r] of list) { const ta = r._el; if (!ta) continue; ta.classList.remove("jumpflash"); void ta.offsetWidth; ta.classList.add("jumpflash"); setTimeout(() => ta.classList.remove("jumpflash"), 1600); }
+  for (const [, r] of list) { const ta = elFor(r); if (!ta) continue; ta.classList.remove("jumpflash"); void ta.offsetWidth; ta.classList.add("jumpflash"); setTimeout(() => ta.classList.remove("jumpflash"), 1600); }
 }
 // scroll so a point on a page sits near the top of the screen (glides when it's close by)
 function scrollToPoint(p, y, frac = 0.18) {
@@ -2380,7 +2555,7 @@ function goToQuestion(e) {
   const mk = e.m && $(`.qmark[data-qid="${e.m.id}"]`); if (mk) { mk.classList.remove("flash"); void mk.offsetWidth; mk.classList.add("flash"); }
   const typed = e.regions.filter(([, r]) => r.kind !== "choice");
   const first = typed.find(([, r]) => !(doc.text[r.id] || "").trim()) || typed[0];
-  if (first && canFocusOnJump()) { const ta = first[1]._el; ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
+  if (first && canFocusOnJump()) { const ta = elFor(first[1]); ta.focus({ preventScroll: true }); const L = ta.value.length; ta.setSelectionRange(L, L); }
   lastJump = e.label;
 }
 function goToPage(n) {
@@ -2466,7 +2641,7 @@ function nextEmpty() {
     const u = U.unitOf(r.id); if (!u || U.done(u) || (u.choice && u.ids[0] !== r.id)) continue;
     const wrapped = from + k >= all.length;
     { const host = $("#pages"), t = readableScroll(p, r); if (Math.abs(t - host.scrollTop) < host.clientHeight * 6) glideTo(host, t); else host.scrollTop = t; } flashRegions([[p, r]]);
-    if (canFocusOnJump() && r.kind !== "choice") { r._el.focus({ preventScroll: true }); }
+    if (canFocusOnJump() && r.kind !== "choice") { elFor(r).focus({ preventScroll: true }); }
     const lab = labelAt(labelIndex(), p, r.y0 + 6);
     toast((lab !== "?" ? `${qName(lab)} · ` : "") + `page ${p + 1}` + (wrapped ? " (back to the start)" : ""), 1600);
     return;

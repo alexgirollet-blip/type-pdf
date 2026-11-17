@@ -235,8 +235,19 @@ export async function mark(env, settings, b) {
 // ---- the chat on a marked paper ----
 export async function chat(env, settings, b) {
   const ctx = String(b.context || "").slice(0, 120000);
-  const system = `You are a friendly, precise tutor helping a student understand how their exam paper was marked and how to improve. Be concise (a few sentences or short steps), use the exam board's language, and be honest about mistakes. Use plain text with simple maths notation.\n\nThe paper, the student's answers and the marking:\n${ctx}`;
+  const system = b.mode === "help"
+    // Ask while working: the question the student is on, plus an index of the whole paper (and search results for
+    // the words in their question) so "which page is the electric fields question on?" can be answered
+    ? `You are a friendly, precise study helper inside TypePDF, where a student is working through an exam paper right now. Help with what they ask: explain ideas, give hints, check their working, or find things in the paper. For a question they're answering, give a hint or the next step first rather than the full answer, unless they ask for the answer. When you mention where something is, say "page N" (and the question number), so they can tap it to go there. Be concise (a few sentences or short steps), use the exam board's language, plain text, simple maths notation.\n\n${ctx}`
+    : `You are a friendly, precise tutor helping a student understand how their exam paper was marked and how to improve. Be concise (a few sentences or short steps), use the exam board's language, and be honest about mistakes. Use plain text with simple maths notation.\n\nThe paper, the student's answers and the marking:\n${ctx}`;
   const msgs = (Array.isArray(b.messages) ? b.messages : []).slice(-16).map(m => ({ role: m.role === "assistant" ? "assistant" : "user", text: String(m.text || "").slice(0, 8000) })).filter(m => m.text);
   if (!msgs.length || msgs[msgs.length - 1].role !== "user") throw err(400, "Ask a question first.");
-  return run(env, settings, system, msgs, { maxTokens: 1500, deadline: Date.now() + 90000 });
+  // a picture of what's on screen (the question, a diagram, their handwriting) goes with the latest question
+  if (typeof b.image === "string" && /^[A-Za-z0-9+/=]+$/.test(b.image.slice(0, 200)) && b.image.length < 1400000) msgs[msgs.length - 1].images = [{ mime: "image/jpeg", data: b.image }];
+  try { return await run(env, settings, system, msgs, { maxTokens: 1500, deadline: Date.now() + 90000 }); }
+  catch (e) {
+    if (!msgs[msgs.length - 1].images) throw e;
+    delete msgs[msgs.length - 1].images;                 // no provider up that takes images: ask without the picture
+    return run(env, settings, system, msgs, { maxTokens: 1500, deadline: Date.now() + 60000 });
+  }
 }

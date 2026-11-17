@@ -133,12 +133,12 @@ const Marking = window.Marking = (() => {
     const norm = s => s.toLowerCase().replace(/\s+/g, " ");
     let seen = 0;
     for (const R of rects) {
-      if (!R.r || R.r.kind === "choice" || !R.r._el) continue;
-      const ta = R.r._el, t = ta.value || doc.text[R.r.id] || "";
+      if (!R.r || R.r.kind === "choice") continue;
+      const t = (R.r._el && R.r._el.value) || doc.text[R.r.id] || "";
       // exact, then ignoring case and runs of spaces (same length either way, so the index still fits the text)
       for (const [hay, ndl] of [[t, want], [norm(t), norm(want)]]) {
         let i = -1, n = 0;
-        while ((i = hay.indexOf(ndl, i + 1)) >= 0) { n++; if (seen + n === occ) return lineSegs(R, ta, i, i + ndl.length); }
+        while ((i = hay.indexOf(ndl, i + 1)) >= 0) { n++; if (seen + n === occ) return withField(R.p, R.r, ta => lineSegs(R, ta, i, i + ndl.length)); }
         if (n) { seen += n; break; }
       }
     }
@@ -258,11 +258,13 @@ const Marking = window.Marking = (() => {
     for (const r of P.regions || []) {
       const Q = regionRect(p, r);
       if (r.kind === "choice") { set(Q.x0 - 1, Q.y0 - 1, Q.x1 + 1, Q.y1 + 1); continue; }
-      const ta = r._el, t = (ta && ta.value) || doc.text[r.id] || ""; if (!t.trim() || !ta) continue;
+      const t = (r._el && r._el.value) || doc.text[r.id] || ""; if (!t.trim()) continue;
       try {
-        const z = zoom, s0 = caretRect(ta, 0), e0 = caretRect(ta, t.length), lh = (s0.h || 12 * z) / z, y0 = s0.y / z, ye = e0.y / z;
-        if (Math.abs(ye - y0) < lh * 0.5) set(s0.x / z - 2, y0, e0.x / z + 3, ye + lh);
-        else { set(Q.x0, y0, Q.x1, ye); set(Q.x0, ye, e0.x / z + 3, ye + lh); }
+        withField(p, r, ta => {
+          const z = zoom, s0 = caretRect(ta, 0), e0 = caretRect(ta, t.length), lh = (s0.h || 12 * z) / z, y0 = s0.y / z, ye = e0.y / z;
+          if (Math.abs(ye - y0) < lh * 0.5) set(s0.x / z - 2, y0, e0.x / z + 3, ye + lh);
+          else { set(Q.x0, y0, Q.x1, ye); set(Q.x0, ye, e0.x / z + 3, ye + lh); }
+        });
       } catch (e) { set(Q.x0, Q.y0, Q.x1, Q.y1); }
     }
     // pen strokes (not highlighter)
@@ -465,8 +467,8 @@ const Marking = window.Marking = (() => {
       const { pt, i, rects, col } = L;
       // at the end of what you wrote (or the start of the answer if you wrote nothing there)
       let p = rects[0].p, ax = rects[0].x1 - 10, ay = rects[0].y0 + 8;
-      const typed = rects.filter(R => R.r && R.r._el && R.r.kind !== "choice" && (R.r._el.value || "").trim()).pop();
-      if (typed) { try { const e = caretRect(typed.r._el, typed.r._el.value.length); p = typed.p; ax = e.x / zoom + 4; ay = e.y / zoom + e.h / zoom / 2; } catch (er) {} }
+      const typed = rects.filter(R => R.r && R.r.kind !== "choice" && ((R.r._el && R.r._el.value) || doc.text[R.r.id] || "").trim()).pop();
+      if (typed) { try { const e = withField(typed.p, typed.r, ta => caretRect(ta, ta.value.length)); p = typed.p; ax = e.x / zoom + 4; ay = e.y / zoom + e.h / zoom / 2; } catch (er) {} }
       note(p, "c:" + i, ax, ay, trivial(pt, pt.comment) ? "" : pt.comment, pt.correction, col, { yMax: nextPart(p, ay), dyMax: 160 }, pt.q);
     }
     // notes that had no room by their answer: numbered there, and written out together in clear space on the page
