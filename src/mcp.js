@@ -7,6 +7,8 @@
 //   get_page                  a picture of any page of the paper, with what you wrote on it
 //   get_marking               the marking already on the paper (to talk it through)
 //   submit_marking            send the marking: it appears on the paper in TypePDF straight away
+//   add_paper                 add a PDF to your papers (from a link, e.g. a Girolibrary PDF, or as base64)
+//   get_paper_pdf             a paper's original PDF (base64), e.g. to put it in Girolibrary
 // The link holds a secret: anyone with it can read your papers' answers and mark them, so it can be reset.
 
 const TOOLS = [
@@ -15,8 +17,10 @@ const TOOLS = [
   { name: "get_page", description: "A picture of one page of the paper (1-based), with the user's handwriting on it. Typed answers are in the answers JSON instead.", inputSchema: { type: "object", properties: { paperId: { type: "string" }, page: { type: "integer" } }, required: ["page"] } },
   { name: "get_marking", description: "The marking currently on a paper (TypePDF marking JSON), to discuss it or improve it.", inputSchema: { type: "object", properties: { paperId: { type: "string" } } } },
   { name: "submit_marking", description: "Send the finished marking (TypePDF marking JSON, as described in the instructions from get_paper_for_marking). It appears on the paper in TypePDF straight away, like a teacher's red pen. Check every id comes from the answers JSON.", inputSchema: { type: "object", properties: { paperId: { type: "string" }, marking: { description: "The marking: a JSON object (or a string of JSON) with format, version, summary and parts.", oneOf: [{ type: "object" }, { type: "string" }] } }, required: ["marking"] } },
+  { name: "add_paper", description: "Add a PDF to the user's TypePDF papers so they can answer it: from a web address (e.g. a Girolibrary PDF's direct link from the Girolibrary connector's get_view_link, or any public PDF) or as base64. It appears in their papers on every device; answer spaces are found when they open it. Returns a link that opens it.", inputSchema: { type: "object", properties: { url: { type: "string", description: "Address of the PDF" }, content_base64: { type: "string", description: "Or the PDF itself, base64" }, name: { type: "string", description: "Paper name, e.g. \"AQA Physics Paper 1 2019\"" } } } },
+  { name: "get_paper_pdf", description: "The original (blank) PDF of one of the user's papers, base64 (up to 8 MB), e.g. to add it to Girolibrary with that connector's add_file.", inputSchema: { type: "object", properties: { paperId: { type: "string" } }, required: ["paperId"] } },
 ];
-const INSTRUCTIONS = "TypePDF is where the user answers exam papers. To mark one: get_paper_for_marking (latest prepared paper if no id), read the instructions it returns, use get_page for the pages you need to see, mark strictly against the exam board's standard, then submit_marking. Tell the user their score and the main points briefly once it's sent.";
+const INSTRUCTIONS = "TypePDF is where the user answers exam papers. To mark one: get_paper_for_marking (latest prepared paper if no id), read the instructions it returns, use get_page for the pages you need to see, mark strictly against the exam board's standard, then submit_marking. Tell the user their score and the main points briefly once it's sent. To give the user a new paper to answer, use add_paper (a PDF link or base64); Girolibrary PDFs work by passing the direct link from the Girolibrary connector's get_view_link.";
 
 const rpc = (id, result) => ({ jsonrpc: "2.0", id, result });
 const rpcErr = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
@@ -95,6 +99,31 @@ async function tool(name, a, io) {
     await io.submit(doc, mk, "Claude (connector)");
     const s = mk.summary || {};
     return [text(`Sent to TypePDF${s.score != null ? `: ${s.score}/${s.outOf}${s.grade ? ", grade " + s.grade : ""}` : ""}. The marks are on the paper now (or will be the next time it's opened). ${mk.parts.length} part(s) marked.`)];
+  }
+  if (name === "add_paper") {
+    let buf, name0 = a.name;
+    if (a.content_base64) {
+      try { buf = Uint8Array.from(atob(String(a.content_base64).replace(/\s+/g, "")), c => c.charCodeAt(0)).buffer; } catch { throw new Error("content_base64 isn't valid base64."); }
+    } else if (a.url) {
+      let u; try { u = new URL(a.url); } catch { throw new Error("That address isn't valid."); }
+      if (!/^https?:$/.test(u.protocol)) throw new Error("Only http and https addresses work.");
+      const r = await fetch(u.toString(), { redirect: "follow", headers: { "user-agent": "type-pdf/1.0" } });
+      if (!r.ok) throw new Error(`The site answered ${r.status}.`);
+      buf = await r.arrayBuffer();
+      if (!name0) {
+        const cd = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(r.headers.get("content-disposition") || "");
+        name0 = cd ? decodeURIComponent(cd[1]) : decodeURIComponent(u.pathname.split("/").pop() || "");
+      }
+    } else throw new Error("Give url or content_base64.");
+    const p = await io.addPaper(buf, name0);
+    const link = `${io.origin}/#paper=${p.id}`;
+    return [text(p.existed ? `"${p.name}" is already in their papers${p.restored ? " (brought back from the bin)" : ""} (id ${p.id}). Open it: ${link}` : `Added "${p.name}" to their TypePDF papers (id ${p.id}). Open it: ${link}`)];
+  }
+  if (name === "get_paper_pdf") {
+    const { bytes, name: nm } = await io.paperPdf(String(a.paperId || ""));
+    if (bytes.byteLength > 8 * 1024 * 1024) throw new Error(`That PDF is ${(bytes.byteLength / 1048576).toFixed(1)} MB; get_paper_pdf returns up to 8 MB.`);
+    const u8 = new Uint8Array(bytes); let bin = ""; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+    return [text(JSON.stringify({ paperId: a.paperId, filename: nm.replace(/\.pdf$/i, "") + ".pdf", size: bytes.byteLength, content_base64: btoa(bin) }))];
   }
   throw new Error("Unknown tool " + name);
 }

@@ -115,7 +115,7 @@ async function openLink(url, title) {
     else { try { res = await fetch(url); } catch (e) { busy(false); toast("That site doesn't allow direct downloads. Sign in to open PDFs from links, or download it and drop it here.", 6000); return; } }
     if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.error || "the link didn't work (" + res.status + ")"); }
     const buf = await res.arrayBuffer();
-    let name = decodeURIComponent(res.headers.get("x-file-name") || url.split("/").pop() || "paper.pdf");
+    let name = decodeURIComponent(res.headers.get("x-file-name") || (title ? String(title).replace(/\.pdf$/i, "") + ".pdf" : "") || url.split("?")[0].split("/").pop() || "paper.pdf");
     busy(false);
     await openFile(new File([buf], name, { type: "application/pdf" }));
   } catch (e) { busy(false); toast("Couldn't open that link: " + (e.message || e), 5000); }
