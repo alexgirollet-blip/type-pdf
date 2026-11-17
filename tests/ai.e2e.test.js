@@ -127,6 +127,23 @@ const mcp = async (url, method, params, id = 1) => (await (await fetch(url, { me
     const junk = await fetch(dropUrl, { method: "POST", body: "not json" });
     ok(junk.status === 400, "junk sent to a drop link is refused", junk.status);
 
+    console.log("Replace page: the paper's PDF is swapped in the account");
+    {
+      const put = (buf, q) => { const h = crypto.createHash("sha256").update(buf).digest("hex").slice(0, 24); return fetch(BASE + `/api/pdf/${h}?doc=abcdef0123456789&name=Rep${q || ""}`, { method: "PUT", body: buf, headers: { authorization: "Bearer " + token, "content-type": "application/pdf" } }).then(r => ({ h, status: r.status })); };
+      const get = h => fetch(BASE + "/api/pdf/" + h, { headers: { authorization: "Bearer " + token } }).then(r => r.status);
+      const a = await put(Buffer.from("%PDF-1.4 first version " + Date.now())), b2 = await put(Buffer.from("%PDF-1.4 second version " + Date.now()), "&replace=1");
+      const docs = await authed("/api/docs"), d = (docs.docs || docs).find(x => x.id === "abcdef0123456789");
+      ok(a.status === 200 && b2.status === 200 && d && d.pdf === b2.h, "the paper now points at the new PDF", { a, b2, d });
+      ok((await get(b2.h)) === 200 && (await get(a.h)) === 404, "the old PDF is freed (nothing else uses it)", null);
+      const c = await put(Buffer.from("%PDF-1.4 not a replacement " + Date.now()));
+      const d2 = ((await authed("/api/docs")).docs || []).find(x => x.id === "abcdef0123456789");
+      ok(d2 && d2.pdf === b2.h, "an ordinary upload never changes a paper's PDF", d2);
+    }
+    console.log("Ask while working");
+    {
+      const r = await authed("/api/ai/chat", { method: "POST", body: JSON.stringify({ mode: "help", context: "WHERE THE STUDENT IS NOW: page 2", image: Buffer.from("not really a jpeg").toString("base64"), messages: [{ role: "user", text: "give me a hint" }] }) });
+      ok(r.text && seen[seen.length - 1].images > 0, "a question with a picture is answered", { r, last: seen[seen.length - 1] });
+    }
     console.log("Limits");
     const notAdmin = (await fetch(BASE + "/api/auth/hub-callback?hubpass=" + hubPass("student@example.com", false), { redirect: "manual" })).headers.get("location").split("#signin=")[1];
     const st2 = await (await fetch(BASE + "/api/ai/providers", { headers: { authorization: "Bearer " + notAdmin } })).json();
