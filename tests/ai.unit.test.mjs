@@ -90,6 +90,11 @@ console.log("Groq (and marking with images)");
 r = await AI.run({}, only("groq"), "x", [{ role: "user", text: "mark", images: [{ mime: "image/jpeg", data: "AAAA" }] }], { json: true, maxTokens: 2000, deadline: Date.now() + 60000, test: true, check: t => AI.checkMarking(AI.pullJSON(t), { paperId: "p1" }) });
 ok(r.result && r.result.parts && r.result.paperId === "p1", "JSON mode is dropped when the model can't combine it with images, and the reply still parses", r);
 
+console.log("Ask while working (help mode, with a picture)");
+r = await AI.chat({}, only("groq"), { mode: "help", context: "WHERE THE STUDENT IS NOW: page 3", image: "AAAA", messages: [{ role: "user", text: "hint please" }] });
+const gq = calls.filter(c => c.url.includes("api.groq.com/openai/v1/chat")).pop();
+ok(r.result === "OK" && JSON.stringify(gq.body.messages).includes("image_url") && /study helper/.test(JSON.stringify(gq.body.messages[0])), "the question goes with the picture and the helper's instructions", gq && gq.body.messages.map(m => m.role));
+
 console.log("Everything down");
 const none = { ...only("gemini"), gemini: { key: "k", models: "gemini-3.1-pro-preview" } };
 try { await ask(none); ok(false, "should have failed"); } catch (e) { ok(e.tried && e.tried.length >= 1 && /429/.test(JSON.stringify(e.tried)), "when nothing works: a clear list of what each model said", e.tried); }

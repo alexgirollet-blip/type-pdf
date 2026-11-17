@@ -95,9 +95,9 @@ window.Sync = (() => {
   };
   function fetchPdf(url, name) { return api("/api/fetch-pdf?url=" + encodeURIComponent(url) + (name ? "&name=" + encodeURIComponent(name) : "")); }
   async function apiGet(path) { return jsonOrThrow(await api(path)); }
-  async function uploadPdf(d) {
+  async function uploadPdf(d, replace) {
     try {
-      const r = await api(`/api/pdf/${d.pdf || d.id}?doc=${d.id}&name=${encodeURIComponent(d.name)}`, { method: "PUT", body: d.bytes.slice(0), headers: { "content-type": "application/pdf" } });
+      const r = await api(`/api/pdf/${d.pdf || d.id}?doc=${d.id}&name=${encodeURIComponent(d.name)}${replace ? "&replace=1" : ""}`, { method: "PUT", body: d.bytes.slice(0), headers: { "content-type": "application/pdf" } });
       if (!r.ok) { const j = await r.json().catch(() => ({})); toast("This paper's PDF couldn't be stored in your account: " + (j.error || r.status), 6000); }
     } catch (e) { /* retried next time the paper is opened */ }
   }
@@ -111,6 +111,7 @@ window.Sync = (() => {
     if (k === "aiexport") return doc.aiExport ? JSON.stringify(doc.aiExport) : null;
     if (k === "marking") return doc.marking ? JSON.stringify(doc.marking) : null;
     if (k === "markingPrev") return doc.markingPrev ? JSON.stringify(doc.markingPrev) : null;
+    if (k === "pdf") return doc.pdfv ? JSON.stringify(doc.pdf) : null;
     if (k.startsWith("inbox:")) { const v = doc.inbox && doc.inbox[k.slice(6)]; return v ? JSON.stringify(v) : null; }
     if (k.startsWith("flag:")) return doc.flags && doc.flags[k.slice(5)] ? JSON.stringify(doc.flags[k.slice(5)]) : null;
     let m;
@@ -122,6 +123,7 @@ window.Sync = (() => {
   function allKeys() {
     const ks = ["meta"]; if (doc.timer) ks.push("timer"); if (doc.font) ks.push("font"); if (doc.style) ks.push("style");
     for (const id of Object.keys(doc.inbox || {})) ks.push("inbox:" + id);
+    if (doc.pdfv) ks.push("pdf");
     if (doc.aiExport) ks.push("aiexport"); if (doc.marking) ks.push("marking"); if (doc.markingPrev) ks.push("markingPrev");
     for (const k of Object.keys(doc.flags || {})) ks.push("flag:" + k);
     doc.pages.forEach((P, p) => { if (P && P.regions) ks.push("page:" + p); });
@@ -143,6 +145,7 @@ window.Sync = (() => {
     if (k === "aiexport") { doc.aiExport = v || null; return; }
     if (k === "marking") { doc.marking = v || null; if (S.live && window.Marking) Marking.refresh(); return; }
     if (k === "markingPrev") { doc.markingPrev = v || null; return; }
+    if (k === "pdf") { if (v && v !== doc.pdf) { doc.pdfNew = v; doc.pdfv = 1; if (S.live && window.pdfReplaced) pdfReplaced(); } return; }
     if (k.startsWith("inbox:")) { doc.inbox ||= {}; if (v) doc.inbox[k.slice(6)] = v; else delete doc.inbox[k.slice(6)]; if (S.live && v && window.AIMark) setTimeout(() => AIMark.fromInbox(), 50); return; }
     if (k.startsWith("flag:")) { const id = k.slice(5); doc.flags ||= {}; if (v) doc.flags[id] = v; else delete doc.flags[id]; if (S.live) { const p = +id.split(":")[0]; layoutPage(p); renderFlags(); } return; }
     if ((m = k.match(/^page:(\d+)$/))) {
@@ -284,7 +287,7 @@ window.Sync = (() => {
   function flashLive() { const pill = $("#syncPill"); if (!pill) return; pill.classList.remove("flash"); void pill.offsetWidth; pill.classList.add("flash"); }
 
   return {
-    init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, apiGet, api, openAuth, signIn, refreshInfo, admin, share, focus,
+    uploadPdf, init, wireDialogs, attach, detach, live, changed, listDocs, deleteDoc, patchDoc, createDoc, saveFolders, getPdf, fetchPdf, apiGet, api, openAuth, signIn, refreshInfo, admin, share, focus,
     get user() { return S.user; }, get info() { return S.info; }, get people() { return S.people; }, get sid() { return S.sid; },
   };
 })();

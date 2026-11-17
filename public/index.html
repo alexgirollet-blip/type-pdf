@@ -159,6 +159,8 @@
     <select id="ansLookSel" class="fontsel" aria-label="Answer style" title="Make typed answers stand out: a highlight behind them, bold, or a tinted box"></select>
     <span class="grow"></span>
     <button id="jumpBtn" title="Jump to a question or page, or the next empty answer (G)">Go to…</button>
+    <button id="findBtn" title="Find words anywhere in the paper or your answers (⌘/Ctrl+F)">🔍 Find</button>
+    <button id="askBtn" title="Ask the AI while you work: hints, checking your working, or where something is in the paper. The question you're on goes with what you ask.">✨ Ask</button>
     <button id="flagsBtn" title="Flagged answer spaces">⚑ Flags</button>
     <button class="timer" id="timerBtn" title="Timer">⏱ <span id="timerTxt">Timer</span></button>
     <span class="count" id="count" title="Answer spaces with something typed in them"></span>
@@ -185,6 +187,7 @@
       <button id="delBtn" class="danger">Delete space</button>
     </span>
     <button id="redetect">Re-detect this page</button>
+    <button id="replaceBtn" title="Swap one page of this paper for a page from another PDF (e.g. a clearer scan, or a corrected page)">Replace page…</button>
     <button id="doneBoxes" class="primary">Done</button>
   </div>
 
@@ -204,6 +207,21 @@
     <button type="button" id="nextBtn" title="The next answer space with nothing written in it yet (N)">Next empty answer ↓</button>
     <div class="jumplist" id="jumpList"></div>
     <div class="jumpkey"><i class="done"></i> answered <i class="part"></i> started <i></i> not yet <i class="flag"></i> flagged</div>
+  </div>
+  <div class="pop findpop" id="findPop" hidden>
+    <div class="row"><input id="findIn" type="search" placeholder="Find in the paper…" aria-label="Find in the paper" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+      <span id="findCount" class="fcount" aria-live="polite"></span>
+      <button type="button" id="findPrev" title="Previous (Shift+Enter)" aria-label="Previous match">↑</button><button type="button" id="findNext" title="Next (Enter)" aria-label="Next match">↓</button><button type="button" id="findClose" title="Close (Esc)" aria-label="Close">✕</button></div>
+    <div class="findlist" id="findList"></div>
+  </div>
+  <div class="pop askpop" id="askPop" hidden>
+    <div class="row askhead"><b>✨ Ask while you work</b><span class="grow"></span><button type="button" id="askClose" aria-label="Close" title="Close (Esc)">✕</button></div>
+    <div class="mkchatlog asklog" id="askLog" aria-live="polite"></div>
+    <form id="askForm" class="row">
+      <textarea id="askIn" rows="2" placeholder="Ask about this question, or where something is in the paper…" aria-label="Ask the AI"></textarea>
+      <button type="submit" class="primary">Ask</button>
+    </form>
+    <label class="chk small"><input type="checkbox" id="askPic" checked> Send a picture of the question I'm on (with my handwriting)</label>
   </div>
   <div class="pages" id="pages"></div>
   <button class="flagfloat" id="flagFloat" hidden>⚑ Flag</button>
@@ -299,6 +317,18 @@
   <div class="row"><button type="button" class="primary" id="markGo">Import</button><button type="button" id="markClose">Close</button></div>
 </dialog>
 
+<dialog id="replDlg" class="dlg">
+  <h2>Replace a page</h2>
+  <p class="note">Swap one page of this paper for a page from another PDF: a clearer scan, a corrected page, or the right page where the wrong one was printed.</p>
+  <label>Page of this paper to replace <input type="number" id="replAt" min="1" value="1"></label>
+  <div class="row wrap"><label class="filebtn primary">Choose a PDF…<input type="file" id="replFile" accept="application/pdf,.pdf" hidden></label><span id="replName" class="note"></span></div>
+  <label id="replPick" hidden>Use page <input type="number" id="replK" min="1" value="1"> <span id="replOf" class="note"></span></label>
+  <canvas id="replPrev" class="replprev" hidden></canvas>
+  <label class="chk"><input type="checkbox" id="replKeep" checked> <span>Keep what I've written and drawn on this page (typed answers move to the new page's answer spaces where they line up)</span></label>
+  <p class="err" id="replErr"></p>
+  <div class="row"><button type="button" class="primary" id="replGo" disabled>Replace</button><button type="button" id="replCancel">Cancel</button></div>
+</dialog>
+
 <dialog id="nameDlg" class="dlg">
   <form id="nameForm">
     <h2 id="nameTitle">Name</h2>
@@ -336,6 +366,8 @@
 <script src="questions.js"></script>
 <script src="shapes.js"></script>
 <script src="app.js"></script>
+<script src="find.js"></script>
+<script src="ask.js"></script>
 <script src="geom.js"></script>
 <script src="aiexport.js"></script>
 <script src="marking.js"></script>
